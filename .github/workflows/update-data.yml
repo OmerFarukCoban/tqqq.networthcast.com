@@ -54,7 +54,7 @@ jobs:
       # yfinance is an unofficial endpoint that rate-limits shared CI IPs, and
       # nine runs a day each pull period="max" for ~10 tickers. One retry turns
       # a transient 429 into a slightly later refresh instead of a failed run.
-      - name: Refresh QQQ / TQQQ / SPY
+      - name: Refresh ETF market data
         if: steps.gate.outputs.run == 'true'
         run: python3 update_data.py || (sleep 120 && python3 update_data.py)
 

@@ -2,6 +2,8 @@
 
 const SLIDER_IDS = ['slider-initial','slider-monthly','slider-raise','slider-rate','slider-entry','slider-exit','entry-exact-date','exit-exact-date','select-bh-underlying','select-sma-asset','select-sma-window','select-sma-underlying','select-9sig-underlying','select-9sig-growth','select-9sig-crashdrop','select-9sig-crashwin','select-9sig-spike','select-9sig-period','select-9sig-cash','select-9sig-cashrate','select-9sig-buypower','select-9sig-deploy','select-9sig-target-compound','select-9sig-park-asset','select-9sig-rebalance-point','select-9sig-spike-target','select-9sig-cost','select-sma-cashrate','select-sma-entry-buf','select-sma-exit-buf','select-sma-rsi-oh','select-sma-rsi-oh-window','select-sma-rsi-cool','select-sma-rsi-cool-window','select-sma-confirm-buy','select-sma-confirm-sell','select-sma-settle','select-sma-out-asset','select-sma-dca-in','select-sma-dca-to-out','select-sma-bg-gtfo','select-sma-bg-asset','select-sma-bg-window','select-sma-cost'];
 const LS_KEY = '9sig-sliders';
+// Tax is a global scenario, shared by all native strategies and previews.
+SLIDER_IDS.push('tax-enabled', 'tax-fx', 'tax-ppi-growth');
 // Bump APP_VERSION whenever a backwards-incompatible change ships (a control
 // id is renamed, a default flips, a strategy is dropped). On mismatch we
 // reveal a "new version — reset saved data" button in the header instead of
@@ -717,6 +719,9 @@ async function shareConfig() {
   params.set('r', String(sliderToRate(+get('slider-rate').value)));
   params.set('e', get('slider-entry').value);
   params.set('x', get('slider-exit').value);
+  params.set('trtax', get('tax-enabled').value);
+  params.set('trfx', get('tax-fx').value);
+  params.set('trppi', get('tax-ppi-growth').value);
   // Exact-day entry/exit override (calendar picker) — only present when set,
   // so an untouched link is byte-identical to before this feature existed.
   if (get('entry-exact-date') && get('entry-exact-date').value) params.set('ed', get('entry-exact-date').value);
@@ -913,5 +918,3 @@ async function shareConfig() {
     prompt('Copy this link:', url);
   });
 }
-
-

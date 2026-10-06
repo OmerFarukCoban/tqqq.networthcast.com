@@ -309,7 +309,7 @@ function slCurveFromLog(log, quarters) {
 
 // Evaluate a library strategy's code and run it over [si, ei] at its defaults.
 function slRunCode(code, data, si, ei) {
-  const mod = new Function('"use strict"; return (' + code + '\n);')();
+  const mod = new Function('"use strict"; return (' + effectiveTaxStrategyCode(code) + '\n);')();
   const entryDate = data.dates[si], exitDate = data.dates[ei];
   // p.contributions is what every CODE[n] entry actually reads for its
   // monthly cash (js/strategy-library-code.js, rewritten this session to
@@ -323,7 +323,7 @@ function slRunCode(code, data, si, ei) {
   const contributions = buildCustomContributions(SL_MONTHLY, 0, entryDate, exitDate, null);
   const p = {
     initial: SL_START_CAPITAL, monthly: SL_MONTHLY, annualRaise: 0,
-    startIdx: si, endIdx: ei, entryDate, exitDate, contributions,
+    startIdx: si, endIdx: ei, entryDate, exitDate, contributions, tax: readTaxSettings(),
   };
   for (const sp of (mod.params || [])) {
     let v = sp.default;
@@ -381,7 +381,7 @@ function slRunPreset(preset, si, ei) {
     // Driven by the same sampleQuarterly flag set above, not by whether
     // samplePoints happens to be non-empty (see js/chart.js's pick()).
     const rows = opts.sampleQuarterly ? r.samplePoints : (r.log || []);
-    const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq' };
+    const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'udow', 9: 'eurl', 10: 'spxs' };
     return {
       points: rows.map(l => ({ date: l.date, value: l.total != null ? l.total : l.value })),
       ddControls: (r.log || []).map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash })),
@@ -682,11 +682,12 @@ function buildStrategyCards(list) {
     const eras = eraTableHtml(m);
     // data-sl-search: everything the search box matches against.
     const hay = esc([s.name, s.tag, s.needs, s.rules].filter(Boolean).join(' ').toLowerCase());
+    const displayName = taxStrategyLabel({ name: s.name, type: s.preset ? s.preset.type : 'custom', code: strategyHasCode(s.n) });
     return `<div class="sl-card${has ? '' : ' sl-card-off'}" data-sl-search="${hay}">
       <div class="sl-card-head">
         ${link
-          ? `<a class="sl-card-name" href="${link}" target="_blank" rel="noopener" title="${esc(s.rules)}">${esc(s.name)}</a>`
-          : `<span class="sl-card-name" title="${esc(s.rules)}">${esc(s.name)}</span>`}
+          ? `<a class="sl-card-name" href="${link}" target="_blank" rel="noopener" title="${esc(s.rules)}">${esc(displayName)}</a>`
+          : `<span class="sl-card-name" title="${esc(s.rules)}">${esc(displayName)}</span>`}
         ${add}
         <span class="info-icon sl-info" tabindex="0" data-tip-wide data-tip="${slInfoTip(s)}">\u24d8</span>
       </div>
@@ -748,6 +749,7 @@ function buildStrategyLibrary() {
     : '';
   body.innerHTML = `
     <div class="sl-sticky-head">
+      ${readTaxSettings().enabled ? '<p class="tax-note">Türkiye tax estimate applies to native presets and the NFCI veto strategy. Other code-based strategies remain pre-tax.</p>' : ''}
       <div class="sl-intro">
         <span class="sl-legend"><i class="sl-leg-strat"></i>strategy <i class="sl-leg-spy"></i>SPY · log · ${span}</span>
         <div class="sl-pager"></div>

@@ -4385,3 +4385,36 @@
   #share-toast.show {
     opacity: 1;
   }
+/* Global tax scenario: kept next to the contribution assumptions. */
+.tax-controls #tax-toggle {
+  width: 100%; padding: 9px 12px; border: 1px solid var(--border, #ddd);
+  border-radius: 7px; background: transparent; color: var(--text, #333);
+  cursor: pointer; font: inherit; text-align: left;
+}
+.tax-controls #tax-toggle[aria-pressed="true"] {
+  border-color: #8676ff; background: rgba(134, 118, 255, .12);
+}
+.tax-controls p, .tax-controls details, .tax-note {
+  font-size: 12px; line-height: 1.5; color: var(--text-muted, #666);
+}
+.tax-controls input[type="number"] {
+  box-sizing: border-box; width: 100%; margin: 4px 0 10px; padding: 6px 8px;
+  border: 1px solid var(--border, #ddd); border-radius: 5px; font: inherit;
+  color: var(--text, #333); background: var(--bg, #fff);
+}
+.tax-controls summary { cursor: pointer; }
+.tax-note { margin: 0 0 10px; }
+.tax-detail-copy { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.holding-pnl-copy { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.tax-table-wrap { overflow-x: auto; }
+.tax-year-table { min-width: 780px; white-space: nowrap; }
+.tax-year-table th, .tax-year-table td { text-align: right; }
+.tax-year-table th:first-child, .tax-year-table td:first-child { text-align: left; }
+.holding-pnl-table-wrap { max-height: 360px; overflow: auto; }
+.holding-pnl-year-table { width: 100%; min-width: 430px; white-space: nowrap; }
+.holding-pnl-year-table th, .holding-pnl-year-table td { text-align: right; }
+.holding-pnl-year-table th:first-child, .holding-pnl-year-table td:first-child { text-align: left; }
+
+/* Optional one-click execution setting in custom strategies. */
+.cp-toggle { background: var(--state-off-bg); color: var(--state-off-text); min-width: 48px; cursor: pointer; }
+.cp-toggle[aria-pressed="true"] { background: var(--state-on-bg); color: var(--state-on-text); font-weight: 700; }

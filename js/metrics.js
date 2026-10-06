@@ -170,7 +170,7 @@ function computeDailyMaxDrawdownMulti(controls, dailyRows) {
 //
 // Only usable when EVERY row carries held/shares/cash (the custom-strategy
 // contract requires just date+value), so this returns null when it can't.
-const DD_ASSET_KEYS = { tqqq: 1, qqq: 1, spy: 1, qld: 1, sso: 1, spxl: 1, sqqq: 1 };
+const DD_ASSET_KEYS = { tqqq: 1, qqq: 1, spy: 1, qld: 1, sso: 1, spxl: 1, sqqq: 1, udow: 1, eurl: 1, spxs: 1 };
 function buildCustomDDControls(log) {
   if (!log || !log.length) return null;
   const out = [];

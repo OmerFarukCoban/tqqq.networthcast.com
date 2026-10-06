@@ -198,7 +198,7 @@ function handleSmaMarkerHover(e) {
 // close to the green/red fills they wrap.
 const ASSET_STROKE = {
   tqqq: '#0040ff', qqq: '#ff8c00', spy: '#a020f0', qld: '#00b3e6',
-  sso: '#ff1493', spxl: '#6d4c2f', sqqq: '#000000', cash: '#5a6472',
+  sso: '#ff1493', spxl: '#6d4c2f', sqqq: '#000000', spxs: '#455a64', udow: '#00796b', eurl: '#7e57c2', cash: '#5a6472',
 };
 // 'TQQQ' / 'tqqq+cash' / 'TQQQ+CASH' → the first known ticker's stroke.
 function assetStrokeFor(held) {
@@ -840,6 +840,7 @@ function smaLogRowInfo(smaLog, i, ulName) {
   };
   let label;
   switch (l.action) {
+    case 'TAX':      label = 'Tax ' + fmtFull(Math.round(l.tax || 0)); break;
     case 'CONTRIB':  label = '+ ' + fmtFull(Math.round(l.contribAmt || 0)); break;
     case 'DCA-ADD':  label = `Buy more ${held}`; break; // an ease top-up slice
     case 'ENTER':
@@ -851,7 +852,7 @@ function smaLogRowInfo(smaLog, i, ulName) {
   let gain = null;
   // Skip the (%) when the previous row is the SAME day — that's the other leg of
   // a switch (sell then buy), so the gain would span a zero-length interval.
-  if (prev && prev.total > 0 && l.date !== prev.date) {
+  if (l.action !== 'TAX' && prev && prev.total > 0 && l.date !== prev.date) {
     const contrib = (l.invested || 0) - (prev.invested || 0);
     gain = (l.total - prev.total - contrib) / prev.total * 100;
   }
@@ -1268,6 +1269,9 @@ function renderStrategyPanelBody(idx) {
                    : bhKey === 'qld'  ? _logData.qldPoints
                    : bhKey === 'sso'  ? _logData.ssoPoints
                    : bhKey === 'spxl' ? _logData.spxlPoints
+                   : bhKey === 'udow' ? _logData.udowPoints
+                   : bhKey === 'eurl' ? _logData.eurlPoints
+                   : bhKey === 'spxs' ? _logData.spxsPoints
                    : bhKey === 'sqqq' ? _logData.sqqqPoints
                    :                    _logData.bhPoints;
     html += buildBuyHoldLogTableHtml('Buy & Hold Log', _logData.log, bhSeries, bhKey.toUpperCase());
@@ -1785,6 +1789,10 @@ function render() {
   // inverted range (hand-edited URL, stale localStorage from a shorter data
   // window). Silently fall back to quarter-snapped rather than breaking render.
   if (entryOverride && (!dailyDateToIdx || !dailyDateToIdx.has(entryOverride))) entryOverride = '';
+  if (entryOverride && floorIdx > 0 && entryOverride < quarterlyData[floorIdx - 1][0]) {
+    entryOverride = '';
+    document.getElementById('entry-exact-date').value = '';
+  }
   if (exitOverride  && (!dailyDateToIdx || !dailyDateToIdx.has(exitOverride)))  exitOverride  = '';
   if (entryOverride && exitOverride && entryOverride >= exitOverride) { entryOverride = ''; exitOverride = ''; }
   const entryDateForSim = entryOverride || (quarterlyData[simEntryIdx] && quarterlyData[simEntryIdx][0]);
@@ -1898,8 +1906,9 @@ function render() {
     // rate; the 9sig parked cash uses its own rate (passed as the 3rd arg).
     baselineRate: rate,
   };
-  const { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, totalContributed,
-          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
+  const { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, udowPoints, eurlPoints, spxsPoints, totalContributed,
+          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample, udowSample, eurlSample, spxsSample,
+          taxPayments, baselineTaxPayments, bhTaxPayments } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
   // For each line, the points fed to the chart: the quarter-end snapshots when
   // the run is coarser than the axis (yearly), else the rebalance-grain points.
   // Driven by the SAME sampleQuarterly/sampleWeekly flags passed to simulate()
@@ -1916,6 +1925,9 @@ function render() {
   const ssoPtsD = pick(ssoSample, ssoPoints);
   const spxlPtsD = pick(spxlSample, spxlPoints);
   const sqqqPtsD = pick(sqqqSample, sqqqPoints);
+  const udowPtsD = pick(udowSample, udowPoints);
+  const eurlPtsD = pick(eurlSample, eurlPoints);
+  const spxsPtsD = pick(spxsSample, spxsPoints);
 
   // Shared x-axis. When the display grain matches the main's own period (the
   // common case) the labels ARE the main log's dates and every series maps 1:1
@@ -1958,7 +1970,14 @@ function render() {
     // weekly resolution on a <10y window, same idea as 9sig's sampleWeekly.
     sampleWeekly: displayGrain === 'weekly',
   };
-  const { smaPoints, smaLog, ddControls: smaDdControls } = simulateSMA(initial, monthly, smaCashRate, simEntryIdx, exitIdx, annualRaise, smaOpts);
+  const { smaPoints, smaLog, ddControls: smaDdControls, taxPayments: smaTaxPayments } = simulateSMA(initial, monthly, smaCashRate, simEntryIdx, exitIdx, annualRaise, smaOpts);
+  if (readTaxSettings().enabled) {
+    const sum = rows => (rows || []).reduce((total, row) => total + row.taxUSD, 0);
+    const bhAsset = document.getElementById('select-bh-underlying').value;
+    document.getElementById('tax-summary').textContent = 'Cumulative tax paid by reference strategies (USD): ' +
+      nineSigName() + ' ' + fmt(sum(taxPayments)) + ' · SMA ' + fmt(sum(smaTaxPayments)) +
+      ' · Buy & Hold ' + fmt(sum(bhTaxPayments?.[bhAsset])) + ' · Compounded Cash ' + fmt(sum(baselineTaxPayments));
+  }
 
   if (log.length < 1) {
     if (chart) { chart.destroy(); chart = null; }
@@ -2015,6 +2034,9 @@ function render() {
     bhKey === 'sso'  ? { series: ssoPoints || [],   ret: retSSO }  :
     bhKey === 'spxl' ? { series: spxlPoints || [],  ret: retSPXL } :
     bhKey === 'sqqq' ? { series: sqqqPoints || [],  ret: retSQQQ } :
+    bhKey === 'udow' ? { series: udowPoints || [], ret: _mw(udowPoints.at(-1)?.value || 0) } :
+    bhKey === 'eurl' ? { series: eurlPoints || [], ret: _mw(eurlPoints.at(-1)?.value || 0) } :
+    bhKey === 'spxs' ? { series: spxsPoints || [], ret: _mw(spxsPoints.at(-1)?.value || 0) } :
                        { series: bhPoints,          ret: retBH }   ;
 
   // Static, plain strategy labels — they don't encode (or change with) the
@@ -2053,7 +2075,7 @@ function render() {
   window._ydayValueByIdx = {};
   if (isLatestDaySelected) {
     const defl = inflationOn() ? inflFactor(prevTradingDayDate, labels[0]) : 1;
-    const _ulKeys = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl' };
+    const _ulKeys = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'udow', 9: 'eurl', 10: 'spxs' };
     const _todayRow = daily[daily.length - 1];
     // 9sig: shares from the final snapshot row; park side is either plain
     // cash or park-asset shares re-derived from the row's (already
@@ -2072,7 +2094,7 @@ function render() {
     if (y9 != null) window._ydayValueByIdx[0] = y9 * defl;
     // Consolidated Buy & Hold: pure shares, no cash. (bhKeyName is declared
     // further below — normalize bhKey locally instead of reordering.)
-    const _bhK = ['qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq'].includes(bhKey) ? bhKey : 'tqqq';
+    const _bhK = ['qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'].includes(bhKey) ? bhKey : 'tqqq';
     const bhLast = bhPicked.series[bhPicked.series.length - 1];
     if (bhLast && bhLast.shares > 0) {
       const yBh = repriceAtPrevTradingDay({ [_bhK]: bhLast.shares }, 0);
@@ -2117,7 +2139,7 @@ function render() {
   // Data fed into the consolidated B&H slot (dataset 2) — display points for the
   // selected underlying (quarter snapshots for a yearly run, else rebalance grain).
   const bhActiveD = onLabels(
-    bhKey === 'qqq' ? qqqPtsD : bhKey === 'spy' ? spyPtsD : bhKey === 'qld' ? qldPtsD : bhKey === 'sso' ? ssoPtsD : bhKey === 'spxl' ? spxlPtsD : bhKey === 'sqqq' ? sqqqPtsD : bhPtsD,
+    bhKey === 'qqq' ? qqqPtsD : bhKey === 'spy' ? spyPtsD : bhKey === 'qld' ? qldPtsD : bhKey === 'sso' ? ssoPtsD : bhKey === 'spxl' ? spxlPtsD : bhKey === 'sqqq' ? sqqqPtsD : bhKey === 'udow' ? udowPtsD : bhKey === 'eurl' ? eurlPtsD : bhKey === 'spxs' ? spxsPtsD : bhPtsD,
     p => p.value);
 
   // Per-dataset stats shown inside the strategy side panel (CAGR / starting
@@ -2135,9 +2157,9 @@ function render() {
   // them. Step series (Target/Cash) and the deterministic Invested baseline
   // keep their rebalance-grain drawdown — they don't move between rebalances.
   const dailyRows = (typeof daily !== 'undefined' && daily) ? daily : null;
-  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq' };
+  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'udow', 9: 'eurl', 10: 'spxs' };
   const sigKey = UL_KEY[sigUlCol] || 'tqqq';
-  const bhKeyName = bhKey === 'qqq' ? 'qqq' : bhKey === 'spy' ? 'spy' : bhKey === 'qld' ? 'qld' : bhKey === 'sso' ? 'sso' : bhKey === 'spxl' ? 'spxl' : bhKey === 'sqqq' ? 'sqqq' : 'tqqq';
+  const bhKeyName = bhKey === 'qqq' ? 'qqq' : bhKey === 'spy' ? 'spy' : bhKey === 'qld' ? 'qld' : bhKey === 'sso' ? 'sso' : bhKey === 'spxl' ? 'spxl' : bhKey === 'sqqq' ? 'sqqq' : bhKey === 'udow' ? 'udow' : bhKey === 'eurl' ? 'eurl' : bhKey === 'spxs' ? 'spxs' : 'tqqq';
   const dailyDDByIdx = {};
   if (dailyRows) {
     const sigCtl = log.map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash }));
@@ -3466,7 +3488,7 @@ function render() {
   // Stash latest data for the side-panel log tables. Normally this is the
   // canonical base simulation; but when a saved strategy is open for editing the
   // panel describes THAT strategy, so swap in its (separately computed) sim.
-  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, smaLog };
+  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, udowPoints, eurlPoints, spxsPoints, smaLog };
   if (window._editingConfigId && window._editingConfigSim) {
     const cs = window._editingConfigSim;
     _logData = {
@@ -3478,6 +3500,9 @@ function render() {
       ssoPoints:  cs.ssoPoints  || ssoPoints,
       spxlPoints: cs.spxlPoints || spxlPoints,
       sqqqPoints: cs.sqqqPoints || sqqqPoints,
+      udowPoints: cs.udowPoints || udowPoints,
+      eurlPoints: cs.eurlPoints || eurlPoints,
+      spxsPoints: cs.spxsPoints || spxsPoints,
       smaLog:     cs.smaLog     || smaLog,
     };
   }
@@ -3504,4 +3529,3 @@ function render() {
 
   fitChartHeight();
 }
-

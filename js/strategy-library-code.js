@@ -212,7 +212,7 @@ ${WEEKLY_MONTH_END_SNIPPET}
 CODE[10] = `{
   name: "QQQ 200-day SMA → TQQQ else cash",
   params: [{ id: "signal", label: "Signal asset", options: ["qqq", "spy"], default: "qqq" },
-           { id: "lev", label: "Leveraged ETF", options: ["tqqq", "qld", "sso", "spxl"], default: "tqqq" },
+           { id: "lev", label: "Leveraged ETF", options: ["tqqq", "qld", "sso", "spxl", "udow", "eurl"], default: "tqqq" },
            { id: "window", label: "Window (days)", options: [100, 150, 200, 250], default: 200 },
            ${STAT_PARAM_SNIPPET}],
   run(data, p) {
@@ -640,7 +640,7 @@ ${WEEKLY_MONTH_END_SNIPPET}
 CODE[25] = `{
   name: "200SMA → TQQQ else QQQ (always in)",
   params: [{ id: "signal", label: "Signal / park", options: ["qqq", "spy"], default: "qqq" },
-           { id: "lev", label: "Leveraged ETF", options: ["tqqq", "qld", "sso", "spxl"], default: "tqqq" },
+           { id: "lev", label: "Leveraged ETF", options: ["tqqq", "qld", "sso", "spxl", "udow", "eurl"], default: "tqqq" },
            { id: "window", label: "Window", options: [100, 150, 200, 250], default: 200 },
            ${STAT_PARAM_SNIPPET}],
   run(data, p) {
@@ -681,7 +681,7 @@ CODE[26] = `{
   params: [
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
       { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" },
-      { value: "spxl", label: "SPXL" }, { value: "sso", label: "SSO" },
+      { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" }, { value: "sso", label: "SSO" },
       { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" } ] },
     { id: "park", label: "Held when out", default: "cash", options: [
       { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
@@ -829,7 +829,7 @@ CODE[39] = `{
   params: [
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
       { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" },
-      { value: "spxl", label: "SPXL" }, { value: "sso", label: "SSO" },
+      { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" }, { value: "sso", label: "SSO" },
       { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" } ] },
     { id: "signal", label: "Signal read from", default: "sso", options: [
       { value: "sso", label: "SSO" }, { value: "spy", label: "SPY" },
@@ -998,10 +998,10 @@ CODE[40] = `{
   name: "Median overextension (250d)",
   params: [
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
-      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" },
+      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" },
       { value: "sso", label: "SSO" }, { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" } ] },
     { id: "park", label: "Held when out", default: "sqqq", options: [
-      { value: "sqqq", label: "SQQQ" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
+      { value: "sqqq", label: "SQQQ" }, { value: "spxs", label: "SPXS" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
       { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" } ] },
     ${STAT_PARAM_MEDIAN_SNIPPET},
     { id: "window", label: "Window (days)", default: 250, options: [
@@ -1210,7 +1210,7 @@ ${WEEKLY_MONTH_END_SNIPPET}
             icon: held === p.asset ? "trendUp" : "flag",
             sub: held === "cash" ? "earning " + (p.cashRate || 0) + "%/yr" : "at " + priceOf(held, p.endIdx).toFixed(2),
             delta: heldGainStr ? { text: heldGainStr, tone: heldGainPct >= 0 ? "good" : "bad" } : null,
-            tip: "What is owned on the last day, plus any leg queued for the next bar. No stop, no trend filter, no crash rule — it only reacts to overextension, so it rides declines all the way down." + (p.park === "sqqq" ? " SQQQ is −3x inverse and bleeds in any rising or flat market." : "") }
+            tip: "What is owned on the last day, plus any leg queued for the next bar. No stop, no trend filter, no crash rule — it only reacts to overextension, so it rides declines all the way down." + (["sqqq", "spxs"].includes(p.park) ? " " + p.park.toUpperCase() + " targets −3x daily benchmark returns; compounding and costs can erode its value." : "") }
         ],
         decision: {
           action: pending ? (WANT === "cash" ? "Move to cash" : "Buy " + WANT) : (stretched ? (K === "cash" ? "Stay in cash" : "Hold " + K) : "Buy " + A),
@@ -1243,7 +1243,7 @@ CODE[41] = `{
   params: [
     { section: "Fund & signal" },
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
-      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" },
+      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" },
       { value: "sso", label: "SSO" }, { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" } ] },
     { id: "stat", label: "Center line", default: "median", options: [
       { value: "median", label: "Median" }, { value: "sma", label: "Moving average" },
@@ -1254,7 +1254,7 @@ CODE[41] = `{
     { id: "overPct", label: "Above line (%)", default: 55, options: [
       2,4,5,6,8,10,12,15,18,20,22,25,28,30,32,35,38,40,42.5,45,47.5,50,52.5,55,57.5,60,62.5,65,67.5,70,72.5,75,80,85,90,95,100,110,120,125,130,140,150,160,175,200,225,250,300] },
     { id: "park", label: "Then hold", default: "sqqq", options: [
-      { value: "sqqq", label: "SQQQ" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
+      { value: "sqqq", label: "SQQQ" }, { value: "spxs", label: "SPXS" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
       { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" } ] },
     { section: "Crash signal — the exit measures against this" },
     { id: "crashStat", label: "Center line", default: "same", options: [
@@ -1267,9 +1267,9 @@ CODE[41] = `{
     { id: "exitPct", label: "Below line (%)", default: -28, options: [
       10,8,6,5,4,3,2,1,0,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-22,-24,-25,-26,-28,-30,-32,-34,-35,-36,-38,-40,-42,-44,-45,-46,-48,-50,-52,-55,-58,-60,-65,-70,-75,-80] },
     { id: "crashAsset", label: "Then hold", default: "cash", options: [
-      { value: "cash", label: "Cash" }, { value: "sqqq", label: "SQQQ" }, { value: "qqq", label: "QQQ" },
+      { value: "cash", label: "Cash" }, { value: "sqqq", label: "SQQQ" }, { value: "spxs", label: "SPXS" }, { value: "qqq", label: "QQQ" },
       { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" },
-      { value: "tqqq", label: "TQQQ" }, { value: "spxl", label: "SPXL" } ] },
+      { value: "tqqq", label: "TQQQ" }, { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" } ] },
     { id: "slopeGate", label: "Only if line slope below (%/yr)", default: 20, options: [
       { value: 999, label: "Off" }, { value: -40, label: "-40" }, { value: -20, label: "-20" },
       { value: -10, label: "-10" }, { value: 0, label: "0" }, { value: 10, label: "10" },
@@ -1587,7 +1587,7 @@ CODE[44] = `{
   params: [
     { section: "Fund & signal" },
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
-      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" },
+      { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" },
       { value: "sso", label: "SSO" }, { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" } ] },
     { id: "stat", label: "Center line", default: "median", options: [
       { value: "median", label: "Median" }, { value: "sma", label: "Moving average" },
@@ -1598,7 +1598,7 @@ CODE[44] = `{
     { id: "overPct", label: "Above line (%)", default: 55, options: [
       2,4,5,6,8,10,12,15,18,20,22,25,28,30,32,35,38,40,42.5,45,47.5,50,52.5,55,57.5,60,62.5,65,67.5,70,72.5,75,80,85,90,95,100,110,120,125,130,140,150,160,175,200,225,250,300] },
     { id: "park", label: "Then hold", default: "sqqq", options: [
-      { value: "sqqq", label: "SQQQ" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
+      { value: "sqqq", label: "SQQQ" }, { value: "spxs", label: "SPXS" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
       { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" } ] },
     { section: "Crash signal — the exit measures against this" },
     { id: "crashStat", label: "Center line", default: "same", options: [
@@ -1611,9 +1611,9 @@ CODE[44] = `{
     { id: "exitPct", label: "Below line (%)", default: -28, options: [
       10,8,6,5,4,3,2,1,0,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-22,-24,-25,-26,-28,-30,-32,-34,-35,-36,-38,-40,-42,-44,-45,-46,-48,-50,-52,-55,-58,-60,-65,-70,-75,-80] },
     { id: "crashAsset", label: "Then hold", default: "cash", options: [
-      { value: "cash", label: "Cash" }, { value: "sqqq", label: "SQQQ" }, { value: "qqq", label: "QQQ" },
+      { value: "cash", label: "Cash" }, { value: "sqqq", label: "SQQQ" }, { value: "spxs", label: "SPXS" }, { value: "qqq", label: "QQQ" },
       { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" },
-      { value: "tqqq", label: "TQQQ" }, { value: "spxl", label: "SPXL" } ] },
+      { value: "tqqq", label: "TQQQ" }, { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" } ] },
     { id: "slopeGate", label: "Only if line slope below (%/yr)", default: 20, options: [
       { value: 999, label: "Off" }, { value: -40, label: "-40" }, { value: -20, label: "-20" },
       { value: -10, label: "-10" }, { value: 0, label: "0" }, { value: 10, label: "10" },
@@ -1628,6 +1628,7 @@ CODE[44] = `{
       { value: "cycle", label: "NFCI calms OR a crash exit→recovery completes" },
       { value: "nfci", label: "NFCI calms only" } ] },
     { section: "Execution & costs" },
+    { id: "nextClose", label: "Signal at t → trade at t+1 close", type: "bool", toggle: true, default: false },
     { id: "splitDays", label: "One trade per day", type: "bool", default: true, options: [
       { value: true, label: "Yes" }, { value: false, label: "No" } ] },
     { id: "cashRate", label: "Cash interest (%/yr)", default: 4, options: [
@@ -1645,6 +1646,8 @@ CODE[44] = `{
   ],
   run(data, p) {
     const log = [];
+    const nextClose = p.nextClose === true || p.nextClose === "true";
+    let pendingSignal = null;
     const px = data[p.asset] || data.tqqq;
     const W = Math.max(2, p.window || 250);
     const over = (p.overPct || 0) / 100;
@@ -1655,6 +1658,7 @@ CODE[44] = `{
     const crashAsset = p.crashAsset || "cash";
     const nfciTh = p.nfciTh == null ? 0.4 : +p.nfciTh;
     const nfciArr = data.nfci || null;
+    const tax = p.tax && p.tax.enabled ? new TurkeyTaxLedger(p.tax, data.dates[p.startIdx]) : null;
     // Veto-lift semantics. "cycle" (default): NFCI is a crash START signal —
     // the veto arms when NFCI crosses above the threshold and lifts when
     // EITHER NFCI calms OR the price engine completes a full crash-exit →
@@ -1727,6 +1731,7 @@ CODE[44] = `{
     let minAC = Infinity, maxAC = -Infinity;
     let stints = [], inCrash = false, stintLen = 0;
     let peakPx = 0, peakDate = "", ddNow = 0, maxDdSeen = 0;
+    const annualHoldingPnl = {};
     // Credit-veto bookkeeping for the signal cards.
     let nfNow = NaN, vetoOn = false, vetoDays = 0, vetoWindows = 0, wasVeto = false;
 
@@ -1760,14 +1765,27 @@ CODE[44] = `{
         if (-ddNow > maxDdSeen) maxDdSeen = -ddNow;
       }
       nfNow = nfciArr ? nfciArr[i] : NaN;
+      const holdingYear = +data.dates[i].slice(0, 4);
+      if (!annualHoldingPnl[holdingYear]) annualHoldingPnl[holdingYear] = { year: holdingYear, tqqq: 0, sqqq: 0 };
+      // Attribute each close-to-close move to the fund held coming into this
+      // close. A trade at today's close starts earning P/L on the next bar.
+      if (i > p.startIdx && shares > 0 && (held === "tqqq" || held === "sqqq")) {
+        const heldNow = priceOf(held, i), heldPrev = priceOf(held, i - 1);
+        if (heldNow > 0 && heldPrev > 0) annualHoldingPnl[holdingYear][held] += shares * (heldNow - heldPrev);
+      }
       const month = data.dates[i].slice(0, 7);
-      let contributed = 0, action = "hold", note = "", fee = 0;
-      if (held === "cash") cash *= 1 + dayRate;
+      let contributed = 0, action = "hold", note = "", fee = 0, taxPaid = 0, salePrice = 0;
+      if (held === "cash" && cash > 0) {
+        const interest = cash * dayRate;
+        if (tax) tax.addInterest(interest, data.dates[i]);
+        cash += interest;
+      }
       if (p.contributions && p.contributions[data.dates[i]]) {
         const amt = p.contributions[data.dates[i]];
         cash += amt; contributed = amt; invested += amt; action = "contribution";
       }
 
+      let signal = null;
       if (med > 0 && medC > 0 && sigM > 0 && sigC > 0 && px[i] > 0) {
         const pOver = med * (1 + over), pExit = medC * (1 + exitB);
         if (state === "normal" || state === "over") {
@@ -1797,25 +1815,65 @@ CODE[44] = `{
           : state === "over" ? p.park
           : crashAsset;
         if (vetoOn) want = "cash";
+        signal = { want: want, date: data.dates[i], note: vetoOn
+          ? "NFCI " + nfNow.toFixed(2) + " > " + nfciTh + " — credit veto"
+          : (above >= 0 ? "+" : "−") + Math.abs(above * 100).toFixed(1) + "% vs line — " + zone };
+      }
+      // Execute yesterday's decision at today's prices, even if today's signal reverses.
+      // Queue the new decision only for the next available trading bar.
+      const execution = nextClose ? pendingSignal : signal;
+      if (nextClose) pendingSignal = signal;
+      if (execution) {
+        let want = execution.want;
         if (p.splitDays && want !== held && held !== "cash" && want !== "cash") want = "cash"; // leg 1 today, buy re-checks next bar
         if (want !== held) {
           const oldPx = priceOf(held, i);
           if (held !== "cash" && oldPx > 0) {
             const gross = shares * oldPx, f = gross * cost;
+            if (tax) tax.sell(held, shares, gross - f, data.dates[i]);
             cash += gross - f; fee += f; shares = 0;
+            salePrice = oldPx;
           }
           const newPx = priceOf(want, i);
           if (want === "cash" || newPx > 0) {
-            if (want !== "cash") { const f = cash * cost; shares = (cash - f) / newPx; fee += f; cash = 0; }
+            if (want !== "cash") {
+              const spend = cash, f = spend * cost;
+              shares = (spend - f) / newPx;
+              if (tax) tax.buy(want, shares, spend, data.dates[i]);
+              fee += f; cash = 0;
+            }
             action = held === "cash" ? "buy" : want === "cash" ? "sell" : "switch";
-            note = vetoOn ? "NFCI " + nfNow.toFixed(2) + " > " + nfciTh + " — credit veto"
-              : (above >= 0 ? "+" : "−") + Math.abs(above * 100).toFixed(1) + "% vs line — " + zone;
+            note = (nextClose ? "Signal " + execution.date + " · " : "") + execution.note;
             held = want;
           }
         } else if (held !== "cash" && cash > 0 && priceOf(held, i) > 0) {
-          const f = cash * cost;
-          shares += (cash - f) / priceOf(held, i); fee += f; cash = 0;
+          const spend = cash, f = spend * cost;
+          const bought = (spend - f) / priceOf(held, i);
+          shares += bought;
+          if (tax) tax.buy(held, bought, spend, data.dates[i]);
+          fee += f; cash = 0;
           if (action === "contribution") note = "contribution deployed";
+        }
+      }
+      const closesTaxYear = i === p.endIdx || data.dates[i].slice(0, 4) !== data.dates[i + 1].slice(0, 4);
+      if (tax && closesTaxYear) {
+        cash = tax.settle(data.dates[i], cash, (need) => {
+          if (held === "cash") return 0;
+          const salePx = priceOf(held, i);
+          if (!(salePx > 0) || !(shares > 0)) return 0;
+          const gross = Math.min(shares * salePx, need / (1 - cost));
+          const sold = gross / salePx, f = gross * cost, proceeds = gross - f;
+          tax.sell(held, sold, proceeds, data.dates[i]);
+          salePrice = salePx;
+          shares -= sold; fee += f;
+          if (shares <= 1e-10) { shares = 0; held = "cash"; }
+          return proceeds;
+        });
+        const payment = tax.payments[tax.payments.length - 1];
+        taxPaid = payment ? payment.taxUSD : 0;
+        if (taxPaid > 0) {
+          if (action === "hold") action = "tax";
+          note += (note ? " · " : "") + "Türkiye tax " + taxPaid.toFixed(2) + " USD";
         }
       }
       const wasCrash = inCrash;
@@ -1832,8 +1890,8 @@ ${WEEKLY_MONTH_END_SNIPPET}
       if (contributed !== 0 || monthEnd || action !== "hold") {
         log.push({
           date: data.dates[i], value: stockVal + cash, action: action, note: note,
-          held: held.toUpperCase(), price: hp, shares: shares, holdingsValue: stockVal,
-          cash: cash, contributed: contributed, invested: invested, fee: fee,
+          held: held.toUpperCase(), price: salePrice || hp, shares: shares, holdingsValue: stockVal,
+          cash: cash, contributed: contributed, invested: invested, fee: fee, tax: taxPaid,
           assetPrice: px[i] || 0, medianPrice: medPlot, abovePct: above * 100,
           nfci: isFinite(nfNow) ? nfNow : null,
           zone: vetoOn ? "CREDIT VETO" : zone,
@@ -1859,6 +1917,11 @@ ${WEEKLY_MONTH_END_SNIPPET}
     const vetoDist = isFinite(nfNow) && nfciTh !== 999 ? (nfciTh - nfNow) : NaN;
     return {
       log: log,
+      annualHoldingPnl: Object.keys(annualHoldingPnl).sort().map(function (year) {
+        const row = annualHoldingPnl[year];
+        return { year: row.year, tqqq: row.tqqq, sqqq: row.sqqq, total: row.tqqq + row.sqqq };
+      }),
+      taxPayments: tax ? tax.payments : [],
       lines: chartLines,
       signals: {
         cards: [
@@ -1872,14 +1935,14 @@ ${WEEKLY_MONTH_END_SNIPPET}
             value: vetoOn ? "CREDIT VETO" : zone,
             tone: zoneTone,
             icon: "sliders",
-            sub: "holding " + holdTxt,
+            sub: "holding " + holdTxt + (nextClose ? " · signals trade next close" : ""),
             tip: "Which band the last close landed in — overextended (park), normal (hold), crash (out) — or CREDIT VETO while the NFCI override keeps everything in cash regardless of the bands." },
           { label: "NFCI credit veto",
             value: nfciStr,
             tone: nfciTh === 999 ? "good" : (vetoOn ? "bad" : "good"),
             icon: "shield",
             sub: nfciTh === 999 ? "veto off"
-              : vetoOn ? "ABOVE +" + nfciTh + " — in cash until it calms" + (vetoCycle ? " or a crash cycle completes" : "")
+              : vetoOn ? "ABOVE +" + nfciTh + " — cash signal until it calms" + (vetoCycle ? " or a crash cycle completes" : "")
               : "veto at +" + nfciTh + " (" + vetoDist.toFixed(2) + " away) · fired " + vetoWindows + "x, " + vetoDays + "d this run",
             tip: "Chicago Fed National Financial Conditions Index, weekly with a 7-day publication lag. Above +" + (nfciTh === 999 ? "0.4" : nfciTh) + " = credit crunch: everything goes to cash. One-way — it never adds leverage. The veto lifts when the index calms" + (vetoCycle ? ", or earlier if the price engine fires its own crash exit and then recovers while vetoed — the market has re-earned entry, so credit stress alone no longer keeps you out" : "") + ". Fired only in genuine credit crises since 1971 (1973-75, the Volcker squeeze, 1987, S&L 1990, the GFC) and has been silent since July 2009." },
           { label: "Crash exit",
@@ -1897,9 +1960,11 @@ ${WEEKLY_MONTH_END_SNIPPET}
             tip: "The traded fund's fall from its running high. The price bands act on stretch-vs-line, the veto on credit conditions — this shows what they are protecting against." }
         ],
         decision: {
-          action: vetoOn ? "Stay in cash — credit veto"
+          action: nextClose ? "Next close target: " + (pendingSignal ? lbl(pendingSignal.want) : holdTxt)
+            : vetoOn ? "Stay in cash — credit veto"
             : (state === "normal" ? "Buy " + A : state === "over" ? "Hold " + K : lbl(crashAsset) === "cash" ? "Stay in cash" : "Hold " + lbl(crashAsset)),
-          note: vetoOn ? "NFCI " + nfciStr + " above +" + nfciTh + " — waiting for credit conditions to calm"
+          note: nextClose ? "Currently holding " + holdTxt + "; last signal executes at the next trading close" + (p.splitDays ? ". Fund switches sell first and re-check before buying on a later close." : ".")
+            : vetoOn ? "NFCI " + nfciStr + " above +" + nfciTh + " — waiting for credit conditions to calm"
             : "signal is " + pctStr + " vs the " + CN + " — " + zone + " band; NFCI " + nfciStr,
           tone: zoneTone,
           reasons: [

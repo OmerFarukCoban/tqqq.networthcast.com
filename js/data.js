@@ -30,19 +30,25 @@ async function loadSPYDaily()  { return loadSeries('spy.tsv'); }
 async function loadSSODaily()  { return loadSeries('synthetic-sso.tsv'); }
 async function loadSPXLDaily() { return loadSeries('synthetic-spxl.tsv'); }
 async function loadSQQQDaily() { return loadSeries('synthetic-sqqq.tsv'); }
+async function loadSPXSDaily() { return loadSeries('synthetic-spxs.tsv'); }
+async function loadUDOWDaily() { return loadSeries('synthetic-udow.tsv'); }
+async function loadEURLDaily() { return loadSeries('synthetic-eurl.tsv'); }
 
 // Merge daily TSVs by date. The synthetic TSVs already contain synthesized
 // pre-inception rows (baked by update_data.py), so this is a straight join —
 // no synthesis here. monthlyData column layout:
-//   [date, tqqq, qqq, spy, qld, sso, spxl]   (cols 0..6); sqqq rides on the
-//   daily objects only (custom strategies read it by name, not by column).
-function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily, sqqqDaily) {
+//   [date, tqqq, qqq, spy, qld, sso, spxl, sqqq, udow, eurl, spxs] (cols 0..10).
+// Missing history is 0; never extend a fund into another market's history.
+function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily, sqqqDaily, udowDaily, eurlDaily, spxsDaily) {
   const tqqqMap = new Map(tqqqDaily.map(d => [d[0], d[1]]));
   const spyMap  = new Map(spyDaily.map(d => [d[0], d[1]]));
   const qldMap  = qldDaily  ? new Map(qldDaily.map(d  => [d[0], d[1]])) : null;
   const ssoMap  = ssoDaily  ? new Map(ssoDaily.map(d  => [d[0], d[1]])) : null;
   const spxlMap = spxlDaily ? new Map(spxlDaily.map(d => [d[0], d[1]])) : null;
   const sqqqMap = sqqqDaily ? new Map(sqqqDaily.map(d => [d[0], d[1]])) : null;
+  const udowMap = new Map(udowDaily || []);
+  const eurlMap = new Map(eurlDaily || []);
+  const spxsMap = new Map(spxsDaily || []);
   const result = [];
   for (const [date, qqqPrice] of qqqDaily) {
     const tqqqPrice = tqqqMap.get(date);
@@ -56,6 +62,9 @@ function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily
         sso:  ssoMap  ? (ssoMap.get(date)  || 0) : 0,
         spxl: spxlMap ? (spxlMap.get(date) || 0) : 0,
         sqqq: sqqqMap ? (sqqqMap.get(date) || 0) : 0,
+        udow: udowMap.get(date) || 0,
+        eurl: eurlMap.get(date) || 0,
+        spxs: spxsMap.get(date) || 0,
       });
     }
   }
@@ -146,7 +155,7 @@ let monthlyByQuarter = null;
 // for the named period. Mirrors the existing monthlyData / quarterlyData
 // shape — same columns, same date format. Called once after `daily` loads.
 function buildPeriodData(periodFn) {
-  return lastOfPeriod(daily, periodFn).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
+  return lastOfPeriod(daily, periodFn).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs]);
 }
 
 // Build the months-in-period index for the given periodData. monthsInPeriod[i]
@@ -226,7 +235,7 @@ function buildEnvelopeQData(period, dayOffset, entryDate, exitDate) {
   if (entryDailyIdx == null) return [];
   const periodDays = PERIOD_DAYS[period] || 63;
   const entryD = daily[entryDailyIdx];
-  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq];
+  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs];
   const result = [rowFor(entryD)];
   let dailyIdx = entryDailyIdx + Math.max(1, dayOffset);
   while (dailyIdx < daily.length) {
@@ -251,7 +260,7 @@ function buildExactRangeQData(period, entryDate, exitDate) {
   const xIdx = dailyDateToIdx.get(exitDate);
   if (eIdx == null || xIdx == null || eIdx >= xIdx) return [];
   const src = (periodDataByName && periodDataByName[period]) || quarterlyData;
-  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq];
+  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs];
   const result = [rowFor(daily[eIdx])];
   for (const p of src) { if (p[0] > entryDate && p[0] < exitDate) result.push(p); }
   result.push(rowFor(daily[xIdx]));
@@ -308,21 +317,21 @@ function rollingSMA(values, window) {
 function rollingRSI(values, window) {
   const out = new Array(values.length).fill(null);
   if (values.length < window + 1) return out;
-  let gainSum = 0, lossSum = 0;
-  for (let i = 1; i <= window; i++) {
+  let gainSum = 0, lossSum = 0, count = 0, avgGain = 0, avgLoss = 0;
+  for (let i = 1; i < values.length; i++) {
+    if (!(values[i] > 0) || !(values[i-1] > 0)) {
+      gainSum = lossSum = count = 0;
+      continue;
+    }
     const d = values[i] - values[i-1];
-    if (d > 0) gainSum += d; else lossSum -= d;
-  }
-  let avgGain = gainSum / window;
-  let avgLoss = lossSum / window;
-  out[window] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
-  for (let i = window + 1; i < values.length; i++) {
-    const d = values[i] - values[i-1];
-    const g = d > 0 ? d : 0;
-    const l = d < 0 ? -d : 0;
-    // Wilder's smoothing: prior average × (window-1) + new value, all over window.
-    avgGain = (avgGain * (window - 1) + g) / window;
-    avgLoss = (avgLoss * (window - 1) + l) / window;
+    if (count < window) {
+      gainSum += Math.max(d, 0); lossSum += Math.max(-d, 0);
+      if (++count < window) continue;
+      avgGain = gainSum / window; avgLoss = lossSum / window;
+    } else {
+      avgGain = (avgGain * (window - 1) + Math.max(d, 0)) / window;
+      avgLoss = (avgLoss * (window - 1) + Math.max(-d, 0)) / window;
+    }
     out[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
   }
   return out;
@@ -377,6 +386,8 @@ function precomputeSMASeries() {
     tqqq: daily.map(d => d.tqqq), qld:  daily.map(d => d.qld),
     sso:  daily.map(d => d.sso),  spxl: daily.map(d => d.spxl),
     sqqq: daily.map(d => d.sqqq),
+    spxs: daily.map(d => d.spxs),
+    udow: daily.map(d => d.udow), eurl: daily.map(d => d.eurl),
   };
 
   const sma = makeLazyIndicator(seriesByAsset, toMonthly, rollingSMA);
@@ -384,5 +395,5 @@ function precomputeSMASeries() {
   const rsi = makeLazyIndicator(seriesByAsset, toMonthly, rollingRSI);
   rsiAtDailyByKey = rsi.daily; rsiAtMonthlyByKey = rsi.monthly;
 
-  dailyRows = daily.map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
+  dailyRows = daily.map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs]);
 }

@@ -120,7 +120,7 @@
   function readSmaParams() {
     return Object.assign(readBaseParams(), {
       cashRate:      _num('select-sma-cashrate', 0) / 100,
-      underlyingCol: (function () { const v = _str('select-sma-underlying', 'tqqq'); return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : 1; })(),
+      underlyingCol: (function () { const v = _str('select-sma-underlying', 'tqqq'); return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : v === 'udow' ? 8 : v === 'eurl' ? 9 : v === 'spxs' ? 10 : 1; })(),
       smaAsset:      _str('select-sma-asset', 'qqq'),
       smaWindow:     _num('select-sma-window', 200),
       // The other ~17 select-sma-* knobs — was a third hand-typed copy of the
@@ -188,7 +188,7 @@
       buyThrottlePct: p.buyThrottlePct, parkAsset: p.parkAsset, baselineRate: p.baselineRate,
     });
     const lastVal = (arr) => (arr && arr.length) ? arr[arr.length - 1].value : 0;
-    return { tqqq: lastVal(r.bhPoints), qqq: lastVal(r.qqqPoints), spy: lastVal(r.spyPoints), qld: lastVal(r.qldPoints), sso: lastVal(r.ssoPoints), spxl: lastVal(r.spxlPoints), sqqq: lastVal(r.sqqqPoints) };
+    return { tqqq: lastVal(r.bhPoints), qqq: lastVal(r.qqqPoints), spy: lastVal(r.spyPoints), qld: lastVal(r.qldPoints), sso: lastVal(r.ssoPoints), spxl: lastVal(r.spxlPoints), sqqq: lastVal(r.sqqqPoints), udow: lastVal(r.udowPoints), eurl: lastVal(r.eurlPoints), spxs: lastVal(r.spxsPoints) };
   }
 
   // Final values for every option of `select`, by its preview kind.

@@ -1,6 +1,6 @@
-# Long-history price data for TQQQ, QLD, QQQ, SPY, SSO, SPXL, and SQQQ
+# Long-history price data for TQQQ, QLD, QQQ, SPY, SSO, SPXL, SQQQ, SPXS, UDOW, and EURL
 
-Daily closing prices for seven ETFs, going back decades before any of them existed, plus the short-term interest rate series the reconstruction runs on. These files feed the [Strategies Simulator](https://9sig.networthcast.com). They're published here so you can run your own backtests without redoing the synthesis.
+Daily closing prices for ten ETFs, including reconstructed history before launch, plus the short-term interest rate series the reconstruction runs on. These files feed the [Strategies Simulator](https://9sig.networthcast.com). They're published here so you can run your own backtests without redoing the synthesis.
 
 ## ETF launch dates
 
@@ -11,10 +11,13 @@ Daily closing prices for seven ETFs, going back decades before any of them exist
 - **SPXL** (3× S&P 500, Direxion Daily S&P500 Bull 3x) — November 2008
 - **TQQQ** (3× Nasdaq-100) — February 2010
 - **SQQQ** (−3× Nasdaq-100, ProShares UltraPro Short QQQ) — February 2010
+- **SPXS** (−3× S&P 500, Direxion Daily S&P 500 Bear 3X) — November 2008; tracked Russell 1000 until June 29, 2012
+- **UDOW** (3× Dow Jones Industrial Average, ProShares UltraPro Dow30) — February 2010
+- **EURL** (3× European equities, Direxion Daily FTSE Europe Bull 3X) — January 2014
 
 Everything before a fund's launch date is reconstructed. The script walks the longer-lived index backward from launch day, applying the same daily arithmetic the fund itself runs on: leverage, expense ratio, financing cost on the borrowed leg, swap-counterparty spread. What comes out is a continuous "what it would have looked like" series. None of it happened, because the funds didn't exist. It is what the math says their daily prices would have done given the underlying index and the short-term rates of each era.
 
-> **The price files start January 2, 1953.** The rate files go back further; `short-rates.tsv` starts in 1934. 1953 is where daily data gets clean, since the NYSE ran Saturday sessions before then. That start date lives in the committed TSVs themselves. `update_data.py` has no trimming step, and its daily refresh copies whatever pre-IPO prefix is already on disk.
+> **The original seven price files and SPXS start January 2, 1953. UDOW starts January 2, 1992; EURL starts June 18, 1990.** The rate files go back further; `short-rates.tsv` starts in 1934. 1953 is where daily data gets clean, since the NYSE ran Saturday sessions before then. That start date lives in the committed TSVs themselves. `update_data.py` has no trimming step, and its daily refresh copies whatever pre-IPO prefix is already on disk.
 
 ## "How do you approximate TQQQ before it existed?"
 
@@ -44,6 +47,9 @@ The most-asked question about this dataset. The copy-paste answer:
 | **synthetic-sso.tsv** | June 21, 2006, when SSO (ProShares Ultra S&P500, 2×) launched. | Pre-2006: `(1 + 2 × SP500_daily − 1 × (short_rate + 0.50%)/yr − 0.87%/yr expense)`. 1988–2006 uses real `^SP500TR`, earlier years price-only `^GSPC`. |
 | **synthetic-spxl.tsv** | November 5, 2008, when SPXL (Direxion Daily S&P500 Bull 3x) launched. | Pre-2008: `(1 + 3 × SP500_daily − 2 × (short_rate + 0.50%)/yr − 0.95%/yr expense)`. 1988–2008 uses real `^SP500TR`, earlier years price-only `^GSPC`. |
 | **synthetic-sqqq.tsv** | February 11, 2010, when SQQQ launched. | Pre-2010 uses the inverse model `(1 − 3 × NDX_daily + 4.028 × short_rate/yr − 1.537 %/yr)`. An inverse fund borrows nothing. It is short 3 units and sits on (1+L)=4 units of cash *earning* the short rate. Both coefficients are fitted against real SQQQ 2010–2026: the rate slope came out 4.028 against a theoretical 4.0, and the −1.537 %/yr intercept covers the 0.95 % fee plus swap spread and slippage. Replayed forward from launch, the model tracks the real fund to within −6.4 % / +1.9 % cumulative over 16.5 years. |
+| **synthetic-spxs.tsv** | November 19, 2008, the first Yahoo bar; issuer inception was November 5. The real tail includes the former Russell 1000 mandate through June 28, 2012. | Same inverse-collateral model as SQQQ, fitted separately: `(1 − 3 × SP500_daily + 4.333016 × short_rate/yr − 1.847276%/yr)`. `^SP500TR` from 1988, price-only `^GSPC` from 1953. See the SPXS notes below. |
+| **synthetic-udow.tsv** | February 11, 2010, the first Yahoo trading bar (the issuer lists inception as February 9). | 1998–2010: derived Dow total returns (`^DJI × DIA_adj / DIA_raw`); 1992–1998: price-only `^DJI`. Daily 3× leverage, financing on 2× at the short rate + 0.50%/yr spread, and 0.95%/yr expenses. |
+| **synthetic-eurl.tsv** | January 22, 2014. | 2005–2014: dividend-adjusted VGK; 1990–2005: dividend-adjusted VEURX. USD European-equity proxies, with daily 3× leverage, financing on 2× at the short rate + 0.50%/yr spread, and 1.04%/yr expenses. |
 | **fed-funds-effective.tsv** | Daily, July 1, 1954 onward. | None. FRED series `DFF`. Supplies the financing cost on the leveraged leg from 1954. |
 | **t-bill-3mo.tsv** | Monthly, January 1934 onward. | None. FRED series `TB3MS`. The pre-Fed-Funds-market short-rate proxy for 1934–1953. |
 | **short-rates.tsv** | Daily, January 2, 1934 onward. | Derived: `DFF` where it exists, `TB3MS` forward-filled where it doesn't. The only rate file the synthesis reads. |
@@ -52,6 +58,58 @@ The most-asked question about this dataset. The copy-paste answer:
 Yahoo's `^NDX` history starts in 1985, which is also when the Nasdaq-100 index itself began. `update_data.py` reaches further back by merging a local `^ndx_d.csv` from Stooq, and **that file is not committed to this repo**. Without it, `read_ndx_csv()` returns nothing and a from-scratch `--rebuild` stops where Yahoo stops. The 1953-onward history in the committed TSVs was generated while the CSV was present.
 
 The pre-1985 prefix splits into two very different stretches. **1971–1985 is real data in disguise**: checked against the actual Nasdaq Composite (FRED series `NASDAQCOM`, daily from the index's first day in February 1971), the Stooq reconstruction tracks it to within 0.01 pp/yr CAGR over the full 14 years and never diverges more than 0.3% over any rolling year — it is effectively the measured Composite wearing an NDX label. **Before 1971 no Nasdaq index of any kind existed** (the market traded OTC), so the 1953–1971 stretch is Stooq's own undocumented construction with nothing real to check it against. Read that stretch, and only that stretch, as a rough hypothetical.
+
+## SPXS: the SQQQ inverse method on S&P history
+
+`synthetic-spxs.tsv` uses the **same `walk_backward_inverse()` function as SQQQ**. The SQQQ coefficients remain unchanged. For SPXS, daily returns are modeled as:
+
+```text
+return = −3 × index_return + 4.33301607729 × (prior_short_rate / 100 / 252)
+         − 0.0000733046149613
+previous_price = next_price / (1 + return)
+```
+
+Like SQQQ, the model earns short-rate income on inverse collateral instead of subtracting the financing costs of a long 3× fund. The theoretical cash multiple is 4; 4.333016 is an empirical fit, not a claim that the fund always holds that much cash. The fitted intercept is about **−1.8473%/year**, combining expenses, swap spread, and tracking effects. No expense ratio is deducted a second time.
+
+**Historical benchmark change matters.** The [fund prospectus](https://www.sec.gov/Archives/edgar/data/1424958/000119312516622366/d209543d497k.htm) says it tracked the inverse of Russell 1000 before **June 29, 2012**. Therefore calibration uses only the S&P era: **3,483 daily returns from June 29, 2012 through May 7, 2026**, the last observation in the committed short-rate file. Ordinary least squares regresses `SPXS_daily_return + 3 × SP500TR_daily_return` on the prior trading day's daily short rate, with an intercept. A forward replay over that window has cumulative model/real deviation between **−4.03% and +1.05%**, ending at **−3.77%**. These are in-sample fit diagnostics, not independent validation or a guarantee for earlier eras.
+
+The initial file contains **14,068 reconstructed rows and 4,484 real rows**, through **September 18, 2026**:
+
+- **1953-01-02–1988-01-01:** inverse returns from price-only `^GSPC`. Missing dividends omit part of the cost of short exposure, making forward inverse returns optimistic.
+- **1988-01-04–2008-11-18:** inverse returns from `^SP500TR`, including dividends. The two phases share an exact anchor date, with no duplicate boundary row.
+- **2008-11-19 onward:** real Yahoo Finance closes, adjusted for dividends and reverse splits. This includes the real predecessor fund's Russell 1000 performance before the 2012 switch; that history is not rewritten as S&P 500 returns.
+
+The [issuer's inception date](https://www.direxion.com/product/daily-sp-500-bull-bear-3x-etfs) is **November 5, 2008**. Yahoo's first available bar is November 19, so the intervening trading days are estimates too. The reconstructed prefix is hypothetical **S&P 500** inverse exposure, not a reconstruction of the predecessor's Russell 1000 mandate. Fitted costs and collateral income are held fixed before launch; extrapolation into older high-rate markets is uncertain.
+
+SPXS is registered in the same incremental refresh loop as SQQQ: real bars are replaced and the existing synthesized returns are preserved. When Yahoo adjusts the first real SPXS close after a split or dividend, its prefix is rescaled by the same factor so the synthetic-to-real join stays continuous. Invalid downloads leave the existing file unchanged. To rebuild just SPXS without touching other price files or requiring the local Nasdaq CSV:
+
+```bash
+.venv/bin/python3 update_data.py --rebuild-spxs
+.venv/bin/python3 update_data.py --calibrate-spxs  # reproduce the fit; writes no files
+```
+
+The rebuild requires the committed `short-rates.tsv`, positive source prices, and exact phase anchors. It rejects missing inputs before writing the file. The app exposes `data.spxs` to custom strategies and offers SPXS wherever SQQQ can be selected, including inverse hedge choices. Period columns keep their previous indices; SPXS is appended at column 10.
+
+## UDOW and EURL reconstruction
+
+Both files contain real dividend- and split-adjusted Yahoo Finance closes after their first available trading bar, and estimates before it. The initial addition covers through **September 18, 2026**. The daily refresh updates both funds alongside the existing seven.
+
+**UDOW** has 4,564 reconstructed observations starting **1992-01-02**. From DIA’s first Yahoo bar (**1998-01-20**), the underlying is `^DJI × DIA_adj / DIA_raw`, using the same dividend-factor approach as the existing Nasdaq reconstruction. Before that, Yahoo’s `^DJI` is price-only, so dividends are missing. The model uses the issuer’s [0.95% expense ratio](https://www.proshares.com/our-etfs/leveraged-and-inverse/UDOW) and an **uncalibrated** 0.50% annual swap spread. It stops at Yahoo’s observed Dow history; it does not borrow S&P or Nasdaq returns to extend to 1953.
+
+**EURL** has 5,946 reconstructed observations starting **1990-06-18**. It chains adjusted VGK closes from its first Yahoo bar (**2005-03-10**) to adjusted VEURX NAVs for earlier history. These are US-dollar European equity proxies, so currency movement is already included. They are **not an exact historical EURL index**: Vanguard’s [benchmark history](https://advisors.vanguard.com/investments/products/vgk/vanguard-ftse-europe-etf) uses MSCI Europe through March 26, 2013, FTSE Developed Europe through September 30, 2015, then FTSE Developed Europe All Cap. EURL currently targets [FTSE Developed Europe All Cap](https://www.direxion.com/product/daily-ftse-europe-bull-3x-etf). The model uses EURL’s 1.04% net expense ratio (including acquired-fund expenses), an **uncalibrated** 0.50% spread, and the existing USD short-rate model.
+
+VGK/VEURX returns retain their own fees, tracking error, and dividend-tax effects; those are multiplied by three in the reconstruction, in addition to EURL’s modeled costs. Historical fee changes, international swap pricing, and different NAV/market closing times are not modeled. This makes EURL’s prefix suitable for approximate stress tests, with greater uncertainty than a reconstruction from its exact benchmark. Neither new fund’s spread has been fitted to its real returns.
+
+Every phase is anchored to a matching source date, and the real ETF tail is copied directly. All dates within each file’s coverage align with the app’s trading calendar. Before coverage begins, the app exposes zero as a missing-price marker; the native strategy date controls move forward to usable history, and custom strategies must guard against missing prices. SMA and RSI warm up only on available prices.
+
+Rebuild just these two files without the uncommitted Nasdaq CSV or refreshing the existing seven:
+
+```bash
+.venv/bin/python3 update_data.py --rebuild --tickers UDOW EURL
+.venv/bin/python3 update_data.py --tickers UDOW EURL  # subsequent refresh
+```
+
+The rebuild requires the committed `short-rates.tsv` to cover the synthetic period. A missing source or anchor fails before overwriting that fund’s file. On incremental refresh, the new funds’ synthetic prefixes are rescaled when Yahoo changes the first real adjusted close (for example after a dividend or split), preserving the join and all synthetic daily returns.
 
 ## The financing-cost correction
 
@@ -138,6 +196,9 @@ Fetch any file straight from GitHub:
 | SSO  | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-sso.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-sso.tsv) |
 | SPXL | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-spxl.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-spxl.tsv) |
 | SQQQ | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-sqqq.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/synthetic-sqqq.tsv) |
+| SPXS | [synthetic-spxs.tsv](synthetic-spxs.tsv) |
+| UDOW | [synthetic-udow.tsv](synthetic-udow.tsv) |
+| EURL | [synthetic-eurl.tsv](synthetic-eurl.tsv) |
 | Fed Funds Effective Rate (daily, 1954+) | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/fed-funds-effective.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/fed-funds-effective.tsv) |
 | 3-month T-bill (monthly, 1934+) | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/t-bill-3mo.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/t-bill-3mo.tsv) |
 | Combined daily short rates (1934+) | [https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/short-rates.tsv](https://raw.githubusercontent.com/bumbeishvili/9sig.networthcast.com/refs/heads/main/data/short-rates.tsv) |
@@ -169,7 +230,7 @@ Date	Rate               ← rate files (Rate column, value in % per year)
 
 `.github/workflows/update-data.yml` fires hourly on weekdays (`30 13-22 * * 1-5`) and gates each fire to 09:00–17:30 ET, so nine runs land per trading day: one at the open, seven through the session, one after the close. Each run executes `update_data.py` in its default incremental mode and commits `data/*.tsv` only when the bytes changed, which makes holidays a no-op.
 
-Incremental mode touches the **seven price files only**. It pulls fresh yfinance bars for the post-IPO tail of each ETF, copies the committed pre-IPO prefix through verbatim, and never contacts FRED. The three rate files refresh by hand:
+Incremental mode updates the ten price files registered in `update_data.py`, plus a failure-tolerant NFCI refresh. It pulls fresh yfinance bars for the post-IPO tail of each ETF, preserves the committed pre-IPO history (rebasing SPXS/UDOW/EURL when their adjusted anchor changes), and refreshes NFCI from FRED. The three rate files refresh by hand:
 
 ```bash
 python3 update_data.py --refresh-rates    # re-pull DFF + TB3MS from FRED

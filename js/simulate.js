@@ -120,7 +120,7 @@ function buildCustomContributions(monthly, annualRaise, entryDate, exitDate, exp
 // index (ulCol, parkCol) look up an exact daily price instead of a monthly
 // one — used by 9sig's contribDeployPct pricing when a real transaction
 // schedule supplies an exact day (see buildScheduleFromTransactions).
-const COL_TO_DAILY_KEY = ['date', 'tqqq', 'qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq'];
+const COL_TO_DAILY_KEY = ['date', 'tqqq', 'qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'];
 
 // SMA timing strategy: hold TQQQ while the signal asset (QQQ or SPY) closes
 // above its N-day simple moving average; flip to cash (earning the user's
@@ -136,12 +136,12 @@ const COL_TO_DAILY_KEY = ['date', 'tqqq', 'qqq', 'spy', 'qld', 'sso', 'spxl', 's
 // that quarter — the SMA strategy panel renders transition dots off this.
 // Column index into monthlyData rows for each tradeable asset name.
 // monthlyData layout: [date, tqqq, qqq, spy, qld, sso, spxl]
-const SMA_ASSET_COL = { tqqq: 1, qqq: 2, spy: 3, qld: 4, sso: 5, spxl: 6, sqqq: 7 };
+const SMA_ASSET_COL = { tqqq: 1, qqq: 2, spy: 3, qld: 4, sso: 5, spxl: 6, sqqq: 7, udow: 8, eurl: 9, spxs: 10 };
 // Unleveraged equivalent — used for the bodyguard SMA-distance check.
 // (The bodyguard tracks the unleveraged underlying because the leveraged
 // version's "% above its own SMA" is structurally larger and useless as a
 // gauge of how stretched the underlying market is.)
-const SMA_UNLEVERAGED_OF = { tqqq: 'qqq', qld: 'qqq', sso: 'spy', spxl: 'spy', qqq: 'qqq', spy: 'spy', sqqq: 'qqq' };
+const SMA_UNLEVERAGED_OF = { tqqq: 'qqq', qld: 'qqq', sso: 'spy', spxl: 'spy', qqq: 'qqq', spy: 'spy', sqqq: 'qqq', spxs: 'spy' };
 
 function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, opts) {
   opts = opts || {};
@@ -236,7 +236,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
   // Which ticker the bubble gauge measures. Defaults to the unleveraged sibling
   // of the fund (QQQ for TQQQ) — the canonical dot-com gauge — but the user can
   // pick any tradeable ticker.
-  const bgAsset = (opts.bgAsset || SMA_UNLEVERAGED_OF[ulName] || 'qqq').toLowerCase();
+  const bgAsset = (opts.bgAsset || SMA_UNLEVERAGED_OF[ulName] || ulName).toLowerCase();
   const bgCol   = SMA_ASSET_COL[bgAsset] || SMA_ASSET_COL.qqq;
   // Bodyguard SMA — the bubble ticker's own moving average. Its window is
   // independent of the primary signal; falls back to the primary window if unset.
@@ -251,6 +251,10 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
   let mEnd = stepRows.length - 1;
   while (mEnd >= 0 && stepRows[mEnd][0] > endDate) mEnd--;
   if (mStart > mEnd) return empty;
+  const requiredCols = [ulCol, assetCol];
+  if (SMA_ASSET_COL[outAsset]) requiredCols.push(SMA_ASSET_COL[outAsset]);
+  if (bgGtfo > 0) requiredCols.push(bgCol);
+  if (requiredCols.some(col => !(stepRows[mStart][col] > 0))) return empty;
 
   // Decide in/out for this period. Layered rules:
   //   1. SMA crossover (with entry/exit hysteresis buffers) — primary regime
@@ -312,7 +316,8 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
   // Holdings: shares per tradeable asset (tqqq, qqq, spy, qld, sso, spxl) +
   // cash. Multiple buckets coexist mid-DCA; non-target buckets are sold instantly
   // each month, target bucket is bought via the active DCA ladder.
-  const shares = { tqqq: 0, qqq: 0, spy: 0, qld: 0, sso: 0, spxl: 0, sqqq: 0 };
+  const shares = { tqqq: 0, qqq: 0, spy: 0, qld: 0, sso: 0, spxl: 0, sqqq: 0, udow: 0, eurl: 0, spxs: 0 };
+  const tax = typeof createTurkeyTax === 'function' ? createTurkeyTax(opts, sm0[0]) : null;
   let cash = initial;
   let totalInvested = initial;
   // Last contribution amount that actually landed (schedule lookup, below) —
@@ -330,7 +335,11 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
   let target = computeTarget(state, bgState);
   if (target !== 'cash') {
     const p0 = priceOf(sm0, target);
-    if (p0 > 0) { shares[target] = (cash * (1 - cost)) / p0; cash = 0; }
+    if (p0 > 0) {
+      shares[target] = (cash * (1 - cost)) / p0;
+      if (tax) tax.buy(target, shares[target], cash, sm0[0]);
+      cash = 0;
+    }
   }
   let dcaRemaining = 0; // 0 = no active DCA (target already reached or all-cash)
   // Cash-account settlement (T+N). Selling needs the SHARES settled (N trading
@@ -370,7 +379,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
     date: sm0[0],
     state, held: prevHeldAsset, action: 'START',
     fee: prevHeldAsset !== 'cash' ? initial * cost : 0, // initial deploy pays the fee too
-    price: ul0, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq,  // leveraged-side share count
+    price: ul0, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq + shares.udow + shares.eurl + shares.spxs,  // leveraged-side share count
     stockVal: totalAt(sm0) - cash, cash, total: totalAt(sm0),
     invested: initial,
   }];
@@ -415,7 +424,10 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
     const curMonthStr = mDate.substring(0, 7);
     const newMonth = curMonthStr !== prevMonthStr;
     prevMonthStr = curMonthStr;
-    if (newMonth && cash > 0) cash *= (1 + monthlyRate);
+    if (newMonth && cash > 0) {
+      if (tax) tax.addInterest(cash * monthlyRate, mDate);
+      cash *= (1 + monthlyRate);
+    }
 
     // Contribution/withdrawal timing is separate from newMonth: byDate has an
     // entry on the exact day money actually lands — the real transaction date
@@ -444,6 +456,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
             const p = priceOf(row, a);
             if (p <= 0) continue;
             const grossNeeded = Math.min(shares[a] * p, need / (1 - cost));
+            if (tax) tax.sell(a, grossNeeded / p, grossNeeded * (1 - cost), mDate);
             shares[a] -= grossNeeded / p;
             need -= grossNeeded * (1 - cost);
           }
@@ -503,7 +516,11 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
       for (const a of Object.keys(shares)) {
         if (a !== target && shares[a] > 0) {
           const p = priceOf(row, a);
-          if (p > 0) { const val = shares[a] * p; cash += val * (1 - cost); sellFee += val * cost; shares[a] = 0; soldThisStep = true; }
+          if (p > 0) {
+            const val = shares[a] * p;
+            if (tax) tax.sell(a, shares[a], val * (1 - cost), mDate);
+            cash += val * (1 - cost); sellFee += val * cost; shares[a] = 0; soldThisStep = true;
+          }
         }
       }
       if (soldThisStep) lastSellStep = m;
@@ -516,7 +533,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
     const pushLog = (action, heldAsset, fee) => {
       smaLog.push({
         date: mDate, state, held: heldAsset, action, fee: fee || 0,
-        price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq,
+        price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq + shares.udow + shares.eurl + shares.spxs,
         stockVal: totalAt(row) - cash,
         cash, total: totalAt(row),
         invested: totalInvested,
@@ -554,6 +571,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
           shares[target] += (buyAmt * (1 - cost)) / p; cash = 0;
           if (dcaRemaining === 1) dcaRemaining = 0;
         }
+        if (tax) tax.buy(target, buyAmt * (1 - cost) / p, buyAmt, mDate);
         lastBuyStep = m;
         const isAdd = (prevHeldAsset === target); // already in it → a top-up
         if (isAdd && !easeActive && contribToday) {
@@ -562,7 +580,7 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
           // as a contribution, but it still pays the trading fee.
           smaLog.push({
             date: mDate, state, held: target, action: 'CONTRIB', contribAmt: currentMonthly, fee: buyAmt * cost,
-            price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq,
+            price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq + shares.udow + shares.eurl + shares.spxs,
             stockVal: totalAt(row) - cash, cash, total: totalAt(row), invested: totalInvested,
           });
         } else {
@@ -581,16 +599,37 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
       // money-in events show up in the transaction list too.
       smaLog.push({
         date: mDate, state, held: prevHeldAsset, action: 'CONTRIB', contribAmt: currentMonthly, fee: 0,
-        price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq,
+        price: ulP, shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq + shares.udow + shares.eurl + shares.spxs,
         stockVal: totalAt(row) - cash,
         cash, total: totalAt(row),
         invested: totalInvested,
       });
     }
 
+    if (tax && taxClosesYear(mDate, stepRows[m + 1]?.[0], stepRows[mEnd][0])) {
+      let taxFee = 0;
+      cash = tax.settle(mDate, cash, need => {
+        let raised = 0;
+        for (const a of Object.keys(shares)) {
+          const p = priceOf(row, a);
+          if (!(p > 0) || !(shares[a] > 0) || raised >= need) continue;
+          const quantity = Math.min(shares[a], (need - raised) / (p * (1 - cost)));
+          const proceeds = quantity * p * (1 - cost);
+          tax.sell(a, quantity, proceeds, mDate);
+          shares[a] -= quantity; raised += proceeds; taxFee += quantity * p * cost;
+          lastSellStep = m;
+        }
+        return raised;
+      });
+      const payment = tax.payments[tax.payments.length - 1];
+      if (payment.taxUSD > 0 || taxFee > 0) {
+        pushLog('TAX', dominantHeld(row), taxFee);
+        smaLog[smaLog.length - 1].tax = payment.taxUSD;
+      }
+    }
     if (ddControls) ddControls.push({ date: mDate, h: snapHoldings(), cash });
 
-    if (qEnds.has(mDate) || (sampleWeekly && isWeekEnd(mDate, stepRows[m + 1] && stepRows[m + 1][0]))) {
+    if (qEnds.has(mDate) || (tax && m === mEnd) || (sampleWeekly && isWeekEnd(mDate, stepRows[m + 1] && stepRows[m + 1][0]))) {
       smaPoints.push({ date: mDate, value: totalAt(row), state });
     }
   }
@@ -605,14 +644,14 @@ function simulateSMA(initial, monthly, annualRate, entryIdx, exitIdx, annualRais
     smaLog.push({
       date: lastRow[0], state, held: dominantHeld(lastRow), action: 'END', fee: 0,
       price: lastRow[ulCol] || 0,
-      shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq,
+      shares: shares.tqqq + shares.qqq + shares.spy + shares.qld + shares.sso + shares.spxl + shares.sqqq + shares.udow + shares.eurl + shares.spxs,
       stockVal: totalAt(lastRow) - cash,
       cash, total: totalAt(lastRow),
       invested: totalInvested,
     });
   }
 
-  return { smaPoints, smaLog, ddControls, totalContributed: totalInvested };
+  return { smaPoints, smaLog, ddControls, totalContributed: totalInvested, taxPayments: tax ? tax.payments : [] };
 }
 
 function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, opts) {
@@ -792,7 +831,12 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
   const fastMonthly = (qData === periodData || (period === 'quarterly' && qData === quarterlyData)) && monthsInPeriod && (period !== 'quarterly' || monthlyByQuarter);
   const monthsLookup = (period === 'quarterly') ? monthlyByQuarter : monthsInPeriod;
   const qSlice = qData.slice(entryIdx, exitIdx + 1);
-  if (qSlice.length < 2) return { log: [], bhPoints: [], qqqPoints: [], spyPoints: [], qldPoints: [], ssoPoints: [], spxlPoints: [], totalContributed: initial };
+  if (qSlice.length < 2 || !(qSlice[0][ulCol] > 0) ||
+      (!isCashPark && !(qSlice[0][parkCol] > 0))) {
+    return { log: [], samplePoints: [], bhPoints: [], qqqPoints: [], spyPoints: [],
+      qldPoints: [], ssoPoints: [], spxlPoints: [], sqqqPoints: [], udowPoints: [],
+      eurlPoints: [], spxsPoints: [], totalContributed: initial };
+  }
 
   // Initial allocation: stockPct in the leveraged ETF, cashPct in the park
   // bucket (cash by default, or shares of qqq/spy/etc. when parkAsset is set).
@@ -802,6 +846,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
   // rebalance decision uses it).
   let cash = initial * cashPct;
   let parkShares = 0;
+  let parkTaxDebt = 0; // USD liability, never represented as a short ETF position
   if (!isCashPark) {
     const p0 = parkPriceAt(qSlice[0]);
     parkShares = p0 > 0 ? cash / p0 : 0;
@@ -817,6 +862,51 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
   let totalInvested = initial;
   let totalFee = _initFee;
   let investedCompounded = initial;
+  const tax = typeof createTurkeyTax === 'function' ? createTurkeyTax(opts, qSlice[0][0]) : null;
+  const baselineTax = typeof createTurkeyTax === 'function' ? createTurkeyTax(opts, qSlice[0][0]) : null;
+  const taxYearEnds = tax ? new Set(monthlyData.filter(row => row[0].slice(5, 7) === '12').map(row => row[0])) : null;
+  if (tax) {
+    if (!isCashPark && parkCol === ulCol) {
+      const sharedLots = [];
+      tax.lots.set('stock', sharedLots); tax.lots.set('park', sharedLots);
+    }
+    tax.buy('stock', tqqqShares, initial * stockPct, qSlice[0][0]);
+    if (!isCashPark) tax.buy('park', parkShares, initial * cashPct, qSlice[0][0]);
+  }
+  const accrueCash = date => {
+    if (tax) tax.addInterest(cash * monthlyRate, date);
+    cash *= (1 + monthlyRate);
+  };
+  const settleTax = row => {
+    const date = row[0], price = row[ulCol], parkPrice = parkPriceAt(row);
+    if (tax) {
+      const remaining = tax.settle(date, isCashPark ? cash : parkTaxDebt, need => {
+        let raised = 0;
+        if (!isCashPark && parkPrice > 0 && parkShares > 0) {
+          const quantity = Math.min(parkShares, need / parkPrice);
+          tax.sell('park', quantity, quantity * parkPrice, date);
+          parkShares -= quantity; raised += quantity * parkPrice;
+        }
+        if (raised < need && price > 0 && tqqqShares > 0) {
+          const quantity = Math.min(tqqqShares, (need - raised) / (price * (1 - cost)));
+          const proceeds = quantity * price * (1 - cost);
+          tax.sell('stock', quantity, proceeds, date);
+          tqqqShares -= quantity; raised += proceeds;
+          totalFee += quantity * price * cost;
+        }
+        return raised;
+      });
+      if (isCashPark) cash = remaining;
+      else {
+        // Reinvest any small excess released by a loss-realizing funding sale.
+        if (remaining > 0 && parkPrice > 0) tax.buy('park', remaining / parkPrice, remaining, date);
+        if (parkPrice > 0 && remaining > 0) parkShares += remaining / parkPrice;
+        parkTaxDebt = Math.min(0, remaining);
+        cash = parkShares * parkPrice + parkTaxDebt;
+      }
+    }
+    if (baselineTax) investedCompounded = baselineTax.settle(date, investedCompounded);
+  };
   // Contribution schedule — a real uploaded transaction history when the
   // caller supplies one, otherwise the formula materialized once. See
   // buildFormulaSchedule's own comment (js/simulate.js).
@@ -862,7 +952,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
       const dPrice = ulKey ? dRow[ulKey] : 0;
       if (!(dPrice > 0)) return;
       const sv = tqqqShares * dPrice;
-      const cashAtSample = isCashPark ? cash : (parkKey && dRow[parkKey] > 0 ? parkShares * dRow[parkKey] : cash);
+      const cashAtSample = isCashPark ? cash : (parkKey && dRow[parkKey] > 0 ? parkShares * dRow[parkKey] + parkTaxDebt : cash);
       samplePoints.push({ date: dRow.date, price: dPrice, tqqqVal: sv, cash: cashAtSample, total: sv + cashAtSample, target: signalLine, invested: totalInvested, investedCompounded });
     });
     _weekCursor = uptoExclusive;
@@ -907,9 +997,12 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
             need -= fromCash;
           } else {
             const parkMP = monthlyRow ? (monthlyRow[parkCol] || 0) : 0;
-            const parkVal = parkMP > 0 ? parkShares * parkMP : 0;
+            const parkVal = parkMP > 0 ? Math.max(0, parkShares * parkMP + parkTaxDebt) : 0;
             const fromPark = Math.min(parkVal, need);
-            if (fromPark > 0 && parkMP > 0) parkShares -= fromPark / parkMP;
+            if (fromPark > 0 && parkMP > 0) {
+              if (tax) tax.sell('park', fromPark / parkMP, fromPark, mDate);
+              parkShares -= fromPark / parkMP;
+            }
             need -= fromPark;
           }
           if (need > 0 && mPrice > 0 && tqqqShares > 0) {
@@ -917,17 +1010,19 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
             // `need` (capped at what's actually held).
             const grossNeeded = Math.min(tqqqShares * mPrice, need / (1 - cost));
             const sharesToSell = grossNeeded / mPrice;
+            if (tax) tax.sell('stock', sharesToSell, grossNeeded * (1 - cost), mDate);
             tqqqShares -= sharesToSell;
             qFee += grossNeeded * cost;
             need -= grossNeeded * (1 - cost);
           }
           // Any `need` still left here means the withdrawal exceeded the
           // entire portfolio — an edge case not modeled further.
-          if (isCashPark) cash *= (1 + monthlyRate);
+          if (isCashPark) accrueCash(mDate);
         } else {
           const toStock = currentMonthly * contribDeployPct;
           const toPark  = currentMonthly - toStock;
           if (toStock > 0 && mPrice > 0) {
+            if (tax) tax.buy('stock', toStock * (1 - cost) / mPrice, toStock, mDate);
             tqqqShares += toStock * (1 - cost) / mPrice; qFee += toStock * cost;
           } else if (toStock > 0) {
             // No underlying price (data gap) — the would-be stock half waits as
@@ -943,10 +1038,13 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
             // toPark when a stock-half ran.
             const addCash = (toStock > 0 && mPrice > 0) ? toPark : currentMonthly;
             cash += addCash;
-            cash *= (1 + monthlyRate);
+            accrueCash(mDate);
           } else if (toPark > 0) {
             const parkMP = monthlyRow ? (monthlyRow[parkCol] || 0) : 0;
-            if (parkMP > 0) parkShares += toPark / parkMP;
+            if (parkMP > 0) {
+              if (tax) tax.buy('park', toPark / parkMP, toPark, mDate);
+              parkShares += toPark / parkMP;
+            }
             else            cash += toPark; // missing park price → stash as cash; reconciled at next rebalance
           }
         }
@@ -963,7 +1061,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
           const sv = tqqqShares * mPrice;
           const cashAtSample = isCashPark
             ? cash
-            : (monthlyRow && monthlyRow[parkCol] > 0 ? parkShares * monthlyRow[parkCol] : cash);
+            : (monthlyRow && monthlyRow[parkCol] > 0 ? parkShares * monthlyRow[parkCol] + parkTaxDebt : cash);
           samplePoints.push({ date: mDate, price: mPrice, tqqqVal: sv, cash: cashAtSample, total: sv + cashAtSample, target: signalLine, invested: totalInvested, investedCompounded });
         }
       };
@@ -986,6 +1084,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         // original single-call-per-month order (grow the EXISTING balance,
         // then add new money; new money doesn't retroactively earn growth
         // from earlier in the month it arrived).
+        if (baselineTax) baselineTax.addInterest(investedCompounded * baselineMonthlyRate, mEndDate);
         investedCompounded *= (1 + baselineMonthlyRate);
         const canWalkDaily = typeof daily !== 'undefined' && daily &&
           typeof dailyDateToIdx !== 'undefined' && dailyDateToIdx;
@@ -1007,7 +1106,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
               const sv = tqqqShares * price;
               const cashAtSample = isCashPark
                 ? cash
-                : (monthlyRow[parkCol] > 0 ? parkShares * monthlyRow[parkCol] : cash);
+                : (monthlyRow[parkCol] > 0 ? parkShares * monthlyRow[parkCol] + parkTaxDebt : cash);
               samplePoints.push({ date: d, price, tqqqVal: sv, cash: cashAtSample, total: sv + cashAtSample, target: signalLine, invested: totalInvested, investedCompounded });
             }
           }
@@ -1015,6 +1114,16 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         } else {
           catchUpWeekly(mEndDate);
           applyContribAtPrice(monthlyRow[ulCol], mEndDate, monthlyRow);
+        }
+        // An anniversary-based yearly strategy can cross December between
+        // rebalances. Pay then, so January trades use the reduced holdings.
+        if (tax && mEndDate.slice(5, 7) === '12' && mEndDate < qDate) {
+          settleTax(monthlyRow);
+          const sv = tqqqShares * monthlyRow[ulCol];
+          const point = { date: mEndDate, price: monthlyRow[ulCol], tqqqVal: sv, cash,
+            total: sv + cash, target: signalLine, invested: totalInvested, investedCompounded };
+          if (samplePoints.length && samplePoints[samplePoints.length - 1].date === mEndDate) samplePoints.pop();
+          samplePoints.push(point);
         }
       };
       if (fastMonthly) {
@@ -1035,7 +1144,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
       // value at the rebalance row's park price.
       if (!isCashPark) {
         const parkP = parkPriceAt(qSlice[qi]);
-        if (parkP > 0) cash = parkShares * parkP;
+        if (parkP > 0) cash = parkShares * parkP + parkTaxDebt;
       }
 
       let action = '';
@@ -1081,16 +1190,23 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         const parkPriceNow = parkPriceAt(qSlice[qi]);
         const moveIntoPark = (dollars) => {
           cash += dollars;
-          if (!isCashPark && parkPriceNow > 0) parkShares += dollars / parkPriceNow;
+          if (!isCashPark && parkPriceNow > 0) {
+            if (tax) tax.buy('park', dollars / parkPriceNow, dollars, qDate);
+            parkShares += dollars / parkPriceNow;
+          }
         };
         const moveOutOfPark = (dollars) => {
           cash -= dollars;
-          if (!isCashPark && parkPriceNow > 0) parkShares -= dollars / parkPriceNow;
+          if (!isCashPark && parkPriceNow > 0) {
+            if (tax) tax.sell('park', dollars / parkPriceNow, dollars, qDate);
+            parkShares -= dollars / parkPriceNow;
+          }
         };
 
         if (diff > 0 && !inCrashZone) {
           // SELL: TQQQ above signal, sell excess to cash (or park asset)
           const sharesToSell = diff / qPrice;
+          if (tax) tax.sell('stock', sharesToSell, diff * (1 - cost), qDate);
           tqqqShares -= sharesToSell;
           moveIntoPark(diff * (1 - cost)); qFee += diff * cost;
           action = 'SELL ' + fmt(diff);
@@ -1102,6 +1218,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         } else if (diff > 0 && inCrashZone && crashNoSellCount >= 2) {
           // Crash zone but already skipped 2 consecutive quarters — sell anyway
           const sharesToSell = diff / qPrice;
+          if (tax) tax.sell('stock', sharesToSell, diff * (1 - cost), qDate);
           tqqqShares -= sharesToSell;
           moveIntoPark(diff * (1 - cost)); qFee += diff * cost;
           action = 'SELL ' + fmt(diff) + ' (30d expired)';
@@ -1113,6 +1230,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
           const needed = Math.min(-diff, available);
           if (needed > 0) {
             const sharesToBuy = needed * (1 - cost) / qPrice;
+            if (tax) tax.buy('stock', sharesToBuy, needed, qDate);
             tqqqShares += sharesToBuy;
             moveOutOfPark(needed); qFee += needed * cost;
             action = needed < -diff ? 'BUY ' + fmt(needed) + ' (part)' : 'BUY ' + fmt(needed);
@@ -1137,9 +1255,13 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         if (quarterlyTqqqGain >= spikeTrigger && postAlloc >= spikeResetFrac && postAlloc <= 1.0 && !inCrashZone) {
           const targetTqqqVal = postTotal * spikeResetFrac;
           const reduceBy = postTqqqVal - targetTqqqVal;
+          if (tax) {
+            tax.sell('stock', reduceBy / qPrice, reduceBy * (1 - cost), qDate);
+            if (!isCashPark && parkPriceNow > 0) tax.buy('park', reduceBy * (1 - cost) / parkPriceNow, reduceBy * (1 - cost), qDate);
+          }
           tqqqShares = targetTqqqVal / qPrice;
           cash       = postTotal - targetTqqqVal - reduceBy * cost; qFee += reduceBy * cost;
-          if (!isCashPark && parkPriceNow > 0) parkShares = cash / parkPriceNow;
+          if (!isCashPark && parkPriceNow > 0) parkShares = (cash - parkTaxDebt) / parkPriceNow;
           signalLine = targetTqqqVal;
           action = 'RESET ' + fmt(reduceBy) + ' (spike)';
         }
@@ -1147,6 +1269,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
         action = 'SNAPSHOT';
       }
 
+      if (tax && (taxYearEnds.has(qDate) || qi === qSlice.length - 1)) settleTax(qSlice[qi]);
       const tqqqVal = tqqqShares * qPrice;
       totalFee += qFee;
       log.push({ date: qDate, price: qPrice, tqqqVal, cash, total: tqqqVal + cash, action, fee: qFee, invested: totalInvested, investedCompounded, target: signalLine });
@@ -1167,7 +1290,9 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
     prevQDate = qDate;
   }
 
-  if (skipBH) return { log, samplePoints, totalContributed: totalInvested, qldPoints: [], ssoPoints: [], spxlPoints: [] };
+  const taxPayments = tax ? tax.payments : [];
+  const baselineTaxPayments = baselineTax ? baselineTax.payments : [];
+  if (skipBH) return { log, samplePoints, taxPayments, baselineTaxPayments, totalContributed: totalInvested, qldPoints: [], ssoPoints: [], spxlPoints: [] };
 
   // Buy & hold for one asset column. Quarterly `points` (unchanged) plus, when
   // sampleQuarterly is on, quarter-end value snapshots so a yearly-grain run can
@@ -1176,7 +1301,33 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
   // math is identical to the four original loops — samples just observe it.
   function buyHold(col, requirePrice) {
     const points = [], sample = [];
+    if (!(qSlice[0][col] > 0)) return { points, sample, taxPayments: [] };
     let shares = qSlice[0][col] ? initial / qSlice[0][col] : 0;
+    const bhTax = typeof createTurkeyTax === 'function' ? createTurkeyTax(opts, qSlice[0][0]) : null;
+    let taxCash = 0;
+    if (bhTax) bhTax.buy('fund', shares, initial, qSlice[0][0]);
+    const transact = (amount, price, date) => {
+      if (!(price > 0)) return;
+      if (bhTax) {
+        if (amount >= 0) bhTax.buy('fund', amount / price, amount, date);
+        else {
+          const quantity = Math.min(shares, -amount / price);
+          bhTax.sell('fund', quantity, quantity * price, date);
+          shares -= quantity;
+          return;
+        }
+      }
+      shares += amount / price;
+    };
+    const payTax = (date, price) => {
+      if (!bhTax || !(price > 0)) return;
+      taxCash = bhTax.settle(date, taxCash, need => {
+        const quantity = Math.min(shares, need / price);
+        bhTax.sell('fund', quantity, quantity * price, date);
+        shares -= quantity;
+        return quantity * price;
+      });
+    };
     let prevQ = qSlice[0][0];
     // Same weekly catch-up idea as the main loop's, just against this
     // column's own `shares` (frozen between contributions — buy & hold has
@@ -1188,7 +1339,7 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
       walkWeekEnds(weekCursor, uptoExclusive, sampleWeekly && !!dailyKey, (dRow) => {
         const dp = dRow[dailyKey];
         if (!(dp > 0)) return;
-        sample.push({ date: dRow.date, value: shares * dp });
+        sample.push({ date: dRow.date, value: shares * dp + taxCash });
       });
       weekCursor = uptoExclusive;
     };
@@ -1212,19 +1363,24 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
           const dp = dailyKey ? daily[dailyDateToIdx.get(d)][dailyKey] : null;
           const p = dp > 0 ? dp : mRow[col];
           const m = schedule.byDate.get(d) || 0;
-          if (requirePrice ? p : true) shares += m / p;
+          if (requirePrice ? p : true) transact(m, p, d);
           // catchUpWeeklyBH's week-end walk excludes its own boundary date on
           // both sides, so without this push the change wouldn't reach the
           // chart until the NEXT week's sample instead of the real date.
-          if ((sampleWeekly || sampleQuarterly) && dp > 0) sample.push({ date: d, value: shares * dp });
+          if ((sampleWeekly || sampleQuarterly) && dp > 0) sample.push({ date: d, value: shares * dp + taxCash });
         }
         catchUpWeeklyBH(mEndDate);
       } else {
         catchUpWeeklyBH(mEndDate);
         const m = schedule.byMonth.get(monthKey) || 0;
         const mp = mRow[col];
-        if (requirePrice ? mp : true) shares += m / mp;
-        if (sampleQuarterly && mp > 0 && isQuarterEnd(mEndDate)) sample.push({ date: mEndDate, value: shares * mp });
+        if (requirePrice ? mp : true) transact(m, mp, mEndDate);
+        if (sampleQuarterly && mp > 0 && isQuarterEnd(mEndDate)) sample.push({ date: mEndDate, value: shares * mp + taxCash });
+      }
+      if (bhTax && mEndDate.slice(5, 7) === '12') {
+        payTax(mEndDate, mRow[col]);
+        if (sample.length && sample[sample.length - 1].date === mEndDate) sample.pop();
+        sample.push({ date: mEndDate, value: shares * mRow[col] + taxCash });
       }
     };
     if ((sampleQuarterly || sampleWeekly) && qSlice[0][col]) sample.push({ date: qSlice[0][0], value: shares * qSlice[0][col] });
@@ -1241,12 +1397,17 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
           }
         }
         catchUpWeeklyBH(qDate);
-        if (sampleWeekly && qP) sample.push({ date: qDate, value: shares * qP });
+        if (bhTax && qi === qSlice.length - 1 && bhTax.payments.at(-1)?.date !== qDate) {
+          payTax(qDate, qP);
+          if (sample.length && sample[sample.length - 1].date === qDate) sample.pop();
+          sample.push({ date: qDate, value: shares * qP + taxCash });
+        }
+        if (sampleWeekly && qP) sample.push({ date: qDate, value: shares * qP + taxCash });
       }
-      points.push({ date: qDate, value: qP ? shares * qP : 0, price: qP, shares });
+      points.push({ date: qDate, value: qP ? shares * qP + taxCash : 0, price: qP, shares, cash: taxCash });
       prevQ = qDate;
     }
-    return { points, sample };
+    return { points, sample, taxPayments: bhTax ? bhTax.payments : [] };
   }
 
   const bh   = buyHold(1, false); // TQQQ (always col 1, regardless of the strategy's underlying)
@@ -1256,12 +1417,15 @@ function simulate(initial, monthly, annualRate, entryIdx, exitIdx, annualRaise, 
   const sso  = buyHold(5, true);
   const spxl = buyHold(6, true);
   const sqqq = buyHold(7, true);
+  const udow = buyHold(8, true);
+  const eurl = buyHold(9, true);
+  const spxs = buyHold(10, true);
 
   return {
-    log, samplePoints,
-    bhPoints: bh.points, qqqPoints: qqq.points, spyPoints: spy.points, qldPoints: qld.points, ssoPoints: sso.points, spxlPoints: spxl.points, sqqqPoints: sqqq.points,
-    bhSample: bh.sample, qqqSample: qqq.sample, spySample: spy.sample, qldSample: qld.sample, ssoSample: sso.sample, spxlSample: spxl.sample, sqqqSample: sqqq.sample,
+    log, samplePoints, taxPayments, baselineTaxPayments,
+    bhPoints: bh.points, qqqPoints: qqq.points, spyPoints: spy.points, qldPoints: qld.points, ssoPoints: sso.points, spxlPoints: spxl.points, sqqqPoints: sqqq.points, udowPoints: udow.points, eurlPoints: eurl.points, spxsPoints: spxs.points,
+    bhSample: bh.sample, qqqSample: qqq.sample, spySample: spy.sample, qldSample: qld.sample, ssoSample: sso.sample, spxlSample: spxl.sample, sqqqSample: sqqq.sample, udowSample: udow.sample, eurlSample: eurl.sample, spxsSample: spxs.sample,
+    bhTaxPayments: { tqqq: bh.taxPayments, qqq: qqq.taxPayments, spy: spy.taxPayments, qld: qld.taxPayments, sso: sso.taxPayments, spxl: spxl.taxPayments, sqqq: sqqq.taxPayments, udow: udow.taxPayments, eurl: eurl.taxPayments, spxs: spxs.taxPayments },
     totalContributed: totalInvested,
   };
 }
-

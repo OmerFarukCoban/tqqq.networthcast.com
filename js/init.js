@@ -1,13 +1,15 @@
 // Initialize: load CSV, derive data, set slider max, restore state, render
 (async function init() {
-  let QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, NFCI_WEEKLY;
+  let QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, UDOW_DAILY, EURL_DAILY, SPXS_DAILY, NFCI_WEEKLY;
   try {
-    [QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, NFCI_WEEKLY] = await Promise.all([
+    [QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, UDOW_DAILY, EURL_DAILY, SPXS_DAILY, NFCI_WEEKLY] = await Promise.all([
       loadQQQDaily(), loadTQQQDaily(), loadSPYDaily(), loadQLDDaily(), loadSSODaily(), loadSPXLDaily(),
       // SQQQ is a first-class column (0-filled on failure): every engine
       // guards zero prices, so a fetch failure degrades SQQQ options to
       // empty/zero lines instead of blanking the app.
       loadSQQQDaily().catch(() => []),
+      loadUDOWDaily(), loadEURLDaily(),
+      loadSPXSDaily().catch(() => []),
       // NFCI is a signal series, not a price: on failure the credit-veto
       // strategy sees NaN and the veto never fires — degraded, not broken.
       loadNFCIWeekly().catch(() => []),
@@ -25,7 +27,7 @@
     if (spinner) spinner.style.display = 'none';
     return;
   }
-  daily = buildDaily(QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY);
+  daily = buildDaily(QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, UDOW_DAILY, EURL_DAILY, SPXS_DAILY);
   nfciDaily = buildNfciDaily(daily, NFCI_WEEKLY);
   // "Last updated" freshness note in the header subtitle — the actual
   // wall-clock time the data was last fetched (written by
@@ -50,8 +52,8 @@
     // panel) can show the same fetch time without re-fetching or reformatting.
     window._dataFetchedAt = d;
   }).catch(() => {});
-  quarterlyData = lastOfPeriod(daily, getQuarter).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
-  monthlyData = lastOfPeriod(daily, getMonth).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
+  quarterlyData = lastOfPeriod(daily, getQuarter).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs]);
+  monthlyData = lastOfPeriod(daily, getMonth).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.udow, d.eurl, d.spxs]);
   dailyDateToIdx = new Map(daily.map((d, i) => [d.date, i]));
   // Pre-index monthly entries per quarter so simulate()'s hot inner loops
   // become O(2-3) lookups instead of O(monthlyData.length) scans.
@@ -88,6 +90,9 @@
   if (hasAnyParam && typeof migrateSharedLink === 'function') migrateSharedLink(params);
   const urlMap = { i: 'slider-initial', m: 'slider-monthly', a: 'slider-raise', r: 'slider-rate', e: 'slider-entry', x: 'slider-exit' };
   let hasUrlParams = false;
+  for (const [key, id] of Object.entries({ trtax: 'tax-enabled', trfx: 'tax-fx', trppi: 'tax-ppi-growth' })) {
+    if (params.has(key)) { document.getElementById(id).value = params.get(key); hasUrlParams = true; }
+  }
   for (const [key, sliderId] of Object.entries(urlMap)) {
     const val = params.get(key);
     if (val !== null) {
@@ -210,6 +215,7 @@
     } catch(e) {}
   }
   window._dualRange.updateUI();
+  syncTaxControls();
   // Apply the restored 9sig growth-% to the static "9sig" labels in the
   // analytics modal before first render (e.g. URL ?ng=15 → "15sig").
   if (typeof refresh9sigDisplayLabels === 'function') refresh9sigDisplayLabels();

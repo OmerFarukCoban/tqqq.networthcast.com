@@ -34,8 +34,24 @@
 //   'sma'       → sim.smaPoints[i].value, includes entry, has .state
 // Map a side-panel underlying selector to its earliest valid quarterly
 // index. TQQQ is synthesized to the 1953 data start so the floor is always 0.
-function _earliestQIdxForUnderlyingSelect(_selectId) {
-  return 0;
+function _earliestQIdxForAsset(asset) {
+  const col = SMA_ASSET_COL[asset];
+  if (!col || !quarterlyData) return 0;
+  const first = quarterlyData.findIndex(row => row[col] > 0);
+  // The slider enters at the previous quarter's close.
+  return first > 0 ? Math.min(first + 1, quarterlyData.length - 1) : 0;
+}
+
+function _earliestQIdxForUnderlyingSelect(selectId) {
+  return _earliestQIdxForAsset((document.getElementById(selectId) || {}).value);
+}
+
+function _priceHistoryFloor(type, read) {
+  const ids = type === '9sig' ? ['select-9sig-underlying', 'select-9sig-park-asset'] :
+    type === 'bh' ? ['select-bh-underlying'] :
+    type === 'sma' ? ['select-sma-underlying', 'select-sma-asset', 'select-sma-out-asset'] : [];
+  if (type === 'sma' && +read('select-sma-bg-gtfo') > 0) ids.push('select-sma-bg-asset');
+  return Math.max(0, ...ids.map(id => _earliestQIdxForAsset(read(id))));
 }
 
 const STRATEGY_REGISTRY = {
@@ -49,6 +65,7 @@ const STRATEGY_REGISTRY = {
   'bh-sso':  { label: 'B&H SSO',  pointsKey: 'ssoPoints',      valueOf: (p) => p.value, prependStart: true  },
   'bh-spxl': { label: 'B&H SPXL', pointsKey: 'spxlPoints',     valueOf: (p) => p.value, prependStart: true  },
   'bh-sqqq': { label: 'B&H SQQQ', pointsKey: 'sqqqPoints',     valueOf: (p) => p.value, prependStart: true  },
+  'bh-spxs': { label: 'B&H SPXS', pointsKey: 'spxsPoints',     valueOf: (p) => p.value, prependStart: true  },
   'sma':     { label: 'SMA', pointsKey: 'smaPoints',           valueOf: (p) => p.value, prependStart: false,
                // SMA depends on the current asset+window — earliest valid
                // quarter is when the SMA series first becomes non-null.
@@ -114,11 +131,20 @@ function earliestQIdxOf(key) {
 // baseline without those needing to be visible on the chart.
 function effectiveEntryMinQIdx(extraKeys) {
   let min = 0;
+  const read = id => (document.getElementById(id) || {}).value;
   if (typeof chart !== 'undefined' && chart) {
     for (const [keyStr, idx] of Object.entries(STRATEGY_KEY_TO_DATASET_IDX)) {
       if (!chart.isDatasetVisible(idx)) continue;
       const e = earliestQIdxOf(keyStr);
       if (e > min) min = e;
+    }
+    for (const [type, idx] of [['9sig', 0], ['bh', 2], ['sma', 8]]) {
+      if (chart.isDatasetVisible(idx)) min = Math.max(min, _priceHistoryFloor(type, read));
+    }
+  }
+  if (typeof getSavedConfigs === 'function') {
+    for (const cfg of getSavedConfigs()) {
+      if (!cfg.hidden) min = Math.max(min, _priceHistoryFloor(cfg.type, id => (cfg.params || {})[id]));
     }
   }
   if (Array.isArray(extraKeys)) {
@@ -263,7 +289,7 @@ function analyticsKeyLabel(key) {
   if (key === 'compounded') return 'Compounded Cash';
   if (key === 'custom')     return 'Custom Target';
   if (key === 'custom-pct') return 'Custom Growth % per year';
-  if (isCfgKey(key)) { const c = cfgFromKey(key); return c ? c.name : 'Saved'; }
+  if (isCfgKey(key)) { const c = cfgFromKey(key); return c ? taxStrategyLabel(c) : 'Saved'; }
   return STRATEGY_LABELS[key] || key || 'Adaptive';
 }
 function escA(s) {
@@ -304,7 +330,7 @@ function refreshAnalyticsPickers() {
     if (isBhKey(selVal) && !list.some(([k]) => k === selVal)) list.push([selVal, analyticsKeyLabel(selVal)]);
     return `<optgroup label="Strategies">${list.map(([v, l]) => mkOpt(v, l, selVal)).join('')}</optgroup>`;
   };
-  const savedGroup = (selVal) => configs.length ? `<optgroup label="Saved">${configs.map(c => mkOpt(CFG_KEY_PREFIX + c.id, c.name, selVal)).join('')}</optgroup>` : '';
+  const savedGroup = (selVal) => configs.length ? `<optgroup label="Saved">${configs.map(c => mkOpt(CFG_KEY_PREFIX + c.id, taxStrategyLabel(c), selVal)).join('')}</optgroup>` : '';
 
   // ----- "Visualize <X>" — the strategy the grid plots -----
   const stratSel = document.getElementById('analytics-strategy');
@@ -1208,7 +1234,7 @@ const METRIC_OPTS = {
   monthly: [0, 50, 100, 150, 200, 250, 300, 400, 500, 600, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000, 7500, 10000, 15000, 20000, 25000, 50000, 100000],
   raise:   [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 10, 12, 15, 20],
   rate:    [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100],
-  sa:      ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  sa:      ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
   sw:      [100, 150, 200, 250],
   // SMA enrichment: hysteresis buffers + RSI overheat exit.
   seb:     [0, 1, 2, 3, 4, 5],
@@ -1216,28 +1242,28 @@ const METRIC_OPTS = {
   sro:     [0, 60, 70, 80, 90],
   src:     [0, 40, 50, 60, 70],
   // SMA out-asset, DCA ladders, bodyguard rules.
-  soa:     ['cash', 'qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
-  sbga:    ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  soa:     ['cash', 'qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
+  sbga:    ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
   sdi:     [0, 3, 6, 12],
   sdo:     [0, 3, 6, 12],
   sbg:     [0, 30, 35, 40, 45, 50],
   // 9sig: which leveraged ETF to trade, and signal-line growth.
-  nu:      ['tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  nu:      ['tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
   ng:      [0.5, 0.6, 0.7, 0.8, 0.9, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150],
   // 9sig rule customization:
   //   nc = 30-down no-sell drop % below 2-yr high (≥100 effectively disables)
   //   ns = spike-reset trigger (quarterly gain %; 0 disables)
   nc:      [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 140, 150, 180],
   nbp:     [50, 60, 70, 75, 80, 85, 90, 95, 100],
-  npa:     ['cash', 'qqq', 'spy', 'qld', 'tqqq', 'sso', 'spxl', 'sqqq'],
+  npa:     ['cash', 'qqq', 'spy', 'qld', 'tqqq', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
   ncw:     [3, 6, 9, 12, 15, 18, 21, 24, 36, 48, 60],
   ns:      [0, 25, 50, 60, 70, 75, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 225, 250, 275, 300, 350, 400, 500],
   np:      ['weekly', 'monthly', 'quarterly', 'yearly'],
   nh:      [0, 10, 20, 30, 40, 50, 60, 70, 80, 90],
   // SMA: which leveraged ETF the strategy holds when the signal is "in".
-  su:      ['tqqq', 'qld', 'sso', 'spxl', 'qqq', 'spy', 'sqqq'],
+  su:      ['tqqq', 'qld', 'sso', 'spxl', 'qqq', 'spy', 'sqqq', 'udow', 'eurl', 'spxs'],
   // Buy & Hold: which ETF is bought and held.
-  bu:      ['tqqq', 'qld', 'qqq', 'spy', 'sso', 'spxl', 'sqqq'],
+  bu:      ['tqqq', 'qld', 'qqq', 'spy', 'sso', 'spxl', 'sqqq', 'udow', 'eurl', 'spxs'],
   // Per-strategy parked-cash interest rates (% per year).
   nr:      [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 14, 15, 16, 18, 20],
   scr:     [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 14, 15, 16, 18, 20],
@@ -1430,6 +1456,7 @@ function renderAnalyticsMetrics(initial, monthly, annualRaise, rate, strategy) {
   const sName = escA(analyticsKeyLabel(strategy));
   const cName = escA(analyticsKeyLabel(analyticsBaseline));
   const groups = [
+    ...(readTaxSettings().enabled ? ['<div class="ap-group tax-note">Türkiye tax estimate · 2026 rules; the NFCI veto strategy includes tax, while other custom/code-based strategies remain pre-tax.</div>'] : []),
     `<div class="ap-group"><span class="ap-label">With <b>${sName}</b>'s parameters</span>${stratParams || '<span class="ap-none">no parameters</span>'}</div>`,
   ];
   // Spiral mode (custom-pct) has no "vs strategy" — skip the comparison group.
@@ -1532,7 +1559,7 @@ function strategyDateValues(sim, strat) {
 // 'custom-pct' (per-cell flat target derived from prior cell × (1+pct)).
 function baselineDateValues(sim, key, cellBaselineVal, stratSeries) {
   if (!sim) return [];
-  if (key === '9sig' || key === 'bh-tqqq' || key === 'bh-qld' || key === 'bh-qqq' || key === 'bh-spy' || key === 'bh-sso' || key === 'bh-spxl' || key === 'bh-sqqq' || key === 'sma') {
+  if (key === '9sig' || key === 'bh-tqqq' || key === 'bh-qld' || key === 'bh-qqq' || key === 'bh-spy' || key === 'bh-sso' || key === 'bh-spxl' || key === 'bh-sqqq' || key === 'bh-udow' || key === 'bh-eurl' || key === 'bh-spxs' || key === 'sma') {
     return strategyDateValues(sim, key);
   }
   if (key === 'compounded') {
@@ -1640,7 +1667,7 @@ function analyticsConfigPoints(cfg, initial, monthly, rate, annualRaise, entryId
   if (!cfg || typeof simulate !== 'function') return [];
   const p = cfg.params || {};
   const get = (typeof pget === 'function') ? pget : (pp, id, d) => (pp && id in pp) ? pp[id] : d;
-  const ul  = (typeof ulColFromVal === 'function') ? ulColFromVal : (v) => (v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : 1);
+  const ul  = (typeof ulColFromVal === 'function') ? ulColFromVal : (v) => (v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : v === 'udow' ? 8 : v === 'eurl' ? 9 : v === 'spxs' ? 10 : 1);
   if (cfg.type === '9sig') {
     const cd = +get(p, 'select-9sig-crashdrop', 30), sp = +get(p, 'select-9sig-spike', 100);
     const opts = {
@@ -1692,7 +1719,7 @@ function analyticsConfigPoints(cfg, initial, monthly, rate, annualRaise, entryId
   if (cfg.type === 'bh') {
     const r = simulate(initial, monthly, 0, entryIdx, exitIdx, annualRaise, {});
     const key = get(p, 'select-bh-underlying', 'tqqq');
-    const arr = key === 'qqq' ? r.qqqPoints : key === 'spy' ? r.spyPoints : key === 'qld' ? (r.qldPoints || []) : key === 'sso' ? (r.ssoPoints || []) : key === 'spxl' ? (r.spxlPoints || []) : r.bhPoints;
+    const arr = key === 'spxs' ? (r.spxsPoints || []) : key === 'udow' ? (r.udowPoints || []) : key === 'eurl' ? (r.eurlPoints || []) : key === 'sqqq' ? (r.sqqqPoints || []) : key === 'qqq' ? r.qqqPoints : key === 'spy' ? r.spyPoints : key === 'qld' ? (r.qldPoints || []) : key === 'sso' ? (r.ssoPoints || []) : key === 'spxl' ? (r.spxlPoints || []) : r.bhPoints;
     return (arr || []).map(pt => ({ date: pt.date, value: pt.value }));
   }
   if (cfg.type === 'invested') {
@@ -1708,7 +1735,7 @@ function analyticsConfigPoints(cfg, initial, monthly, rate, annualRaise, entryId
 // baseline). Cleared implicitly by key changes.
 let _analyticsCodeCache = new Map();
 function analyticsCodeCacheKey(cfg, initial, monthly, annualRaise, entryIdx, exitIdx) {
-  return [cfg.id, cfg.code || '', JSON.stringify(cfg.params || {}), initial, monthly, annualRaise, entryIdx, exitIdx].join('|');
+  return [cfg.id, cfg.code || '', JSON.stringify(cfg.params || {}), initial, monthly, annualRaise, entryIdx, exitIdx, taxSettingsKey()].join('|');
 }
 // Run a CODE-based saved config in the sandboxed worker over [entryIdx, exitIdx]
 // and resolve to its (date, value) points. Uses runCustomPreview so the run
@@ -1864,7 +1891,7 @@ function getCellSim(startYear, period) {
 
   const smaP = _smaParamsForAnalytics();
   const _ug = _underlyingAndGrowth();
-  const key = JSON.stringify({ initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
+  const key = JSON.stringify({ tax: taxSettingsKey(), initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
   if (_cellSimsKey !== key) {
     _cellSims    = new Map();
     _cellSimsKey = key;
@@ -1900,7 +1927,7 @@ function getYearStartSim(startYear) {
 
   const smaP = _smaParamsForAnalytics();
   const _ug = _underlyingAndGrowth();
-  const key = JSON.stringify({ initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
+  const key = JSON.stringify({ tax: taxSettingsKey(), initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
   if (_perYearSimsKey !== key) {
     _perYearSims    = new Map();
     _perYearSimsKey = key;
@@ -2172,7 +2199,7 @@ function getSpiralSim(initial, monthly, rate, annualRaise, opts) {
   const smaP = _smaParamsForAnalytics();
   const _ug  = _underlyingAndGrowth();
   const key = JSON.stringify({
-    initial, monthly, rate, annualRaise,
+    initial, monthly, rate, annualRaise, tax: taxSettingsKey(),
     sma: smaP,
     ul: _ug.sigUlCol,
     qg: _ug.qGrowth,

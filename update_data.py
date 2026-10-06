@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Fetches daily closing prices for QQQ, QLD, TQQQ, SPY, SSO, SPXL, and SQQQ
+Fetches daily closing prices for QQQ, QLD, TQQQ, SPY, SSO, SPXL, SQQQ, SPXS,
+UDOW, and EURL
 from Yahoo Finance and short-term interest rates from FRED, then writes them
 as TSV files consumed by index.html.
 
 Two modes. The default (no flags, what the cron runs) is an incremental
-refresh: replace the post-IPO tail of the seven price TSVs with fresh
+refresh: replace the post-IPO tail of the ten price TSVs with fresh
 yfinance bars, copy the committed pre-IPO synthesized prefix through
-untouched, never touch FRED. --rebuild runs the full synthesis below.
+preserving its returns (rebasing SPXS/UDOW/EURL after adjustments).
+The NFCI signal refreshes from FRED. --rebuild runs the full synthesis below.
 --refresh-rates re-pulls the FRED TSVs (three rate files + nfci.tsv); nothing else does.
 
 Pre-IPO history is fabricated by walking actual daily index values backward
@@ -30,6 +32,7 @@ Sources used:
                           as far back as yfinance ^NDX (1985-10-01). Merged with
                           yfinance ^NDX, which overrides the CSV on overlaps.
   ^GSPC, ^SP500TR, QQQ, QLD, TQQQ, SPY, SSO, SPXL, SQQQ, QQQ-raw  ← yfinance
+  SPXS, UDOW, EURL, ^DJI, DIA, VGK, VEURX                     ← yfinance
   DFF  (daily 1954+)  ← FRED  — Fed Funds Effective Rate, the swap-counterparty
                                 financing reference for leveraged ETFs
   TB3MS (monthly 1934+) ← FRED — 3-month T-bill, used as the pre-1954 proxy
@@ -50,6 +53,13 @@ Synthesis formulas:
   SPXL 1988 → 2008    ← ^SP500TR                     (3× − 2×rate − SPXL exp)
   SQQQ pre-1999       ← extended ^NDX                (inverse model, below)
   SQQQ 1999 → 2010    ← derived NDX-TR               (inverse model, below)
+  SPXS 1953 → 1988    ← ^GSPC, price-only           (inverse model, below)
+  SPXS 1988 → 2008    ← ^SP500TR, total return      (inverse model, below)
+
+SPXS uses the same inverse arithmetic as SQQQ with its own fitted costs.
+Its real Yahoo tail starts 2008-11-19 and includes the Russell 1000 era
+before 2012-06-29. The synthetic prefix represents hypothetical inverse
+S&P 500 exposure, not the predecessor fund's former benchmark.
 
 The three ^GSPC fallbacks are clipped to the extended-^NDX start date, not to
 1985. With ^ndx_d.csv present that is 1938, and the committed TSVs carry it
@@ -101,6 +111,8 @@ Usage:
     python3 update_data.py                    # incremental price refresh
     python3 update_data.py --refresh-rates    # re-pull FRED rate TSVs
     python3 update_data.py --rebuild          # full synthesis from scratch
+    python3 update_data.py --rebuild-spxs     # rebuild only SPXS
+    python3 update_data.py --calibrate-spxs   # report SPXS fit; write no files
 """
 import csv
 import io
@@ -156,6 +168,19 @@ SQQQ_INVERSE_LEVERAGE = 3
 SQQQ_CASH_MULTIPLE    = 4.028      # fitted; theory = L + 1
 SQQQ_DRAG_DAILY       = -6.099e-05 # fitted intercept (~ -1.537 %/yr)
 
+# SPXS has the same inverse-collateral model, fitted separately against
+# ^SP500TR only AFTER its Russell 1000 -> S&P 500 benchmark change.
+# OLS on daily (SPXS return + 3 × index return), with the PRIOR day's rate.
+# 3,483 returns, 2012-06-29..2026-05-07 (last committed short-rate date).
+# Forward replay: -4.03% to +1.05% cumulative deviation, ending -3.77%.
+# Drag includes fees/spread/slippage; do not deduct another expense ratio.
+SPXS_INVERSE_LEVERAGE = 3
+SPXS_CASH_MULTIPLE = 4.33301607729
+SPXS_DRAG_DAILY = -7.33046149613e-05  # fitted intercept (~ -1.8473%/yr)
+SPXS_HISTORY_START = '1953-01-02'
+SPXS_CALIBRATION_START = '2012-06-29'
+SPXS_CALIBRATION_END = '2026-05-07'
+
 # === Financing-cost model =================================================
 # A leveraged ETF holding $1 of investor NAV achieves $L of index exposure by
 # borrowing the extra $(L-1) of synthetic exposure via total-return swap. The
@@ -179,6 +204,9 @@ tickers = [
     ('SSO',    'synthetic-sso.tsv'),
     ('SPXL',   'synthetic-spxl.tsv'),
     ('SQQQ',   'synthetic-sqqq.tsv'),
+    ('SPXS',   'synthetic-spxs.tsv'),
+    ('UDOW',   'synthetic-udow.tsv'),
+    ('EURL',   'synthetic-eurl.tsv'),
 ]
 
 
@@ -516,6 +544,142 @@ def write_price_tsv(path, prefix_pairs, real_df):
             f.write(f'{date_str}\t{render(date_str, cell(row["Close"]))}\n')
 
 
+def walk_backward_inverse(source_pairs, anchor_date, anchor_price, rate_map, *,
+                          leverage=SQQQ_INVERSE_LEVERAGE,
+                          cash_multiple=SQQQ_CASH_MULTIPLE,
+                          drag_daily=SQQQ_DRAG_DAILY):
+    """Shared inverse walk; defaults preserve SQQQ's calibrated model."""
+    pre = [(d, c) for d, c in source_pairs if d <= anchor_date]
+    n = len(pre)
+    if n < 2:
+        return [], []
+    synth = [0.0] * n
+    synth[-1] = anchor_price
+    for i in range(n - 1, 0, -1):
+        ret = (pre[i][1] - pre[i - 1][1]) / pre[i - 1][1]
+        r_daily = (rate_lookup(rate_map, pre[i - 1][0]) / 100.0) / 252.0
+        step = (-leverage * ret) + cash_multiple * r_daily + drag_daily
+        synth[i - 1] = max(synth[i] / (1 + step), 0) if (1 + step) > 0 else 0
+    exact = pre[-1][0] == anchor_date
+    output_n = n - 1 if exact else n
+    pairs = [(pre[i][0], synth[i]) for i in range(output_n)]
+    rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in pairs]
+    return rows, pairs
+
+
+def checked_price_source(ticker, auto_adjust=True):
+    """Reject bad downloads before writing any price data."""
+    import math
+    df = fetch(ticker) if auto_adjust else fetch(ticker, auto_adjust=False)
+    pairs = df_to_pairs(df)
+    if not pairs or any(not math.isfinite(c) or c <= 0 for _, c in pairs):
+        raise ValueError(f'{ticker}: missing or invalid prices; file left unchanged')
+    if any(a[0] >= b[0] for a, b in zip(pairs, pairs[1:])):
+        raise ValueError(f'{ticker}: dates must be unique and chronological')
+    df.index = [d for d, _ in pairs]
+    return df
+
+
+def rebuild_added_etf(ticker, filename):
+    """Rebuild the earlier UDOW/EURL additions without Nasdaq source files."""
+    import math
+    real = checked_price_source(ticker)
+    if ticker == 'UDOW':
+        price_only = df_to_pairs(checked_price_source('^DJI'))
+        adjusted = dict(df_to_pairs(checked_price_source('DIA')))
+        raw = dict(df_to_pairs(checked_price_source('DIA', auto_adjust=False)))
+        total_return = [(d, c * adjusted[d] / raw[d]) for d, c in price_only
+                        if d in adjusted and d in raw]
+        sources, expense = (total_return, price_only), 0.0095 / 252
+    elif ticker == 'EURL':
+        sources = tuple(df_to_pairs(checked_price_source(s)) for s in ('VGK', 'VEURX'))
+        expense = 0.0104 / 252
+    else:
+        raise ValueError(f'Unsupported reconstruction: {ticker}')
+    rates = dict(read_rate_tsv(os.path.join(basedir, DATA_DIR, 'short-rates.tsv')))
+    anchor_date, anchor_price = df_to_pairs(real)[0]
+    prefix = []
+    for source in sources:
+        if anchor_date not in dict(source):
+            raise ValueError(f'{ticker}: missing anchor {anchor_date:%Y-%m-%d}')
+        pre = [(d, c) for d, c in source if d < anchor_date]
+        if not pre or any(d not in rates or not math.isfinite(rates[d]) for d, _ in pre):
+            raise ValueError(f'{ticker}: missing short rates for reconstructed history')
+        _, phase = walk_backward(source, anchor_date, anchor_price, 3, expense,
+                                 rates, rate_spread=0.005)
+        if any(not math.isfinite(c) or c <= 0 for _, c in phase):
+            raise ValueError(f'{ticker}: reconstruction produced invalid prices')
+        prefix = phase + prefix
+        anchor_date, anchor_price = phase[0]
+    write_price_tsv(os.path.join(basedir, DATA_DIR, filename), prefix, real)
+    print(f'  {filename}: {len(prefix)} synthesized + {len(real)} real')
+
+
+def build_spxs_history():
+    """SQQQ's two-phase inverse reconstruction on the S&P 500 benchmark.
+
+    Keep every real adjusted SPXS bar, including its pre-2012 Russell era.
+    The hypothetical prefix uses SP500TR from 1988 and price-only GSPC
+    before then, clipped to the committed S&P dataset's 1953 start.
+    """
+    import math
+    import pandas as pd
+    real = checked_price_source('SPXS')
+    total_return = df_to_pairs(checked_price_source('^SP500TR'))
+    price_only = [(d, c) for d, c in df_to_pairs(checked_price_source('^GSPC'))
+                  if d >= pd.Timestamp(SPXS_HISTORY_START)]
+    rates = dict(read_rate_tsv(os.path.join(basedir, DATA_DIR, 'short-rates.tsv')))
+    if not rates or not price_only or price_only[0][0] != pd.Timestamp(SPXS_HISTORY_START):
+        raise ValueError('SPXS requires short-rates.tsv and S&P history from 1953-01-02')
+    anchor_date, anchor_price = df_to_pairs(real)[0]
+    prefix = []
+    for source in (total_return, price_only):
+        if anchor_date not in dict(source):
+            raise ValueError(f'SPXS source missing exact anchor {anchor_date:%Y-%m-%d}')
+        # Never silently replace absent financing rates with zero.
+        pre = [(d, c) for d, c in source if d < anchor_date]
+        if not pre or any(d not in rates or not math.isfinite(rates[d]) for d, _ in pre):
+            raise ValueError('SPXS requires short rates for every reconstructed trading day')
+        _, phase = walk_backward_inverse(
+            source, anchor_date, anchor_price, rates,
+            leverage=SPXS_INVERSE_LEVERAGE, cash_multiple=SPXS_CASH_MULTIPLE,
+            drag_daily=SPXS_DRAG_DAILY)
+        if any(not math.isfinite(c) or c <= 0 for _, c in phase):
+            raise ValueError('SPXS inverse model produced a non-positive or invalid price')
+        prefix = phase + prefix
+        anchor_date, anchor_price = phase[0]
+    return prefix, real
+
+
+def calibrate_spxs():
+    """Read-only reproduction of the fit, excluding the Russell 1000 era."""
+    import numpy as np
+    import pandas as pd
+    real = dict(df_to_pairs(checked_price_source('SPXS')))
+    index = dict(df_to_pairs(checked_price_source('^SP500TR')))
+    rates = dict(read_rate_tsv(os.path.join(basedir, DATA_DIR, 'short-rates.tsv')))
+    observations = []
+    dates = sorted(real)
+    for prev, date in zip(dates, dates[1:]):
+        if not (SPXS_CALIBRATION_START <= str(date.date()) <= SPXS_CALIBRATION_END):
+            continue
+        if prev not in rates or prev not in index or date not in index:
+            raise ValueError(f'SPXS calibration missing index/rate observation for {date}')
+        observations.append((date, real[date] / real[prev] - 1,
+                             index[date] / index[prev] - 1, rates[prev] / 100 / 252))
+    if len(observations) < 2 or observations[-1][0] != pd.Timestamp(SPXS_CALIBRATION_END):
+        raise ValueError('SPXS calibration requires the complete documented rate window')
+    values = np.array([row[1:] for row in observations])
+    fund_returns, index_returns, short_rates = values.T
+    cash, drag = np.linalg.lstsq(np.column_stack([short_rates, np.ones(len(values))]),
+                                fund_returns + 3 * index_returns, rcond=None)[0]
+    relative = np.cumprod((1 - 3 * index_returns + cash * short_rates + drag) / (1 + fund_returns))
+    print(f'SPXS: {len(values)} returns, {observations[0][0]:%Y-%m-%d} through '
+          f'{observations[-1][0]:%Y-%m-%d}; cash_multiple={cash:.12g}, drag_daily={drag:.12g}')
+    print(f'Forward model / real cumulative deviation: min {relative.min() - 1:.4%}, '
+          f'max {relative.max() - 1:.4%}, end {relative[-1] - 1:.4%}')
+
+
 def incremental_refresh():
     """Default daily-cron path. The synthesized pre-IPO prefix of each TSV
     is permanent and lives in the committed file; we only need to refresh
@@ -531,13 +695,22 @@ def incremental_refresh():
         if not os.path.exists(path):
             print(f"  {filename}: missing — run with --rebuild to bootstrap")
             continue
-        real_df = fetch(ticker)
+        rebase_prefix = ticker in {'SPXS', 'UDOW', 'EURL'}
+        real_df = checked_price_source(ticker) if rebase_prefix else fetch(ticker)
         if real_df.empty:
             print(f"  {filename}: yfinance returned no rows; leaving TSV untouched")
             continue
         first_real = normalize_ts(real_df.index[0])
         existing = read_price_tsv(path)
         prefix_pairs = [(d, c) for d, c in existing if d < first_real]
+        if rebase_prefix and prefix_pairs:
+            old_anchor = dict(existing).get(first_real)
+            new_anchor = cell(real_df['Close'].iloc[0])
+            if old_anchor is None or not old_anchor > 0:
+                raise ValueError(f'{ticker}: missing existing real anchor; rebuild required')
+            if abs(new_anchor / old_anchor - 1) > NOISE_REL:
+                scale = new_anchor / old_anchor
+                prefix_pairs = [(d, c * scale) for d, c in prefix_pairs]
         write_price_tsv(path, prefix_pairs, real_df)
         last = real_df.index[-1].strftime('%Y-%m-%d')
         print(f"  {filename}: {len(prefix_pairs)} preserved + {len(real_df)} real, through {last}")
@@ -563,10 +736,17 @@ def incremental_refresh():
 # fixing the synthesis itself.
 import argparse
 _argp = argparse.ArgumentParser(description='Refresh ETF price TSVs.')
-_argp.add_argument('--rebuild', action='store_true',
+_mode = _argp.add_mutually_exclusive_group()
+_mode.add_argument('--rebuild', action='store_true',
                    help='Full synthesis from scratch (uses cached FRED rates by '
                         'default — historical rates do not change). Default is '
                         'incremental yfinance refresh.')
+_mode.add_argument('--rebuild-spxs', action='store_true',
+                   help='Rebuild only synthetic-spxs.tsv using cached short rates.')
+_mode.add_argument('--calibrate-spxs', action='store_true',
+                   help='Report the SPXS inverse fit on its S&P era; write no files.')
+_argp.add_argument('--tickers', nargs='+', choices=[t for t, _ in tickers],
+                   help='Refresh or rebuild only these ETF price files.')
 _argp.add_argument('--refresh-rates', action='store_true',
                    help='Re-fetch FRED DFF + TB3MS + NFCI from the network and '
                         'overwrite data/fed-funds-effective.tsv + data/t-bill-3mo.tsv + '
@@ -574,10 +754,33 @@ _argp.add_argument('--refresh-rates', action='store_true',
                         'committed rate/signal data; not needed for synthesis '
                         '(historical rates do not change).')
 _args = _argp.parse_args()
+if _args.tickers:
+    if _args.rebuild_spxs or _args.calibrate_spxs:
+        _argp.error('--tickers cannot be combined with an SPXS-only mode')
+    tickers = [(t, f) for t, f in tickers if t in _args.tickers]
+
+if _args.calibrate_spxs:
+    calibrate_spxs()
+    sys.exit(0)
+if _args.rebuild_spxs:
+    prefix, real = build_spxs_history()
+    write_price_tsv(os.path.join(basedir, DATA_DIR, 'synthetic-spxs.tsv'), prefix, real)
+    print(f'  synthetic-spxs.tsv: {len(prefix)} synthesized + {len(real)} real, '
+          f'{prefix[0][0]:%Y-%m-%d} to {real.index[-1]:%Y-%m-%d}')
+    sys.exit(0)
 
 if not _args.rebuild:
     incremental_refresh()
     print("Done.")
+    sys.exit(0)
+
+if all(t in {'UDOW', 'EURL', 'SPXS'} for t, _ in tickers):
+    for ticker, filename in tickers:
+        if ticker == 'SPXS':
+            prefix, real = build_spxs_history()
+            write_price_tsv(os.path.join(basedir, DATA_DIR, filename), prefix, real)
+        else:
+            rebuild_added_etf(ticker, filename)
     sys.exit(0)
 
 
@@ -592,6 +795,7 @@ tqqq_df         = fetch('TQQQ')
 spy_df          = fetch('SPY')
 sso_df          = fetch('SSO')                              # ProShares 2× S&P500, 2006-06-21+
 spxl_df         = fetch('SPXL')                             # Direxion 3× S&P500, 2008-11-05+
+sqqq_df         = fetch('SQQQ')
 ndx_df          = fetch('^NDX')
 gspc_df         = fetch('^GSPC')
 sp500tr_df      = fetch('^SP500TR')
@@ -769,26 +973,7 @@ else:
 # ---- SQQQ: real ProShares UltraPro Short QQQ (-3x) from 2010-02-11 ----
 # Inverse funds don't fit walk_backward's long formula: instead of paying
 # financing on a borrowed leg, a -3x fund sits on (1+L) units of cash EARNING
-# the short rate. Both coefficients below were fitted against real SQQQ.
-def walk_backward_inverse(source_pairs, anchor_date, anchor_price, rate_map):
-    pre = [(d, c) for d, c in source_pairs if d <= anchor_date]
-    n = len(pre)
-    if n < 2:
-        return [], []
-    synth = [0.0] * n
-    synth[-1] = anchor_price
-    for i in range(n - 1, 0, -1):
-        ret = (pre[i][1] - pre[i - 1][1]) / pre[i - 1][1]
-        r_daily = (rate_lookup(rate_map, pre[i - 1][0]) / 100.0) / 252.0
-        step = (-SQQQ_INVERSE_LEVERAGE * ret) + SQQQ_CASH_MULTIPLE * r_daily + SQQQ_DRAG_DAILY
-        synth[i - 1] = max(synth[i] / (1 + step), 0) if (1 + step) > 0 else 0
-    exact = pre[-1][0] == anchor_date
-    output_n = n - 1 if exact else n
-    pairs = [(pre[i][0], synth[i]) for i in range(output_n)]
-    rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in pairs]
-    return rows, pairs
-
-
+# the short rate. The shared function defaults to SQQQ's original coefficients.
 sqqq_p1_rows, sqqq_p1_pairs = walk_backward_inverse(
     ndx_tr_pairs, sqqq_df.index[0], cell(sqqq_df['Close'].iloc[0]), rate_map)
 if sqqq_p1_pairs:
@@ -799,17 +984,23 @@ else:
     sqqq_prefix_rows = sqqq_p1_rows
 
 
+spxs_prefix_pairs, spxs_df = build_spxs_history()
+spxs_prefix_rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in spxs_prefix_pairs]
+
 prefix_by_ticker = {'QQQ': qqq_prefix_rows, 'QLD': qld_prefix_rows,
                     'TQQQ': tqqq_prefix_rows, 'SPY': spy_prefix_rows,
                     'SSO': sso_prefix_rows, 'SPXL': spxl_prefix_rows,
-                    'SQQQ': sqqq_prefix_rows}
+                    'SQQQ': sqqq_prefix_rows, 'SPXS': spxs_prefix_rows}
 real_by_ticker   = {'QQQ': qqq_df, 'QLD': qld_df, 'TQQQ': tqqq_df, 'SPY': spy_df,
-                    'SSO': sso_df, 'SPXL': spxl_df, 'SQQQ': sqqq_df}
+                    'SSO': sso_df, 'SPXL': spxl_df, 'SQQQ': sqqq_df, 'SPXS': spxs_df}
 
 data_dir = os.path.join(basedir, DATA_DIR)
 os.makedirs(data_dir, exist_ok=True)
 
 for ticker, filename in tickers:
+    if ticker in {'UDOW', 'EURL'}:
+        rebuild_added_etf(ticker, filename)
+        continue
     data = real_by_ticker[ticker]
     prefix_rows = prefix_by_ticker.get(ticker, [])
     path = os.path.join(data_dir, filename)

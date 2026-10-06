@@ -33,7 +33,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.15.4/beautify.min.js" defer></script>
-<link rel="stylesheet" href="styles.css?v=356">
+<link rel="stylesheet" href="styles.css?v=365">
 </head>
 <body>
 
@@ -135,6 +135,29 @@
       </div>
     </div>
 
+    <div class="tax-controls control-group">
+      <input type="hidden" id="tax-enabled" value="0">
+      <button id="tax-toggle" type="button" aria-pressed="false" aria-controls="tax-assumptions"
+        onclick="document.getElementById('tax-enabled').value = readTaxSettings().enabled ? '0' : '1'; changeTaxSettings()">Türkiye tax estimate: off</button>
+      <div id="tax-assumptions" hidden>
+        <p>2026 rules applied to every simulated year. All calculations and payments stay in USD.</p>
+        <label for="tax-fx">Current USD/TRY (threshold conversion)</label>
+        <input id="tax-fx" type="number" min="0.01" max="1000000" step="0.01" value="40" onchange="changeTaxSettings()">
+        <label for="tax-ppi-growth">Annual Yİ-ÜFE inflation (%)</label>
+        <input id="tax-ppi-growth" type="number" min="0" max="500" step="0.1" value="0" onchange="changeTaxSettings()">
+        <details>
+          <summary>How the estimate works</summary>
+          <p>Turkish-resident individual, no other declared income. FIFO sales realize gains directly in USD; purchase costs include fees and receive inflation indexing when the preceding-month index rises at least 10%.</p>
+          <p><b>Annual taxable income</b> = max($0, realized sale profits − realized sale losses) + foreign cash interest when that interest exceeds the USD equivalent of ₺22,000. Capital losses offset same-year capital gains only.</p>
+          <p><b>2026 non-wage tariff:</b> the current USD/TRY setting converts the ₺190,000, ₺400,000, ₺1,000,000 and ₺5,300,000 thresholds to USD once. The 15%, 20%, 27%, 35% and 40% rates apply to their respective USD slices.</p>
+          <p id="tax-usd-thresholds"></p>
+          <p>Tax is paid in USD from the portfolio at year-end, selling holdings if needed. The final partial year's estimated tax is also deducted at exit; unsold holdings are not liquidated. Actual filing/payment is normally the following March/July.</p>
+          <p>Dividend-adjusted prices approximate trading gains; separate dividend tax, foreign tax credits, other income and filing charges are not modeled. The NFCI veto strategy now has a full trade ledger and includes tax; other custom/code-based strategies remain pre-tax.</p>
+          <p><a href="https://intvrg.gib.gov.tr/hazirbeyan/faq.html" target="_blank" rel="noopener">GİB rules</a> · <a href="https://gib.gov.tr/vergi-konulari/1_bireysel/10_menkul_sermaye_iradi/10" target="_blank" rel="noopener">Interest and rates</a></p>
+        </details>
+      </div>
+    </div>
+
     <!-- Build a strategy from pasted (e.g. LLM-written) code. -->
     <button id="new-custom-strategy" type="button" class="new-custom-btn">+ Custom strategy</button>
     <!-- Strategy Library: read-only catalog of the best-known LETF strategies
@@ -150,6 +173,10 @@
   <div class="right-col">
     <div class="panel" style="position:relative;">
       <div id="chart-legend" class="chart-legend"></div>
+      <div id="tax-chart-note" class="tax-note" hidden>
+        Türkiye tax estimate · 2026 rules. Native strategies and the NFCI veto strategy include tax; other custom/code-based strategies remain pre-tax. Unsold gains are not taxed; separate dividend tax is not modeled.
+        <div id="tax-summary" aria-live="polite"></div>
+      </div>
       <div class="chart-container">
         <canvas id="mainChart"></canvas>
         <div id="chart-loading" class="chart-loading">
@@ -317,6 +344,7 @@
         <option value="tqqq">TQQQ</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
       </select>
       <span class="info-icon" tabindex="0" data-tip="By default the safety slice (your cash %) is held as cash, earning the rate below. Pick QQQ/SPY/etc. instead to hold that slice in that fund — new money and rebalances buy into it, and the cash interest stops applying. Picking a leveraged fund leverages both slices.">ⓘ</span>
       and use remaining <span id="9sig-stock-pct">60%</span> to buy
@@ -325,6 +353,7 @@
         <option value="qld">QLD</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
         <option value="qqq">QQQ</option>
         <option value="spy">SPY</option>
       </select>.
@@ -758,6 +787,7 @@
         <option value="spy">SPY</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
       </select>
       at entry, add each monthly contribution to the position, never sell.
       <span class="info-icon" tabindex="0" data-tip="Initial amount goes in at entry and every monthly contribution adds to the position. Nothing is ever sold.">ⓘ</span>
@@ -775,6 +805,7 @@
         <option value="qld">QLD</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
         <option value="qqq">QQQ</option>
         <option value="spy">SPY</option>
       </select>
@@ -786,6 +817,7 @@
         <option value="qld">QLD</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
       </select>
       closes above its
       <select class="inline-select" id="select-sma-window">
@@ -1126,6 +1158,7 @@
         <option value="qld">QLD</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
       </select>
       instead.
       <span class="info-icon" tabindex="0" data-tip="What you hold after a sell.&#10;&#10;• cash — just waits, earning the interest rate below&#10;• QQQ / SPY — keeps your money in the plain, non-leveraged market: much safer than the 3× fund, but still grows if the market drifts up&#10;&#10;Example: sell TQQQ → sit in QQQ → jump back to TQQQ when the buy signal returns.">ⓘ</span>
@@ -1264,6 +1297,7 @@
         <option value="qld">QLD</option>
         <option value="sso">SSO</option>
         <option value="spxl">SPXL</option><option value="sqqq">SQQQ</option>
+        <option value="udow">UDOW</option><option value="eurl">EURL</option><option value="spxs">SPXS</option>
       </select>
       is
       <select class="inline-select" id="select-sma-bg-gtfo">
@@ -1331,20 +1365,21 @@
      returning browsers fetch the new files instead of serving stale cached
      copies (a stale JS file against fresh HTML throws null-element errors).
      Keep this in sync with APP_VERSION in controls.js. -->
-<script src="js/data.js?v=356"></script>
-<script src="js/utils.js?v=356"></script>
-<script src="js/simulate.js?v=356"></script>
-<script src="js/metrics.js?v=356"></script>
-<script src="js/chart.js?v=356"></script>
-<script src="js/controls.js?v=356"></script>
-<script src="js/date-picker.js?v=356"></script>
-<script src="js/transactions.js?v=356"></script>
-<script src="js/analytics.js?v=356"></script>
-<script src="js/preview-dropdown.js?v=356"></script>
-<script src="js/saved-configs.js?v=356"></script>
-<script src="js/strategy-library-code.js?v=356"></script>
-<script src="js/strategy-library.js?v=356"></script>
-<script src="js/init.js?v=356"></script>
+<script src="js/data.js?v=365"></script>
+<script src="js/utils.js?v=365"></script>
+<script src="js/tax.js?v=365"></script>
+<script src="js/simulate.js?v=365"></script>
+<script src="js/metrics.js?v=365"></script>
+<script src="js/chart.js?v=365"></script>
+<script src="js/controls.js?v=365"></script>
+<script src="js/date-picker.js?v=365"></script>
+<script src="js/transactions.js?v=365"></script>
+<script src="js/analytics.js?v=365"></script>
+<script src="js/preview-dropdown.js?v=365"></script>
+<script src="js/saved-configs.js?v=365"></script>
+<script src="js/strategy-library-code.js?v=365"></script>
+<script src="js/strategy-library.js?v=365"></script>
+<script src="js/init.js?v=365"></script>
 
 </body>
 </html>

@@ -585,7 +585,7 @@ function applyParams(type, params) {
   }
 }
 function pget(p, id, dflt) { return (p && id in p) ? p[id] : dflt; }
-function ulColFromVal(v) { return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : 1; }
+function ulColFromVal(v) { return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : v === 'udow' ? 8 : v === 'eurl' ? 9 : v === 'spxs' ? 10 : 1; }
 
 // Canonical (HTML-default) value of every strategy knob, snapshotted ONCE at
 // load. This must NOT be re-read live: picking a value from a bar-preview
@@ -729,7 +729,7 @@ Concretely, DO NOT add unless I mentioned it:
 
 WHAT DOES BECOME A PARAM:
 1. The traded fund. If I named one, it is the DEFAULT and the options are just the sensible
-   alternatives (tqqq, qld, spxl, sso, qqq, spy — plus sqqq when hedging/inverse exposure fits
+   alternatives (tqqq, qld, spxl, sso, qqq, spy, udow, eurl — plus sqqq or spxs when hedging/inverse exposure fits
    the described strategy). In run() index by the chosen id:
      const px = data[p.asset];   (NOT data.tqqq)
 2. What is held when OUT — only if the strategy has an out-state. Options must include "cash":
@@ -765,6 +765,12 @@ data.qld   : daily closing price of QLD   (2x Nasdaq-100, ProShares Ultra QQQ)
 data.sso   : daily closing price of SSO   (2x S&P 500, ProShares Ultra S&P500)
 data.spxl  : daily closing price of SPXL  (3x S&P 500, Direxion Daily S&P500 Bull 3x)
 data.sqqq  : daily closing price of SQQQ  (-3x Nasdaq-100 INVERSE — rises when QQQ falls), synthesized back to 1953
+data.spxs  : daily closing price of SPXS (-3x S&P 500 INVERSE), synthesized back to 1953;
+             real history before 2012-06-29 tracked Russell 1000 (the predecessor BGZ fund)
+data.udow  : daily closing price of UDOW (3x Dow), reconstructed from 1992
+data.eurl  : daily closing price of EURL (3x Europe), reconstructed from 1990 using European proxies
+             udow/eurl are 0 before their history starts. Reject a requested trading range without
+             positive prices for every traded asset; never treat missing prices as a loss.
 data.nfci  : Chicago Fed National Financial Conditions Index, weekly since 1971, forward-filled onto
              trading days with a 7-day publication lag (no look-ahead). NOT a price: a z-score-like
              level where above 0 = tighter-than-average financial conditions, above +0.5 = credit
@@ -910,9 +916,10 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
 
 === HOW THE SIMULATION WORKS ===
 - You manage cash and holdings yourself in local variables — nothing is auto-invested.
-- Trade at that day's close, data[<id>][i]. tqqq, qld, sso, spxl and sqqq are ALREADY leveraged products;
-  do not invent additional borrowing or leverage. sqqq is INVERSE (-3x): it gains when the Nasdaq falls and
-  bleeds badly in any rising or sideways market, so it only makes sense as a short-lived hedge leg.
+- Trade at that day's close, data[<id>][i]. tqqq, qld, sso, spxl, sqqq, spxs, udow and eurl are ALREADY leveraged products;
+  do not invent additional borrowing or leverage. sqqq and spxs are INVERSE (-3x): they gain when
+  their benchmarks (Nasdaq-100 and S&P 500 respectively) fall. Compounding and costs can erode
+  their value over longer periods, including periods when the benchmark ends flat.
 - Add p.monthly of new cash at each new month (grown by p.annualRaise per calendar year).
 - Decide each day using only data up to that day (no look-ahead / no future prices).
 
@@ -931,7 +938,7 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
   params: [
     { id: "asset", label: "Fund traded", default: "tqqq", options: [
       { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" },
-      { value: "spxl", label: "SPXL" }, { value: "sso", label: "SSO" },
+      { value: "spxl", label: "SPXL" }, { value: "udow", label: "UDOW" }, { value: "eurl", label: "EURL" }, { value: "sso", label: "SSO" },
       { value: "qqq",  label: "QQQ" },  { value: "spy", label: "SPY" } ] },
     { id: "park", label: "Held when out", default: "cash", options: [
       { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
@@ -1077,7 +1084,7 @@ function buildCustomPrompt(desc) {
 let _customDataCache = null;
 function buildCustomData() {
   if (_customDataCache) return _customDataCache;
-  if (typeof daily === 'undefined' || !daily) return { dates: [], tqqq: [], qqq: [], spy: [], qld: [], sso: [], spxl: [], sqqq: [] };
+  if (typeof daily === 'undefined' || !daily) return { dates: [], tqqq: [], qqq: [], spy: [], qld: [], sso: [], spxl: [], sqqq: [], udow: [], eurl: [], spxs: [] };
   _customDataCache = {
     dates: daily.map(d => d.date),
     tqqq:  daily.map(d => d.tqqq),
@@ -1087,6 +1094,9 @@ function buildCustomData() {
     sso:   daily.map(d => d.sso),
     spxl:  daily.map(d => d.spxl),
     sqqq:  daily.map(d => d.sqqq || 0),
+    udow:  daily.map(d => d.udow || 0),
+    eurl:  daily.map(d => d.eurl || 0),
+    spxs:  daily.map(d => d.spxs || 0),
     // Chicago Fed NFCI (weekly, aligned to daily with a 7-day publication
     // lag in js/data.js). NaN before 1971 or if the fetch failed — strategy
     // code must treat non-finite as "no signal".
@@ -1235,6 +1245,24 @@ function customWorkerMain() {
       var mod = evalMod(msg.code);
       var schema = Array.isArray(mod.params) ? mod.params : [];
       try { schema = JSON.parse(JSON.stringify(schema)); } catch (e0) { schema = []; }
+      // Saved library copies carry their own older parameter schema. Expose
+      // the S&P pair there too, preserving their code, defaults and settings.
+      if (mod.name === 'NFCI veto, med stretch with SQQQ and med crash exit') {
+        for (var ni = 0; ni < schema.length; ni++) {
+          var np = schema[ni];
+          if (!np || !Array.isArray(np.options)) continue;
+          var added = np.id === 'asset' ? 'spxl' :
+            (np.id === 'park' || np.id === 'crashAsset') ? 'spxs' : null;
+          if (!added) continue;
+          var optionValue = function (o) { return o && typeof o === 'object' ? o.value : o; };
+          var anchor = np.options.findIndex(function (o) {
+            return optionValue(o) === (added === 'spxl' ? 'tqqq' : 'sqqq');
+          });
+          if (anchor >= 0 && !np.options.some(function (o) { return optionValue(o) === added; })) {
+            np.options.splice(anchor + 1, 0, { value: added, label: added.toUpperCase() });
+          }
+        }
+      }
       var p = {}, g = msg.globals || {}, key;
       for (key in g) p[key] = g[key];
       var raw = msg.rawParams || {};
@@ -1256,6 +1284,17 @@ function customWorkerMain() {
               columns: readColumns(res && res.columns) || readColumns(mod.columns),
               signals: readSignals(res && res.signals),
               lines: readLines(res && res.lines) || readLines(mod.lines),
+              annualHoldingPnl: (res && Array.isArray(res.annualHoldingPnl)) ? res.annualHoldingPnl.map(function (p) {
+                return { year: Number(p.year) || 0, tqqq: Number(p.tqqq) || 0,
+                  sqqq: Number(p.sqqq) || 0, total: Number(p.total) || 0 };
+              }) : [],
+              taxPayments: (res && Array.isArray(res.taxPayments)) ? res.taxPayments.map(function (p) {
+                return { date: p.date == null ? null : String(p.date), year: Number(p.year) || 0,
+                  profitUSD: Number(p.profitUSD) || 0, lossUSD: Number(p.lossUSD) || 0,
+                  gainsUSD: Number(p.gainsUSD) || 0, interestUSD: Number(p.interestUSD) || 0,
+                  taxableIncomeUSD: Number(p.taxableIncomeUSD) || 0,
+                  taxUSD: Number(p.taxUSD) || 0 };
+              }) : [],
               totalContributed: (res && typeof res.totalContributed === 'number') ? res.totalContributed : null };
     } catch (err) {
       out = { reqId: msg.reqId, error: (err && err.message) ? err.message : String(err) };
@@ -1281,7 +1320,7 @@ const _customRunTimers = {}; // cfgId -> { sig, t }
 function ensureCustomWorker() {
   if (_customWorker) return _customWorker;
   try {
-    const src = '(' + customWorkerMain.toString() + ')()';
+    const src = turkeyTaxWorkerSource() + '(' + customWorkerMain.toString() + ')()';
     const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
     const w = new Worker(url);
     w.onmessage = onCustomWorkerMessage;
@@ -1311,7 +1350,7 @@ function customSig(cfg, ctx) {
   // 10y threshold without any of the other fields changing would keep
   // serving a cached result computed at the old log density).
   return [cfg.code || '', JSON.stringify(cfg.params || {}), ctx.initial, ctx.monthly, ctx.annualRaise,
-    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', schedKey, ctx.displayGrain || ''].join('|');
+    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', schedKey, ctx.displayGrain || '', taxSettingsKey()].join('|');
 }
 function computeCustomGlobals(cfg, ctx) {
   let entryDate = null, exitDate = null, startIdx = 0, endIdx = 0;
@@ -1347,7 +1386,7 @@ function computeCustomGlobals(cfg, ctx) {
   // smooth weekly sampling once ctx.displayGrain (js/chart.js) floors at
   // weekly for a <10y window.
   const weeklyDisplay = ctx.displayGrain === 'weekly';
-  return { initial: ctx.initial, monthly: ctx.monthly, annualRaise: ctx.annualRaise, startIdx, endIdx, entryDate, exitDate, contributions, weeklyDisplay };
+  return { initial: ctx.initial, monthly: ctx.monthly, annualRaise: ctx.annualRaise, startIdx, endIdx, entryDate, exitDate, contributions, weeklyDisplay, tax: readTaxSettings() };
 }
 // Day-over-day change badge for a custom/library-derived config (see
 // js/chart.js's isLatestDaySelected/prevTradingDayDate on ctx, and
@@ -1419,7 +1458,7 @@ function runCustomInWorker(cfg, sig, globals) {
     failTo('Strategy timed out — possible infinite loop.');
   }, CUSTOM_TIMEOUT_MS);
   _customPending[reqId] = { cfgId: cfg.id, sig, timer };
-  w.postMessage({ type: 'run', reqId: reqId, code: cfg.code, globals: globals, rawParams: cfg.params || {} });
+  w.postMessage({ type: 'run', reqId: reqId, code: effectiveTaxStrategyCode(cfg.code), globals: globals, rawParams: cfg.params || {} });
 }
 // One-off sandbox run for a bar preview (a param override). Result goes to `cb`,
 // NOT into the main result cache, so it never disturbs the live line.
@@ -1462,7 +1501,7 @@ function startCustomPreview(job) {
     finish(null, 'timeout');
   }, CUSTOM_TIMEOUT_MS);
   _customPending[reqId] = { cb: finish, timer };
-  w.postMessage({ type: 'run', reqId: reqId, code: job.cfg.code, globals: job.globals, rawParams: Object.assign({}, job.cfg.params || {}, job.overrides) });
+  w.postMessage({ type: 'run', reqId: reqId, code: effectiveTaxStrategyCode(job.cfg.code), globals: job.globals, rawParams: Object.assign({}, job.cfg.params || {}, job.overrides) });
 }
 function onCustomWorkerMessage(e) {
   const msg = e.data || {};
@@ -1490,6 +1529,8 @@ function onCustomWorkerMessage(e) {
   window._customResults[pend.cfgId] = {
     sig: pend.sig, log: msg.log || [], schema: msg.schema || [],
     columns: msg.columns || null, signals: msg.signals || null, lines: msg.lines || null,
+    annualHoldingPnl: msg.annualHoldingPnl || [],
+    taxPayments: msg.taxPayments || [],
     name: msg.name || null, error: msg.error || null,
     totalContributed: (typeof msg.totalContributed === 'number') ? msg.totalContributed : null,
   };
@@ -1679,7 +1720,7 @@ function computeConfigSeries(cfg, ctx) {
   // Multi-asset drawdown control points (SMA can hold leveraged + out-asset +
   // cash at once). When set, takes precedence over the single-asset path.
   let ddMulti = null;
-  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq' };
+  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'udow', 9: 'eurl', 10: 'spxs' };
 
   if (cfg.type === '9sig') {
     const cd = +pget(p, 'select-9sig-crashdrop', 30);
@@ -1745,7 +1786,7 @@ function computeConfigSeries(cfg, ctx) {
     };
     ddControls = (r.log || []).map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash }));
     ddKey = UL_KEY[opts.underlyingCol] || 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, udowPoints: r.udowPoints, eurlPoints: r.eurlPoints, spxsPoints: r.spxsPoints };
     const _sigLast = (r.log && r.log.length) ? r.log[r.log.length - 1] : null;
     if (_sigLast && typeof daily !== 'undefined' && daily && daily.length) {
       const _sigShares = _sigLast.price > 0 ? _sigLast.tqqqVal / _sigLast.price : 0;
@@ -1809,14 +1850,20 @@ function computeConfigSeries(cfg, ctx) {
     };
     const r = simulate(initial, monthly, 0, simEntryIdx, exitIdx, annualRaise, bhOpts);
     const key = pget(p, 'select-bh-underlying', 'tqqq');
-    const rawArr = key === 'sqqq' ? (r.sqqqPoints || [])
+    const rawArr = key === 'spxs' ? (r.spxsPoints || [])
+              : key === 'udow' ? (r.udowPoints || [])
+              : key === 'eurl' ? (r.eurlPoints || [])
+              : key === 'sqqq' ? (r.sqqqPoints || [])
               : key === 'qqq' ? r.qqqPoints
               : key === 'spy' ? r.spyPoints
               : key === 'qld' ? (r.qldPoints || [])
               : key === 'sso' ? (r.ssoPoints || [])
               : key === 'spxl' ? (r.spxlPoints || [])
               : r.bhPoints;
-    const sampleArr = key === 'sqqq' ? r.sqqqSample
+    const sampleArr = key === 'spxs' ? r.spxsSample
+              : key === 'udow' ? r.udowSample
+              : key === 'eurl' ? r.eurlSample
+              : key === 'sqqq' ? r.sqqqSample
               : key === 'qqq' ? r.qqqSample
               : key === 'spy' ? r.spySample
               : key === 'qld' ? r.qldSample
@@ -1835,8 +1882,8 @@ function computeConfigSeries(cfg, ctx) {
     // Drawdown control needs real per-step share counts, which only the raw
     // (quarterly) points carry — the dense sample rows are value-only.
     ddControls = (rawArr || []).map(pt => ({ date: pt.date, shares: pt.shares, cash: 0 }));
-    ddKey = key === 'qqq' ? 'qqq' : key === 'spy' ? 'spy' : key === 'qld' ? 'qld' : key === 'sso' ? 'sso' : key === 'spxl' ? 'spxl' : key === 'sqqq' ? 'sqqq' : 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints };
+    ddKey = key === 'qqq' ? 'qqq' : key === 'spy' ? 'spy' : key === 'qld' ? 'qld' : key === 'sso' ? 'sso' : key === 'spxl' ? 'spxl' : key === 'sqqq' ? 'sqqq' : key === 'udow' ? 'udow' : key === 'eurl' ? 'eurl' : key === 'spxs' ? 'spxs' : 'tqqq';
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, udowPoints: r.udowPoints, eurlPoints: r.eurlPoints, spxsPoints: r.spxsPoints };
     const _bhLast = (rawArr && rawArr.length) ? rawArr[rawArr.length - 1] : null;
     if (_bhLast && _bhLast.shares > 0) ydayVal = ydayFromHoldings({ [ddKey]: _bhLast.shares }, 0);
   } else if (cfg.type === 'invested') {
@@ -1896,7 +1943,7 @@ function appendConfigDatasets(chart, ctx) {
     const s = computeConfigSeries(cfg, ctx);
     window._configMetrics[cfg.id] = { cagr: s.cagr, maxDD: s.maxDD, start: s.start, end: s.end, ddPeak: s.ddPeak, ddTrough: s.ddTrough };
     chart.data.datasets.push({
-      label: cfg.name,
+      label: taxStrategyLabel(cfg),
       data: s.data,
       borderColor: cfg.color,
       backgroundColor: 'transparent',
@@ -1918,7 +1965,7 @@ function appendConfigDatasets(chart, ctx) {
       for (const def of CONFIG_SUB_DEFS) {
         if (!cfg.subShown[def.key]) continue;
         chart.data.datasets.push({
-          label: cfg.name + ' · ' + configSubLabel(def, cfg),
+          label: taxStrategyLabel(cfg) + ' · ' + configSubLabel(def, cfg),
           data: resampleByDate(s.subPoints[def.key], ctx.labels),
           borderColor: cfg.color, borderDash: def.dash, borderWidth: 1.5,
           backgroundColor: 'transparent', fill: false, tension: def.key === 'target' ? 0 : 0.3,
@@ -2204,7 +2251,7 @@ function renderCustomBuilder() {
       <div class="builder-modal">
         <div class="sc-modal-title">Describe your strategy</div>
         <div class="wip-note">⚠ Custom strategies are a work in progress — their results may still change.</div>
-        <div class="builder-help">In plain English, describe your strategy in as much detail as you can. You can base it on any of these tickers — <b>TQQQ</b>, <b>QLD</b>, <b>QQQ</b>, <b>SPY</b>, <b>SSO</b>, <b>SPXL</b>, <b>SQQQ</b> (inverse −3×) — plus entry/exit rules, thresholds, and how monthly contributions are handled.</div>
+        <div class="builder-help">In plain English, describe your strategy in as much detail as you can. You can base it on any of these tickers — <b>TQQQ</b>, <b>QLD</b>, <b>QQQ</b>, <b>SPY</b>, <b>SSO</b>, <b>SPXL</b>, <b>SQQQ</b> (inverse −3× Nasdaq-100), <b>SPXS</b> (inverse −3× S&amp;P 500) — plus entry/exit rules, thresholds, and how monthly contributions are handled.</div>
         <textarea id="builder-desc" class="builder-textarea" placeholder="e.g. Hold TQQQ. At each month-end, if QQQ closed below its 200-day moving average, move everything to cash; when it closes back above, buy TQQQ again. Add the monthly contribution to whatever I'm holding.">${_escHtml(cfg.desc || '')}</textarea>
         <div class="builder-actions">
           <button type="button" class="sc-modal-btn" data-builder-cancel>Cancel</button>
@@ -2544,7 +2591,7 @@ function buildConfigPillHtml(cfg) {
           </span>
         </span>
         <span class="sc-dot" style="background:${cfg.color}"></span>
-        <span class="sc-name">${esc(cfg.name)}</span>
+        <span class="sc-name">${esc(taxStrategyLabel(cfg))}</span>
         ${cfg.type === 'custom' ? `<span class="sc-badge" title="Custom strategy (runs in a sandbox)">ƒ</span>` : ''}
         <div class="sc-actions">
           <button type="button" class="sc-edit" title="Edit in sidebar" aria-label="Edit">
@@ -2690,6 +2737,12 @@ function buildCustomControlsHtml(cfg, schema) {
     // so a long settings list reads in blocks instead of one flat scan.
     if (sp.id == null) return sp.section ? `<div class="custom-param-group">${_escHtml(sp.section)}</div>` : '';
     const label = _escHtml(sp.label || sp.id);
+    if (sp.toggle && (sp.type === 'bool' || sp.type === 'boolean')) {
+      const on = String(customParamValue(cfg, sp)) === 'true';
+      return `<div class="custom-param-row"><label>${label}</label>
+        <button type="button" class="inline-select cp-toggle" data-cp-cfg="${_escHtml(cfg.id)}" data-cp-id="${_escHtml(sp.id)}"
+          aria-label="${label}" aria-pressed="${on}" title="Off: same close. On: next trading day's close.">${on ? 'On' : 'Off'}</button></div>`;
+    }
     const curLabel = _escHtml(customOptionLabel(sp, customParamValue(cfg, sp)));
     return `<div class="custom-param-row">
       <label>${label}</label>
@@ -2792,7 +2845,7 @@ function computeCustomParamBars(cfg, sp, opts, popup) {
     // startIdx/endIdx/initial/monthly/annualRaise left old bars on screen.
     const contribKey = globals.contributions ? JSON.stringify(globals.contributions) : '';
     const key = [cfg.code, JSON.stringify(merged), globals.startIdx, globals.endIdx, globals.initial, globals.monthly, globals.annualRaise,
-      globals.entryDate || '', globals.exitDate || '', contribKey, globals.weeklyDisplay ? 1 : 0].join('|');
+      globals.entryDate || '', globals.exitDate || '', contribKey, globals.weeklyDisplay ? 1 : 0, JSON.stringify(globals.tax || {})].join('|');
     const cached = window._customPreviewCache[key];
     if (cached != null) { finals[i] = cached; draw(); return; }
     runCustomPreview(cfg, overrides, globals, (msg) => {
@@ -2833,7 +2886,7 @@ const CUSTOM_LOG_COLS = {
   action:        { label: 'Action', tip: "What the strategy did on this day — buy, sell, switch (one fund straight into another), rebalance, an ease-in slice of a phased buy, a monthly contribution, or a plain hold snapshot.&#10;&#10;Rows that trade are drawn as a symbol on the chart line; hover the row to light it up.&#10;&#10;The (%) in brackets is the gain or loss since the PREVIOUS row, with any contribution on this row removed — so it's the holding's own return." },
   note:          { label: 'Note', tip: "The strategy's own comment on this row — usually why the rule fired." },
   held:          { label: 'Holding', tip: "What you owned right after this row. CASH means sitting out of the market." },
-  price:         { label: 'Price', tip: "Closing price of the asset in the Holding column that day. Blank on cash rows. Price × Shares equals Holdings." },
+  price:         { label: 'Price', tip: "Execution price on sell and switch rows. On other rows, the closing price of the asset in the Holding column. Blank when no fund price applies." },
   shares:        { label: 'Shares', tip: "How many shares of the held asset you owned after this row. 0 when fully in cash." },
   holdingsValue: { label: 'Holdings', tip: "Dollar value of everything you hold that isn't cash." },
   stockVal:      { label: 'Holdings', tip: "Dollar value of everything you hold that isn't cash." },
@@ -2991,6 +3044,22 @@ function buildCustomLogTableHtml(log, columns) {
     </div>`;
 }
 
+function annualHoldingPnlTableHtml(rows) {
+  if (!rows || !rows.length) return '';
+  const money = value => {
+    const n = Number(value) || 0;
+    const sign = n > 0 ? '+' : n < 0 ? '−' : '';
+    return sign + '$' + Math.round(Math.abs(n)).toLocaleString('en-US');
+  };
+  const cell = value => `<td class="${value > 0 ? 'positive' : value < 0 ? 'negative' : ''}">${money(value)}</td>`;
+  const body = rows.map(row => `<tr><td>${row.year}</td>${cell(row.tqqq)}${cell(row.sqqq)}${cell(row.total)}</tr>`).join('');
+  return `<div class="strategy-panel-section-label" style="margin-top:14px">Yearly holding profit/loss</div>
+    <p class="holding-pnl-copy">Close-to-close dollar change while the strategy held each fund. Positions crossing year-end are split between calendar years. Contributions, trading fees, cash interest, and tax are excluded.</p>
+    <div class="quarter-table-wrap holding-pnl-table-wrap"><table class="holding-pnl-year-table">
+      <thead><tr><th>Year</th><th>TQQQ P/L</th><th>SQQQ P/L</th><th>Total P/L</th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+}
+
 // Sidebar for a custom strategy — focuses on the RESULT (settings + an Edit
 // button that reopens the build modal). The describe/prompt/paste flow lives in
 // the modal, not here.
@@ -3085,7 +3154,7 @@ function renderCustomPanelBody(cfgId) {
   // needs nothing beyond rendering the control here, and its choice persists to
   // cfg.color like any saved strategy's.
   if (typeof buildColorPickerHtml === 'function') html += buildColorPickerHtml(cfg.type);
-  html += `<div class="custom-tickers-note">Your strategy can read these tickers: <code>tqqq</code>, <code>qld</code>, <code>qqq</code>, <code>spy</code>, <code>sso</code>, <code>spxl</code>, <code>sqqq</code> (daily closes). Base your rules on any of them.</div>`;
+  html += `<div class="custom-tickers-note">Your strategy can read these tickers: <code>tqqq</code>, <code>qld</code>, <code>qqq</code>, <code>spy</code>, <code>sso</code>, <code>spxl</code>, <code>sqqq</code>, <code>udow</code>, <code>eurl</code>, <code>spxs</code> (daily closes; UDOW starts in 1992, EURL in 1990). Base your rules on any of them.</div>`;
   html += `<button type="button" id="custom-edit-builder" class="custom-edit-btn">Edit strategy</button>`;
   if (cfg.desc) html += `<div class="custom-desc-readout">${_escHtml(cfg.desc)}</div>`;
   if (err) html += `<div class="custom-error"><b>Couldn't run it:</b> ${_escHtml(err)} <span class="custom-error-hint">— click Edit strategy to fix the code.</span></div>`;
@@ -3125,6 +3194,12 @@ function renderCustomPanelBody(cfgId) {
   const _cLog = (window._customLogs || {})[cfgId] || [];
   html += buildCustomSignalMetricsHtml((window._customSignals || {})[cfgId] || null,
                                        _cLog.length ? _cLog[_cLog.length - 1].date : null);
+  if (nfciSupportsTax(cfg.code)) {
+    html += annualHoldingPnlTableHtml(((window._customResults || {})[cfgId] || {}).annualHoldingPnl || []);
+  }
+  if (readTaxSettings().enabled && nfciSupportsTax(cfg.code)) {
+    html += taxAnnualTableHtml(((window._customResults || {})[cfgId] || {}).taxPayments || []);
+  }
   html += buildCustomLogTableHtml(_cLog, (window._customColumns || {})[cfgId] || null);
 
   body.innerHTML = html;
@@ -3259,6 +3334,19 @@ document.addEventListener('click', (e) => {
     }
     if (tgt.closest('#line-color-pop')) return; // click inside popup (hex field, etc.)
     closeColorPopup(true); // click anywhere outside → cancel + revert
+    return;
+  }
+  const cpToggle = tgt.closest('.cp-toggle');
+  if (cpToggle) {
+    const cfg = savedConfigs.find(c => c.id === cpToggle.getAttribute('data-cp-cfg'));
+    const sp = cfg && getCustomSchema(cfg).find(s => s && String(s.id) === cpToggle.getAttribute('data-cp-id'));
+    if (cfg && sp) {
+      cfg.params = cfg.params || {};
+      cfg.params[sp.id] = String(customParamValue(cfg, sp)) !== 'true';
+      closeCustomParamPopup();
+      persistSavedConfigs();
+      if (typeof render === 'function') render();
+    }
     return;
   }
   // Bar-preview dropdown for a custom param.
