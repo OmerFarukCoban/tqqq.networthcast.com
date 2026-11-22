@@ -1,0 +1,385 @@
+// js/widget-page.js — the desktop widget page (widget.html): three charts and
+// nothing else. Across the top, your portfolio from your transaction sheet,
+// what you have put in and the profit; below it, TQQQ intraday and the strategy's
+// signal chart, side by side at one height. All three are the site's own
+// charts (js/signal-chart.js and the intraday page), interactions included.
+//
+// The strategy and the deposits arrive in the URL fragment exactly as a Share
+// link carries them (scz / txz, see SHARE_FRAGMENT_PARAMS in js/controls.js),
+// so they never reach a server. A live sheet can stand in for the deposits:
+// #sheet=<published CSV link>&date=<column>&amount=<column>&value=<column>,
+// the columns named as in the sheet's header row; the browser reads it from
+// Google directly on every refresh. The intraday chart's settings ride along
+// as similar=1|0, from=YYYY-MM-DD and log=1|0. The Übersicht widget in
+// widget/tqqq.widget frames this page.
+(function widgetPage() {
+  const REFRESH_MS = 5 * 60 * 1000;           // re-reads the sheet and the market data; the data files change hourly
+  const QUOTES_MS = 60 * 1000;                 // re-reads the live prices, as the site does; the proxy's answer is a minute old at most
+  const WIDGET_ENTRY = 52;                     // the strategy the widget tracks: SOXL, TQQQ VS QQQ, Mon Turns (the user, 2026-11-06; #50 before)
+  const PORTFOLIO_PX = 190;                    // height of the top chart
+  const BOTTOM_PX = 240;                       // the bottom row's share of a full screen; the intraday chart's height until the signal chart draws
+  const INTRADAY_AXIS_PX = 20;                 // the intraday page's room under its plot (its embed marginBottom)
+  const DEFAULT_START_MONEY = 10000;           // the site's default starting amount
+  // The signal chart is the site's strategy-panel chart, drawn with the same
+  // options (the user, 2026-10-30: "make sure it matches 1x1"): every line,
+  // the site's names and panel heights. Only the top chart uses the compact
+  // layout.
+  // The top chart's three lines wear the main chart's colours for the same
+  // lines (js/saved-configs.js's TX_ACTUAL_COLOR / TX_INVESTED_COLOR /
+  // TX_PROFIT_COLOR): teal, slate and the signal chart's magenta
+  // (js/signal-chart.js's CUSTOM_MINI_COLORS). By colorSeparation every pair
+  // is at least 25 apart as seen and 16 in the worst colour-blind view; the
+  // indigo Invested had before sat 18 and 9 from the magenta, and looked alike.
+  // The top chart wears the main chart's "My portfolio" colour.
+  const PORTFOLIO = { id: 'widget-portfolio', color: TX_ACTUAL_COLOR };
+  const $ = id => document.getElementById(id);
+  // A colour from styles.css's tokens.
+  const tokenColor = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  // A share link's payloads: the fragment first, then the query, as js/init.js reads them.
+  const fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const query = new URLSearchParams(location.search);
+  // Filling the screen (the widget's fillScreen, fill=1): the card takes the
+  // whole frame, its two rows split the height in the fixed layout's
+  // proportions, and each chart is as tall as its tile.
+  const FILL = fragment.get('fill') === '1';
+  const chartPx = (host, fixedPx) => (FILL ? host.clientHeight : fixedPx);
+  const param = k => (fragment.has(k) ? fragment.get(k) : query.get(k));
+  async function payload(packedKey, plainKey) {
+    const packed = param(packedKey), plain = param(plainKey);
+    const json = packed ? await unpackSharePayload(packed) : plain ? decodeURIComponent(plain) : null;
+    return json ? JSON.parse(json) : null;
+  }
+
+  // The live sheet, read with the site's own parser (js/transactions.js) and
+  // the columns the widget names. A named column the sheet lacks is an error,
+  // not a guess.
+  const sheet = fragment.get('sheet') ? { url: fragment.get('sheet'), date: fragment.get('date'), amount: fragment.get('amount'), value: fragment.get('value') } : null;
+  async function sheetRows(spec) {
+    if (!spec.date || !spec.amount) throw new Error('The widget names a sheet but not its date and amount columns.');
+    const res = await fetch(spec.url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`The sheet could not be loaded (HTTP ${res.status}).`);
+    const text = await res.text();
+    const { headers } = _txParseRaw(text);
+    const column = (name, role) => {
+      const i = headers ? headers.findIndex(h => h.trim().toLowerCase() === String(name).trim().toLowerCase()) : -1;
+      if (i < 0) throw new Error(`The sheet has no "${name}" column for the ${role}.`);
+      return i;
+    };
+    const parsed = _txParseWithCols(text, column(spec.date, 'date'), column(spec.amount, 'amount'), spec.value ? column(spec.value, 'portfolio value') : null);
+    if (!parsed.rows.length) throw new Error('The sheet has no rows with both a date and an amount.');
+    return parsed.rows;
+  }
+
+  // ---- market data: the same files and derived globals js/init.js sets up ----
+  readUiScale();   // the touch type scale (styles.css --ui-scale), before anything draws
+  let highLowRows = null, liveQuotes = null;   // the Monday-rule funds' raw high/low rows; the latest live quotes, this page's only source of them
+  async function loadMarketData() {
+    const [qqq, tqqq, spy, qld, sso, spxl, sqqq, gld, soxl, soxx, nfci, highLow, fetchedAt, live] = await Promise.all([
+      loadQQQDaily(), loadTQQQDaily(), loadSPYDaily(), loadQLDDaily(), loadSSODaily(), loadSPXLDaily(),
+      loadSQQQDaily().catch(() => []), loadGLDDaily().catch(() => []), loadSOXLDaily().catch(() => []), loadSOXXDaily().catch(() => []), loadNFCIWeekly().catch(() => []), Promise.all(HIGH_LOW_FUNDS.map(loadHighLow)),
+      loadDataFetchedAt(),
+      // The live prices; without them the widget runs on the files' last refresh.
+      loadLiveQuotes().catch(err => { console.error('Live prices unavailable:', err); return null; }),
+    ]);
+    daily = buildDaily(qqq, tqqq, spy, qld, sso, spxl, sqqq, gld, soxl, soxx);
+    highLowRows = Object.fromEntries(HIGH_LOW_FUNDS.map((f, k) => [f, highLow[k]]));
+    liveQuotes = live;
+    handQuotesToFrame();
+    applyLive(live, fetchedAt);
+    nfciDaily = buildNfciDaily(daily, nfci);
+    highLowDaily = buildHighLowDaily(daily, highLowRows);
+    quarterlyData = periodRows(daily, getQuarter);
+    monthlyData = periodRows(daily, getMonth);
+    dailyDateToIdx = new Map(daily.map((d, i) => [d.date, i]));
+  }
+  // The live quotes onto the daily rows (js/data.js applyLiveQuotes): the latest
+  // regular price on the latest row, and the funds' extended-hours prints for
+  // the signal chart's price lines and the badge. Returns what applied.
+  function applyLive(live, filesFetchedAt) {
+    const applied = applyLiveQuotes(daily, highLowRows, live);
+    // The time the prices stand at, as the site keeps it: the latest trade when
+    // live prices applied, else the files' refresh. The signal chart reads it to
+    // tell a day still trading from a close (minutesBeforeClose).
+    window._dataFetchedAt = applied ? applied.asOf : filesFetchedAt;
+    window._liveExtended = applied ? applied.extended : null;
+    return applied;
+  }
+  // The intraday frame's quotes are this page's latest, so the frame fetches
+  // none itself (experiments/tqqq-intraday.html listens in its embed mode) and
+  // its print is the one the signal chart's price row and the badge show, from
+  // the same moment (the user, 2026-11-06: "they should be the same"). Sent on
+  // every fetch and on the frame's load, which can come after the first fetch.
+  function handQuotesToFrame() {
+    const frame = $('wp-intraday');
+    if (liveQuotes && frame.contentWindow) frame.contentWindow.postMessage({ type: 'tqqq-widget-quotes', quotes: liveQuotes }, '*');
+  }
+
+  // ---- the strategy: WIDGET_ENTRY, with the settings of its copy in the link
+  // when the link has one (the user, 2026-10-30: "make sure widget tracks the
+  // new strategy"). Other strategies in the link are not shown. A library copy
+  // runs the current library code, as the site does for a shared copy
+  // (withCurrentCustomCode). The chart's colours are the site's own (a fund's
+  // colour for its line, the level palette for the rest), not the copy's.
+  function pickStrategy(cfgs) {
+    const customs = (Array.isArray(cfgs) ? cfgs : []).filter(c => c && c.type === 'custom' && c.code);
+    const shared = customs.find(c => libraryEntryOf(c.code) === WIDGET_ENTRY);
+    const base = shared ? withCurrentCustomCode([shared])[0]
+      : { type: 'custom', name: null, params: {}, code: STRATEGY_CODE[WIDGET_ENTRY] };
+    return { ...base, id: 'widget-strategy' };
+  }
+  // The site's default money: its $10,000 from the given day to today.
+  function defaultMoney(entryDate) {
+    return { initial: DEFAULT_START_MONEY, monthly: 0, annualRaise: 0, entryDateOverride: entryDate, exitDateOverride: daily[daily.length - 1].date, contribSchedule: null };
+  }
+  // The money the strategy runs on: your transaction history (first deposit to
+  // today), else the site's default range with its $10,000.
+  function moneyContext(txRows) {
+    if (Array.isArray(txRows) && txRows.length) {
+      const state = _txStateFromRows(txRows, 'upload');
+      return { fromTransactions: true, ctx: { initial: state.initial, monthly: 0, annualRaise: 0, entryDateOverride: state.entryDate, exitDateOverride: daily[daily.length - 1].date, contribSchedule: state.schedule }, actualPoints: state.actualPoints || [] };
+    }
+    const linked = param('e');
+    const qi = linked != null && quarterlyData[+linked] ? +linked : Math.max(0, quarterlyData.findIndex(r => r[0] >= '2010-01-01'));
+    return { fromTransactions: false, ctx: defaultMoney(quarterlyData[qi][0]), actualPoints: [] };
+  }
+  // One run in the site's sandboxed worker, logging every day (p.dailyDisplay).
+  function runStrategy(globals) {
+    return new Promise((resolve, reject) => postCustomJob(cfg, cfg.params || {}, { ...globals, dailyDisplay: true }, (msg, err) => {
+      if (err || !msg) reject(new Error(err === 'timeout' ? 'The strategy took too long to run.' : String(err || 'The strategy did not run.')));
+      else resolve(msg);
+    }));
+  }
+  // The top line's change over the latest session, a percent after its value,
+  // unlabelled like the main chart's day-change badges. Your sheet records no
+  // positions, so the move is the strategy's: its value from the previous
+  // session's close to the latest, less that session's deposit (the log's
+  // contributed). Applied to the line's latest value, it is your account's
+  // move if it holds what the strategy holds. A log that is not daily at its
+  // end has no session move: no badge. Outside the session the strategy's
+  // end-state holdings marked at the funds' extended-hours prints name that
+  // move instead, as the site's badges do (extendedMoveOf).
+  function sessionBadge(latestValue) {
+    const extended = endHoldings ? extendedMoveOf(endHoldings.h, endHoldings.cash) : null;
+    if (extended) {
+      const move = computeDayChange(latestValue * extended.ratio, latestValue);
+      return move && { text: EXTENDED_SESSION_NAMES[extended.session] + ' ' + fmtDayChangePct(move), color: tokenColor(move.pct >= 0 ? '--green-text' : '--red-text') };
+    }
+    const last = log[log.length - 1], prev = log[log.length - 2];
+    const session = daily[daily.length - 1].date;
+    if (last.date !== session || prev.date !== daily[daily.length - 2].date) return null;
+    if (typeof last.contributed !== 'number' || !(prev.value > 0)) return null;
+    const ratio = (last.value - last.contributed) / prev.value;
+    const change = computeDayChange(latestValue, latestValue / ratio);
+    if (!change) return null;
+    return { text: fmtDayChangePct(change), color: tokenColor(change.pct >= 0 ? '--green-text' : '--red-text') };
+  }
+  // The top chart: every reading of your portfolio's value, what you had put
+  // in by that day, and the profit between the two. Without readings (a
+  // history with no value column) it shows the strategy run on your deposits
+  // instead.
+  function portfolioSeries(money, txRows) {
+    const chart = (valueKey, valueLabel, rows) => ({
+      lines: [
+        { key: valueKey, label: valueLabel, badge: sessionBadge(rows[rows.length - 1][valueKey]) },
+        { key: 'invested', label: 'Invested', color: TX_INVESTED_COLOR, keep: true },
+        { key: 'profit', label: 'Profit', color: TX_PROFIT_COLOR },
+      ],
+      rows,
+    });
+    if (money.actualPoints.length >= 2) {
+      const flows = [...txRows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      let next = 0, invested = 0;
+      const rows = money.actualPoints.map(p => {
+        while (next < flows.length && flows[next].date <= p.date) invested += flows[next++].amount;
+        return { date: p.date, actual: p.value, invested, profit: p.value - invested };
+      });
+      return chart('actual', 'Portfolio', rows);
+    }
+    if (money.fromTransactions) return chart('value', 'Strategy on your deposits', log.map(r => ({ ...r, profit: r.value - r.invested })));
+    return { lines: [], rows: [] };
+  }
+
+  // ---- drawing ----
+  // Two runs of the strategy per refresh. `log` is yours, on your money from
+  // your first deposit: the day's change and the top line without a value
+  // column. `signalLog` covers the whole history in the data on the site's
+  // default money: the signal chart, so how far back it reaches never depends
+  // on your sheet. That chart rests on your period (its home view) and zooms
+  // and pans across the whole history.
+  let cfg = null, lines = [], log = [], signalLog = [], signalHoldings = null, endHoldings = null, portfolio = { lines: [], rows: [] };
+  // Every chart's text is sized as on the signal chart, the narrowest of them.
+  // `heightPx` fits the chart to that height; null lets it take its own height,
+  // as on the site, where each panel after the first adds to it. `view` adds
+  // the chart's own options: the compact layout, a linear scale, a home view.
+  function chartHtml(chartCfg, chartLines, rows, host, heightPx, view) {
+    const width = host.clientWidth;
+    return width && chartLines.length ? buildCustomLinesChartHtml(chartCfg, chartLines, rows, width, { ...(heightPx ? { aspect: heightPx / width } : {}), textWidth: $('wp-signal').clientWidth || width, ...view }) : '';
+  }
+  // The intraday page draws at its own type size and is scaled up like the
+  // signal chart's text (the square root of the chart's width over
+  // MINI_TEXT_REF_W, js/signal-chart.js), so on a wide screen the two read at
+  // one size. Its frame is drawn at the box's size over that scale and
+  // transformed up to fill the box.
+  function intradayScale() {
+    return Math.sqrt(Math.max(1, $('wp-signal').clientWidth / MINI_TEXT_REF_W));
+  }
+  function sizeIntraday(visualPx) {
+    const s = intradayScale(), box = $('wp-intraday-box'), frame = $('wp-intraday');
+    box.style.height = Math.round(visualPx) + 'px';
+    frame.style.width = (box.clientWidth / s) + 'px';
+    frame.style.height = (visualPx / s) + 'px';
+    frame.style.transform = `scale(${s})`;
+  }
+  // The intraday frame ends where the signal chart's plot ends plus the room
+  // the intraday page keeps under its own plot (scaled with it), so the two
+  // plots end level.
+  function alignIntraday() {
+    const svg = $('wp-signal').querySelector('.custom-lines-chart');
+    const d = svg && window._miniCharts[svg.getAttribute('data-mini-id')];
+    if (!d) return;
+    const scale = svg.getBoundingClientRect().height / d.H;
+    sizeIntraday((d.H - d.padB) * scale + INTRADAY_AXIS_PX * intradayScale());
+  }
+  // Swap in just the svg, as the strategy panel does, so the page never jumps.
+  function place(host, html) {
+    const svg = host.querySelector('.custom-lines-chart');
+    if (!html || !svg) { host.innerHTML = html; return; }
+    const tpl = document.createElement('div');
+    tpl.innerHTML = html;
+    svg.replaceWith(tpl.firstElementChild);
+  }
+  // The charts' host hook (js/signal-chart.js): redraw one chart by id, or both.
+  function redraw(id) {
+    if (!id || id === PORTFOLIO.id) {
+      place($('wp-portfolio'), portfolio.lines.length ? chartHtml(PORTFOLIO, portfolio.lines, portfolio.rows, $('wp-portfolio'), chartPx($('wp-portfolio'), PORTFOLIO_PX), { compact: true, scale: 'linear' })
+        : '<div class="wp-note">Add your sheet to the widget’s config.json to see your portfolio here.</div>');
+    }
+    // The signal chart draws once its run is in; a resize can come first. It
+    // fills its tile on a full screen, and otherwise stands at the site's own
+    // height for its panels, the intraday chart following (alignIntraday).
+    if (cfg && signalLog.length && (!id || id === cfg.id)) {
+      const home = { t0: Date.parse(log[0].date), t1: Date.parse(signalLog[signalLog.length - 1].date) };
+      place($('wp-signal'), chartHtml(cfg, lines, signalLog, $('wp-signal'), FILL ? $('wp-signal').clientHeight : null, { home, holdings: signalHoldings }));
+      alignIntraday();
+    }
+  }
+  // The page's height for the Übersicht widget, which sizes its frame to it.
+  // Measured from the card: a framed document is never shorter than its frame.
+  function reportSize() {
+    if (window.parent === window) return;
+    const bottomPad = parseFloat(getComputedStyle(document.body).paddingBottom) || 0;
+    window.parent.postMessage({ type: 'tqqq-widget-size', height: Math.ceil($('wp-card').getBoundingClientRect().bottom + bottomPad) }, '*');
+  }
+  function showError(message) {
+    const el = $('wp-error');
+    el.textContent = message;
+    el.hidden = !message;
+    reportSize();
+  }
+
+  // Übersicht passes the mouse to a widget only after its own page sees the
+  // pointer move over that widget, and moves inside a frame never reach the
+  // page around it. Left alone, only hover works here, and clicks, drags and
+  // scrolls land on the desktop behind the widget. So every move in this page,
+  // and in the intraday frame inside it, is passed to the page around it as a
+  // move over the frame. The pass happens inside the move's own handler, so a
+  // pointer that has left is never reported inside afterwards. A page from
+  // another site than Übersicht's cannot reach its host (frameElement is null
+  // there), so this works only in the local copy the widget shows by default.
+  function relayPointerMoves(win, frameEl) {
+    const View = frameEl.ownerDocument.defaultView;
+    win.addEventListener('mousemove', e => {
+      // A scaled frame (the intraday one) maps its pixels to the page's by its scale.
+      const box = frameEl.getBoundingClientRect();
+      const sx = frameEl.offsetWidth ? box.width / frameEl.offsetWidth : 1, sy = frameEl.offsetHeight ? box.height / frameEl.offsetHeight : 1;
+      frameEl.dispatchEvent(new View.MouseEvent('mousemove', {
+        bubbles: true, view: View,
+        clientX: box.left + (frameEl.clientLeft + e.clientX) * sx, clientY: box.top + (frameEl.clientTop + e.clientY) * sy,
+        screenX: e.screenX, screenY: e.screenY, buttons: e.buttons,
+        altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey,
+      }));
+    });
+  }
+
+  if (FILL) {
+    document.documentElement.classList.add('wp-fill');
+    $('wp-top').style.flexGrow = PORTFOLIO_PX;
+    $('wp-bottom').style.flexGrow = BOTTOM_PX;
+  }
+  setMiniChartHost(redraw);
+  if (_miniChartResizeObs) { _miniChartResizeObs.observe($('wp-portfolio')); _miniChartResizeObs.observe($('wp-signal')); }
+  window.addEventListener('resize', reportSize);
+  if (window.frameElement) relayPointerMoves(window, window.frameElement);
+  // The intraday page in its compact mode, as tall as the signal chart, with
+  // the widget's settings for it.
+  const intraday = new URLSearchParams({ embed: 'widget' });
+  for (const key of ['similar', 'from', 'log']) if (fragment.get(key)) intraday.set(key, fragment.get(key));
+  if (query.get('data')) intraday.set('data', query.get('data'));
+  sizeIntraday(chartPx($('wp-signal'), BOTTOM_PX));
+  $('wp-intraday').addEventListener('load', reportSize);
+  $('wp-intraday').addEventListener('load', () => relayPointerMoves($('wp-intraday').contentWindow, $('wp-intraday')));
+  $('wp-intraday').addEventListener('load', handQuotesToFrame);
+  // Escape clears a kept range on the signal chart (js/signal-chart.js) and,
+  // relayed, on the intraday chart in its frame: keys arrive on this page,
+  // since a press on a chart moves no focus into the frame.
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') $('wp-intraday').contentWindow.postMessage({ type: 'tqqq-widget-escape' }, '*'); });
+  $('wp-intraday').src = 'experiments/tqqq-intraday.html?' + intraday.toString();
+
+  let cfgs = null, txRows = null, money = null;
+  // The strategy on the rows as they stand: your run and the history run, then the charts.
+  async function rerun() {
+    _customDataCache = null;   // the worker gets the rows as they stand now
+    _customDataSent = false;
+    money = moneyContext(txRows);
+    const [mine, history] = await Promise.all([
+      runStrategy(computeCustomGlobals(cfg, money.ctx)),
+      runStrategy(computeCustomGlobals(cfg, defaultMoney(daily[0].date))),
+    ]);
+    if ([mine, history].some(run => !Array.isArray(run.log) || run.log.length < 2)) throw new Error('The strategy returned no rows.');
+    log = mine.log;
+    endHoldings = mine.endHoldings;
+    signalLog = history.log;
+    signalHoldings = history.holdings || null;   // per-day holdings, for the signal chart's tooltip
+    lines = Array.isArray(history.lines) ? history.lines : [];
+    portfolio = portfolioSeries(money, txRows || []);
+    redraw();
+  }
+  async function refresh() {
+    try {
+      await loadMarketData();
+      if (!cfg) {
+        [cfgs, txRows] = await Promise.all([payload('scz', 'sc'), sheet ? null : payload('txz', 'tx')]);
+        cfg = pickStrategy(Array.isArray(cfgs) ? expandLibraryShares(cfgs) : cfgs);
+      }
+      if (sheet) txRows = await sheetRows(sheet);   // the sheet is re-read on every refresh
+      await rerun();
+      showError('');
+    } catch (err) {
+      showError(err && err.message ? err.message : String(err));
+    }
+    reportSize();
+  }
+  // The live prices every minute, as the site polls them. A new regular print
+  // changes the latest row, so the strategy runs again (the site re-runs its
+  // custom lines the same way); new extended-hours prints only redraw the price
+  // rows and the badge. The frame gets the quotes either way (handQuotesToFrame).
+  async function pollQuotes() {
+    const live = await loadLiveQuotes().catch(err => { console.error('Live prices unavailable:', err); return null; });
+    if (!live) return;
+    liveQuotes = live;
+    handQuotesToFrame();
+    if (!Array.isArray(daily) || !money) return;   // the first refresh is still loading: it applies these quotes itself
+    try {
+      const before = window._dataFetchedAt instanceof Date ? window._dataFetchedAt.getTime() : null;
+      const applied = applyLive(live, window._dataFetchedAt);
+      if (applied && applied.asOf.getTime() !== before) await rerun();
+      else { portfolio = portfolioSeries(money, txRows || []); redraw(); }
+    } catch (err) {
+      showError(err && err.message ? err.message : String(err));
+    }
+  }
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+  setInterval(pollQuotes, QUOTES_MS);
+})();

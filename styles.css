@@ -140,13 +140,13 @@
     align-items: baseline;
     column-gap: 14px;
     row-gap: 2px;
-    padding-right: 140px;
+    padding-right: 250px;
   }
 
   /* Orion uses Poppins for display type; Open Sans carries the UI text. */
   .header h1 {
     font-family: 'Poppins', sans-serif;
-    font-size: 20px;
+    font-size: calc(20px * var(--ui-scale));
     font-weight: 600;
     letter-spacing: -0.3px;
     margin: 0;
@@ -163,7 +163,7 @@
   .header p {
     color: var(--text-muted);
     margin: 0;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
   }
 
   /* Orion's dashboard split: a narrow left rail of small cards against the page
@@ -177,11 +177,13 @@
      ceiling at all — 97vw, always. The sidebar's fixed 288px doesn't need to
      grow, so all of that scales straight into the chart's `1fr` column. */
   .layout {
+    /* Also read by the docked strategy panel's divider, which fills this gap. */
+    --layout-gap: 20px;
     width: 97vw;
     margin: 0 auto;
     display: grid;
     grid-template-columns: 288px 1fr;
-    gap: 20px;
+    gap: var(--layout-gap);
   }
 
   /* Layout collapses to single-column AND the share button + legend chips
@@ -190,7 +192,12 @@
      share button overlapped the title and 3-column chips squeezed names
      to nothing. Most tablet-mode fixes belong here. */
   @media (max-width: 900px) {
-    .layout { grid-template-columns: 1fr; }
+    /* minmax(0, 1fr) and min-width: 0, as .right-col has: a grid track and a grid
+       item are at least their content's minimum, and the strategy pill's one-line
+       name floored the sidebar card at 401px on a 390px phone. The page then
+       overflowed and Chrome on Android shrank it to fit (2026-11-05). */
+    .layout { grid-template-columns: minmax(0, 1fr); }
+    .layout > .panel { min-width: 0; }
     /* Reorder the chart panel so the chart canvas comes first and the
        legend chips sit below it — desktop has them above the chart, but on
        narrow screens it reads better with the visualization first and the
@@ -237,7 +244,7 @@
   /* Phone-width: tighter padding, smaller fonts. */
   @media (max-width: 600px) {
     body { padding: 12px; }
-    .header h1 { font-size: 17px; }
+    .header h1 { font-size: calc(17px * var(--ui-scale)); }
     /* Dropped rather than shrunk: the GitHub + Share icons (github-link 34px
        + gap 8px + icon-only share-btn 34px = 76px) need more room at this
        width than "Backtesting TQQQ · 1953–2026" can share the row with
@@ -245,10 +252,10 @@
     .header p  { display: none; }
     .header { padding-right: 90px; column-gap: 10px; }
     .panel { padding: 16px; }
-    .panel h2 { font-size: 12px; margin-bottom: 12px; }
+    .panel h2 { font-size: calc(12px * var(--ui-scale)); margin-bottom: 12px; }
   }
   @media (max-width: 400px) {
-    .header h1 { font-size: 15px; }
+    .header h1 { font-size: calc(15px * var(--ui-scale)); }
   }
 
   /* The "Data last fetched" link now lives in the header subtitle (was a
@@ -288,7 +295,7 @@
   }
 
   .panel h2 {
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -302,7 +309,7 @@
 
   .control-group label {
     display: block;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 500;
     color: var(--text-muted);
     margin-bottom: 4px;
@@ -324,7 +331,7 @@
 
   .control-group .value-display {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 18px;
+    font-size: calc(18px * var(--ui-scale));
     font-weight: 500;
     color: var(--text);
     margin-bottom: 6px;
@@ -332,11 +339,12 @@
 
   /* Compact parameter rows: label on the left, value on the right at the
      same vertical level, slider underneath spanning both columns. Scoped
-     to the left Parameters panel only — the what-if-controls block and
+     to the contribution controls only (in the left panel, or in the header
+     while the strategy panel is docked) — the what-if-controls block and
      other panel-injected control-groups need their stacked default layout
      because their middle children (e.g. "Show alternate runs" toggle)
      would otherwise get shoved out of place by the grid. */
-  .layout > .panel:first-child .control-group:has(> label):has(> .value-display) {
+  #contrib-controls .control-group:has(> label):has(> .value-display) {
     display: grid;
     grid-template-columns: 1fr auto;
     align-items: baseline;
@@ -344,18 +352,18 @@
     row-gap: 12px;
     margin-bottom: 22px;
   }
-  .layout > .panel:first-child .control-group:has(> label):has(> .value-display) > label { margin-bottom: 0; }
-  .layout > .panel:first-child .control-group:has(> label):has(> .value-display) > .value-display {
+  #contrib-controls .control-group:has(> label):has(> .value-display) > label { margin-bottom: 0; }
+  #contrib-controls .control-group:has(> label):has(> .value-display) > .value-display {
     margin-bottom: 0;
     text-align: right;
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-scale));
   }
-  .layout > .panel:first-child .control-group:has(> label):has(> .value-display) > input[type="range"] {
+  #contrib-controls .control-group:has(> label):has(> .value-display) > input[type="range"] {
     grid-column: 1 / -1;
   }
 
   .control-group .value-display.period {
-    font-size: 15px;
+    font-size: calc(15px * var(--ui-scale));
     line-height: 1;
     /* Entry/Exit Quarter now sits in a flex row next to the date-pick-btn
        icon (index.html). align-items:center centers each item's MARGIN box,
@@ -406,7 +414,7 @@
   .mc-head > label { margin-bottom: 0; }
   .mc-head .value-display {
     margin-bottom: 0;
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-scale));
     text-align: right;
   }
   /* Line 2: small "annual increase" dropdown on its own line. Selectors are
@@ -416,7 +424,7 @@
     display: flex;
     align-items: baseline;
     gap: 3px;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     font-weight: 500;
     text-transform: none;
     letter-spacing: 0;
@@ -424,7 +432,7 @@
     margin: 0 0 12px;
   }
   .control-group .mc-raise .raise-select {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     padding: 0 1px 0 3px;
     margin: 0;
     border-radius: 3px;
@@ -432,7 +440,7 @@
   }
 
   .adaptive-line {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     line-height: 1.8;
     color: var(--text-muted);
     margin: 1px 0;
@@ -471,7 +479,7 @@
     border-radius: 4px;
     padding: 2px 4px 2px 6px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 500;
     cursor: pointer;
     margin: 0 2px;
@@ -480,7 +488,7 @@
   /* The two RSI-period pickers sit inline in a sentence; 3px smaller than the
      other inline dropdowns keeps the line from feeling crowded. */
   select.sma-rsi-win,
-  .pdrop:has(select.sma-rsi-win) .pdrop-trigger { font-size: 9px; }
+  .pdrop:has(select.sma-rsi-win) .pdrop-trigger { font-size: calc(9px * var(--ui-scale)); }
   .inline-select:hover { border-color: var(--accent); }
   .inline-select:focus { outline: none; border-color: var(--accent); }
 
@@ -496,7 +504,7 @@
     display: inline-flex; align-items: center; gap: 6px;
     /* inherits .inline-select look; just add a caret + min-width */
   }
-  .pdrop-trigger .pdrop-caret { font-size: 9px; opacity: 0.7; }
+  .pdrop-trigger .pdrop-caret { font-size: calc(9px * var(--ui-scale)); opacity: 0.7; }
   .pdrop-trigger.pdrop-open { border-color: var(--accent); }
 
   .pdrop-popup {
@@ -525,7 +533,7 @@
   .pdrop-popup::-webkit-scrollbar-thumb:hover { background: rgba(134, 118, 255,0.65); background-clip: padding-box; }
   .pdrop-head {
     font-family: 'Open Sans', sans-serif;
-    font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+    font-size: calc(9px * var(--ui-scale)); text-transform: uppercase; letter-spacing: 0.5px;
     color: var(--text-muted); padding: 4px 8px 6px; white-space: nowrap;
   }
   /* Label column width (--pdrop-label-w) is measured per-popup from the
@@ -544,7 +552,7 @@
   }
   .pdrop-row:hover { background: rgba(134, 118, 255,0.10); }
   .pdrop-row.selected { background: rgba(134, 118, 255,0.16); }
-  .pdrop-rlabel { color: var(--text); font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .pdrop-rlabel { color: var(--text); font-size: calc(12px * var(--ui-scale)); font-weight: 500; white-space: nowrap; }
   .pdrop-track {
     height: 8px; border-radius: 4px; background: rgba(122, 122, 166,0.14);
     overflow: hidden;
@@ -568,7 +576,7 @@
   .pdrop-repeat .pdrop-rval { opacity: 0.65; }
   .pdrop-repeat .pdrop-rval::before { content: '= '; opacity: 0.6; }
   .pdrop-rval {
-    font-size: 11px; color: var(--text); white-space: nowrap; text-align: right;
+    font-size: calc(11px * var(--ui-scale)); color: var(--text); white-space: nowrap; text-align: right;
   }
   .pdrop-row.best .pdrop-rval { color: var(--green, #00b929); font-weight: 600; }
 
@@ -578,7 +586,7 @@
     border: 1px dashed var(--border);
     color: var(--text-muted);
     font-family: 'Open Sans', sans-serif;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 500;
     padding: 6px 10px;
     border-radius: 6px;
@@ -600,22 +608,38 @@
   .panel-head h2 {
     margin-bottom: 0;
   }
-  #analytics-toggle {
+  /* "advanced analytics": the dropdown that opens the chart windows (the
+     comparison grid, CAGR by years held). A native <details> like the header's
+     Resources menu, which lends it the list's look (.resources-list). */
+  .analytics-menu {
+    position: relative;
+    margin-left: auto;
+  }
+  .analytics-menu summary {
+    list-style: none;
+    user-select: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     background: none;
     border: 1px dashed var(--border);
     color: var(--text-muted);
     font-family: 'Open Sans', sans-serif;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 500;
     padding: 6px 12px;
     border-radius: 6px;
     cursor: pointer;
     transition: border-color 0.15s, color 0.15s;
   }
-  #analytics-toggle:hover {
+  .analytics-menu summary::-webkit-details-marker { display: none; }
+  .analytics-menu summary:hover,
+  .analytics-menu[open] summary {
     border-color: var(--accent);
     color: var(--accent-text);
   }
+  /* Its chevron is the resources menu's (copied in by index.html) and flips the same way. */
+  .analytics-menu[open] summary svg { transform: rotate(180deg); }
 
   .modal {
     position: fixed;
@@ -651,7 +675,7 @@
     border: 1px solid rgba(134, 118, 255, 0.3);
     border-radius: 6px;
     color: var(--accent-text);
-    font: 600 10px 'Open Sans', sans-serif;
+    font: 600 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.3px;
     text-transform: uppercase;
     cursor: pointer;
@@ -740,7 +764,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     color: var(--text);
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.3px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s, transform 0.05s;
@@ -760,7 +784,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     color: var(--text);
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.2px;
     text-decoration: none;
     transition: border-color 0.15s, background 0.15s;
@@ -787,7 +811,7 @@
   }
   .strategy-library-header h3 {
     margin: 0;
-    font-size: 15px;
+    font-size: calc(15px * var(--ui-scale));
     font-weight: 700;
     color: var(--text);
     flex: 0 0 auto;
@@ -817,7 +841,7 @@
     flex-wrap: wrap;
     gap: 8px;
     margin: 0 0 12px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
   }
   /* Legend / note row */
   .sl-legend { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
@@ -836,13 +860,13 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .sl-page-info { font-size: 11px; color: var(--text-muted); }
+  .sl-page-info { font-size: calc(11px * var(--ui-scale)); color: var(--text-muted); }
   .sl-page-btns { display: flex; gap: 4px; flex-wrap: wrap; }
   .sl-page {
     min-width: 26px;
     padding: 4px 7px;
     font-family: inherit;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text);
     background: var(--surface);
     border: 1px solid var(--border);
@@ -864,7 +888,7 @@
     margin: 0 0 10px;
     padding: 7px 10px;
     font-family: inherit;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     color: var(--text);
     background: var(--surface);
     border: 1px solid var(--border);
@@ -878,7 +902,7 @@
   .sl-noresults {
     padding: 18px 4px;
     text-align: center;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     color: var(--text-muted);
   }
   /* Two cards per row — wide enough to fit all four era blocks on one line. */
@@ -918,7 +942,7 @@
     flex: 1 1 auto;
     color: var(--text);
     font-weight: 600;
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--ui-scale));
     line-height: 1.3;
     text-decoration: none;
     min-width: 0;
@@ -944,22 +968,27 @@
   .sl-lbl {
     position: absolute;
     transform: translateY(-50%);
-    font-size: 9.5px;
+    font-size: calc(9.5px * var(--ui-scale));
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     pointer-events: none;
+    padding: 0 3px;
+    border-radius: 3px;
+    line-height: 1.3;
+    background: var(--surface);
+    background: color-mix(in srgb, var(--surface) 90%, transparent);
     text-shadow: 0 0 3px var(--surface), 0 0 3px var(--surface), 0 0 2px var(--surface);
   }
   .sl-lbl-start { left: 4px; color: var(--text-muted); font-weight: 600; }
   .sl-lbl-strat { right: 4px; color: var(--text); }
-  .sl-lbl-spy { right: 4px; color: var(--text-muted); font-weight: 600; font-size: 9px; }
+  .sl-lbl-spy { right: 4px; color: var(--text-muted); font-weight: 600; font-size: calc(9px * var(--ui-scale)); }
   .sl-grid { stroke: var(--border); stroke-width: 0.6; opacity: 0.55; }
   .sl-logtag {
     position: absolute;
     top: 2px;
     left: 5px;
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     letter-spacing: 0.4px;
     color: var(--text-muted);
     opacity: 0.65;
@@ -973,7 +1002,7 @@
     bottom: 0;
     display: flex;
     justify-content: space-between;
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     color: var(--text-muted);
     opacity: 0.7;
     pointer-events: none;
@@ -991,7 +1020,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 7px;
-    font-size: 10.5px;
+    font-size: calc(10.5px * var(--ui-scale));
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     pointer-events: none;
@@ -1053,7 +1082,7 @@
     border: 1px solid rgba(232, 137, 11, 0.35);
     border-radius: 7px;
     color: var(--orange-text);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     line-height: 1.4;
     white-space: nowrap;
     overflow: hidden;
@@ -1065,7 +1094,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     opacity: 0.6;
     background: var(--surface);
@@ -1086,7 +1115,7 @@
   }
   .sl-era-table {
     width: 100%;
-    min-width: 480px;
+    min-width: calc(480px * var(--ui-scale));
     border-collapse: collapse;
     table-layout: fixed;
     background: var(--surface);
@@ -1100,9 +1129,9 @@
     font-variant-numeric: tabular-nums;
   }
   .sl-era-table th[scope="row"] {
-    width: 84px;
+    width: calc(84px * var(--ui-scale));   /* the row label grows with the type scale, or it runs into the first value */
     text-align: left;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     font-weight: 500;
     color: var(--text-muted);
     white-space: nowrap;
@@ -1110,7 +1139,7 @@
        a shade darker than the white table beside it. */
     background: transparent;
   }
-  .sl-era-table .sl-row-date td { font-size: 9px; color: var(--text-muted); }
+  .sl-era-table .sl-row-date td { font-size: calc(9px * var(--ui-scale)); color: var(--text-muted); }
   /* The global `table td` rule adds a border-bottom that the row-label <th>
      never gets, leaving separators short. Drop it and draw our own across both. */
   .sl-era-table td { border-bottom: 0; }
@@ -1119,13 +1148,13 @@
   .sl-era-table tr:last-child th,
   .sl-era-table tr:last-child td { border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.18)); }
   .sl-era-empty { opacity: 0.45; }
-  .sl-era-hd { font-size: 9px; color: var(--text-muted); }
-  .sl-era-cagr { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .sl-era-hd { font-size: calc(9px * var(--ui-scale)); color: var(--text-muted); }
+  .sl-era-cagr { font-size: calc(14px * var(--ui-scale)); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
   .sl-era-cagr.pos { color: var(--green-text); }
   .sl-era-cagr.neg { color: var(--red-text); }
-  .sl-era-dd { font-size: 9.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-  .sl-era-na { font-size: 14px; color: var(--text-muted); }
-  .sl-add-ico { font-size: 11px; line-height: 1; }
+  .sl-era-dd { font-size: calc(9.5px * var(--ui-scale)); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .sl-era-na { font-size: calc(14px * var(--ui-scale)); color: var(--text-muted); }
+  .sl-add-ico { font-size: calc(11px * var(--ui-scale)); line-height: 1; }
   .sl-add {
     flex: 0 0 auto;
     padding: 5px 11px;
@@ -1133,14 +1162,14 @@
     border: 1px solid rgba(0, 185, 41, 0.35);
     border-radius: 6px;
     color: var(--green-text);
-    font: 600 11px 'Open Sans', sans-serif;
+    font: 600 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.15s, border-color 0.15s;
   }
   .sl-add:hover { background: rgba(0, 185, 41, 0.22); border-color: var(--green-text); }
   .sl-add:active { transform: translateY(1px); }
-  .sl-add-na { flex: 0 0 auto; font-size: 10px; color: var(--text-muted); opacity: 0.7; white-space: nowrap; }
+  .sl-add-na { flex: 0 0 auto; font-size: calc(10px * var(--ui-scale)); color: var(--text-muted); opacity: 0.7; white-space: nowrap; }
   body.modal-open { overflow: hidden; }
   .modal-icon-btn:active {
     transform: scale(0.96);
@@ -1152,7 +1181,7 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-muted);
-    font-size: 16px;
+    font-size: calc(16px * var(--ui-scale));
     line-height: 1;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
@@ -1188,7 +1217,7 @@
     gap: 8px;
   }
   .analytics-modal-tag {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -1202,7 +1231,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 5px 6px;
-    font: 600 11px 'Open Sans', sans-serif;
+    font: 600 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--text-muted);
     line-height: 1.5;
   }
@@ -1215,7 +1244,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--text);
-    font: 700 11px 'Open Sans', sans-serif;
+    font: 700 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.2px;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
@@ -1230,7 +1259,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--text);
-    font: 700 11px 'Open Sans', sans-serif;
+    font: 700 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
   }
@@ -1244,7 +1273,7 @@
     display: inline-flex;
     flex-direction: column;
     line-height: 1.1;
-    font: 600 8px 'Open Sans', sans-serif;
+    font: 600 calc(8px * var(--ui-scale)) 'Open Sans', sans-serif;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--text-muted);
@@ -1256,7 +1285,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text-muted);
-    font: 600 10px 'Open Sans', sans-serif;
+    font: 600 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.3px;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
@@ -1274,7 +1303,7 @@
     color: var(--text);
   }
   .analytics-chart-header h3 {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -1282,7 +1311,7 @@
     margin: 0;
   }
   .analytics-chart-sub {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     line-height: 1.4;
     margin-top: 2px;
@@ -1301,7 +1330,7 @@
     gap: 4px;
   }
   .analytics-metrics .ap-label {
-    font: 700 9px 'Open Sans', sans-serif;
+    font: 700 calc(9px * var(--ui-scale)) 'Open Sans', sans-serif;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--text-muted);
@@ -1312,10 +1341,10 @@
     font-weight: 700;
     text-transform: none;
     letter-spacing: 0;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
   }
   .analytics-metrics .ap-none {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     opacity: 0.6;
     font-style: italic;
@@ -1328,7 +1357,7 @@
     background: rgba(134, 118, 255, 0.06);
     border: 1px solid rgba(134, 118, 255, 0.2);
     border-radius: 4px;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     font-family: 'Open Sans', sans-serif;
     cursor: pointer; /* whole pill opens its dropdown */
@@ -1353,7 +1382,7 @@
     color: var(--text);
     font-weight: 600;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     cursor: pointer;
     padding: 0 4px 0 0;
     margin: 0;
@@ -1380,7 +1409,7 @@
     border: 1px solid rgba(134, 118, 255, 0.4);
     border-radius: 6px;
     color: var(--text);
-    font: 600 10px 'JetBrains Mono', monospace;
+    font: 600 calc(10px * var(--ui-scale)) 'JetBrains Mono', monospace;
     outline: none;
   }
   .analytics-baseline-custom:focus {
@@ -1434,7 +1463,7 @@
     box-shadow: 0 0 6px rgba(134, 118, 255, 0.6);
   }
   .analytics-baseline-pct-display {
-    font: 700 11px 'JetBrains Mono', monospace;
+    font: 700 calc(11px * var(--ui-scale)) 'JetBrains Mono', monospace;
     color: var(--text);
     min-width: 42px;
     text-align: center;
@@ -1514,7 +1543,7 @@
     align-items: center;
     gap: 8px;
     margin-top: 4px;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     font-family: 'JetBrains Mono', monospace;
   }
@@ -1558,12 +1587,12 @@
   }
   .heatmap-wrap::-webkit-scrollbar-thumb:hover { background: rgba(134, 118, 255,0.6); }
   .heatmap-wrap::-webkit-scrollbar-corner { background: transparent; }
-  .heatmap-wrap.loading { padding: 14px; color: var(--text-muted); font-size: 11px; }
+  .heatmap-wrap.loading { padding: 14px; color: var(--text-muted); font-size: calc(11px * var(--ui-scale)); }
   .heatmap-table {
     border-collapse: separate;
     border-spacing: 0;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     color: var(--text);
     table-layout: fixed;
   }
@@ -1602,7 +1631,7 @@
     background: var(--surface2);
     color: var(--text-muted);
     font-weight: 600;
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     z-index: 5;
   }
   .heatmap-table tbody th {
@@ -1611,7 +1640,7 @@
     background: var(--surface2);
     color: var(--text-muted);
     font-weight: 600;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     width: 44px;
     min-width: 44px;
     max-width: 44px;
@@ -1661,7 +1690,171 @@
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
+  }
+  /* Years-held window ("CAGR by years held"; js/years-held.js,
+     js/years-held-chart.js). Its frame is the analytics modal's; these are its
+     own parts. */
+  /* The lines in its sentence: a chip per line (colour, name, remove), then
+     the dropdown that adds one. */
+  .yh-lines {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px 6px;
+  }
+  .yh-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font: 700 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
+  }
+  .yh-swatch {
+    flex: none;
+    width: 18px;
+    border-top: 3px solid;
+    border-radius: 2px;
+  }
+  /* Why a chip has no line (a strategy that brings its own deposits). */
+  .yh-chip-note {
+    font-weight: 500;
+    font-size: calc(10px * var(--ui-scale));
+    color: var(--text-muted);
+  }
+  .yh-chip-remove {
+    border: 0;
+    background: none;
+    padding: 0 4px;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: calc(14px * var(--ui-scale));
+    line-height: 1;
+    cursor: pointer;
+  }
+  .yh-chip-remove:hover { color: var(--accent-text); }
+  .yh-add { display: inline-flex; }
+  /* Left out of a downloaded image (downloadChartImage hides them for the shot). */
+  [data-capture="skip"][hidden] { display: none; }
+  /* Its chart area: the plot, which takes the height the window leaves. */
+  .years-held-wrap {
+    width: 100%;
+    height: 100%;
+    min-height: 380px;
+    box-sizing: border-box;
+    padding: 12px 14px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .years-held-plot {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .years-held-svg {
+    display: block;
+    /* Drawn at the plot's measured width; never wider than the plot is now. */
+    max-width: 100%;
+    height: auto;
+    /* A finger on the plot moves the crosshair; a vertical drag still scrolls. */
+    touch-action: pan-y;
+  }
+  .years-held-svg text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: calc(10px * var(--ui-scale));
+    fill: var(--text-muted);
+  }
+  .years-held-svg .grid-line { stroke: rgba(56, 56, 116, 0.1); stroke-width: 1; }
+  .years-held-svg .grid-line.is-zero { stroke: rgba(56, 56, 116, 0.45); }
+  .years-held-svg .series-line {
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  /* Name and value at a line's end, in the text colour: the line it sits on says which it is. */
+  .years-held-svg .end-label { font-weight: 600; fill: var(--text); }
+  /* The × after a line's label takes that line off the chart. */
+  .years-held-svg .end-label-remove { cursor: pointer; }
+  .years-held-svg .end-label-remove-mark { font-size: calc(13px * var(--ui-scale)); }
+  .years-held-svg .end-label-remove:hover .end-label-remove-mark { fill: var(--accent-text); }
+  /* A dragged range (drawRangeSelect), in the main chart's drag-to-select look. */
+  .years-held-svg { user-select: none; -webkit-user-select: none; }
+  .years-held-svg .range-band { fill: rgba(134, 118, 255, 0.12); }
+  .years-held-svg .range-edge { stroke: rgba(134, 118, 255, 0.5); stroke-width: 1; }
+  .years-held-svg .range-pill-box { fill: rgba(255, 255, 255, 0.92); stroke: rgba(134, 118, 255, 0.6); stroke-width: 1; }
+  .years-held-svg .range-pill-text { fill: #5b4fc4; font-weight: 600; font-size: calc(9px * var(--ui-scale)); }
+  .years-held-svg .range-chord { stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .years-held-svg .range-dot { stroke: #fff; stroke-width: 1.5; }
+  .years-held-svg .range-label-box { fill: rgba(255, 255, 255, 0.92); stroke-width: 1; }
+  .years-held-svg .range-lead { font-weight: 700; font-size: calc(10px * var(--ui-scale)); }
+  .years-held-svg .range-rest { font-weight: 600; font-size: calc(8px * var(--ui-scale)); }
+  .years-held-svg .range-label.is-up text { fill: var(--green-text); }
+  .years-held-svg .range-label.is-down text { fill: var(--red-text); }
+  .years-held-svg .cross { stroke: rgba(122, 122, 166, 0.7); stroke-width: 1; stroke-dasharray: 3 3; }
+  .years-held-svg .hover-dot { stroke: var(--surface); stroke-width: 1.5; }
+  /* Its tooltip: a grid with a row per line and a column per stat. Not a
+     <table>: the page's table styles (header band, cell borders, uppercase)
+     do not belong here. */
+  .yh-tt-grid {
+    display: grid;
+    grid-template-columns: minmax(64px, 1fr) repeat(4, max-content);
+    column-gap: 18px;
+    margin-top: 8px;
+    font-family: 'Open Sans', sans-serif;
+    font-variant-numeric: tabular-nums;
+    line-height: calc(20px * var(--ui-scale));
+  }
+  .yh-tt-grid > * {
+    min-width: 0;
+    padding: 6px 0;
+  }
+  /* A hairline over every row of values (the cells after the five headers). */
+  .yh-tt-grid > :nth-child(n + 6) { border-top: 1px solid var(--border); }
+  .yh-tt-head {
+    padding-top: 0;
+    text-align: right;
+    font-size: calc(10px * var(--ui-scale));
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .yh-tt-head.is-drawn { color: var(--text); font-weight: 700; }
+  .yh-tt-name {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: calc(12px * var(--ui-scale));
+    font-weight: 600;
+    color: var(--text);
+  }
+  /* The swatch rides the middle of the name's first line. */
+  .yh-tt-name .yh-swatch { margin-top: calc(9px * var(--ui-scale)); }
+  .yh-tt-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .yh-tt-value {
+    text-align: right;
+    white-space: nowrap;
+    font-size: calc(12px * var(--ui-scale));
+    color: var(--text);
+  }
+  /* The median: the value the hovered point on the line shows. */
+  .yh-tt-value.is-drawn {
+    font-size: calc(14px * var(--ui-scale));
+    font-weight: 700;
+  }
+  /* The start year behind a best or a worst, under the number. */
+  .yh-tt-value small {
+    display: block;
+    font-size: calc(10px * var(--ui-scale));
+    line-height: 1.2;
+    color: var(--text-muted);
   }
   .heatmap-table .cell-val {
     display: block;
@@ -1671,7 +1864,7 @@
     position: absolute;
     bottom: 1px;
     right: 2px;
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     line-height: 1;
     /* inherits the per-cell colour JS picks from the cell luminance; 0.55 was
        too faint to read once cells became saturated on a light page */
@@ -1715,7 +1908,7 @@
     padding: 12px 14px;
     box-shadow: var(--shadow-lg);
     font-family: 'Open Sans', sans-serif;
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-scale));
     color: var(--text);
     line-height: 1.5;
     max-width: 420px;
@@ -1733,7 +1926,7 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-muted);
-    font-size: 16px;
+    font-size: calc(16px * var(--ui-scale));
     line-height: 1;
     cursor: pointer;
     display: none;
@@ -1757,14 +1950,14 @@
     justify-content: space-between;
     align-items: baseline;
     gap: 12px;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     text-transform: uppercase;
     letter-spacing: 0.6px;
     color: var(--text-muted);
     margin-bottom: 4px;
   }
   .heatmap-tooltip .tt-scenario {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     color: var(--text-muted);
     margin-bottom: 6px;
     line-height: 1.4;
@@ -1772,13 +1965,13 @@
   .heatmap-tooltip .tt-strat {
     font-weight: 600;
     color: var(--text);
-    font-size: 16px;
+    font-size: calc(16px * var(--ui-scale));
     margin-bottom: 6px;
   }
   .heatmap-tooltip .tt-balance-row {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     color: var(--text-muted);
     margin: 2px 0 4px;
   }
@@ -1801,7 +1994,7 @@
     align-items: center;
   }
   .heatmap-tooltip .tt-bar-label {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -1828,7 +2021,7 @@
   }
   .heatmap-tooltip .tt-bar-value {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 500;
     color: var(--text);
     white-space: nowrap;
@@ -1846,7 +2039,7 @@
   .heatmap-tooltip .tt-dd-range {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 500;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     margin-left: 4px;
   }
@@ -1854,7 +2047,7 @@
     display: block;
     font-family: 'JetBrains Mono', monospace;
     font-weight: 500;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     margin-top: 1px;
     white-space: nowrap;
@@ -1875,7 +2068,7 @@
     grid-template-columns: 60px repeat(4, 1fr);
     gap: 6px;
     align-items: center;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
   }
   .heatmap-tooltip .tt-hdr-stat-label {
     font-family: 'JetBrains Mono', monospace;
@@ -1883,7 +2076,7 @@
     color: var(--text);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
   }
   .heatmap-tooltip .tt-hdr-stat-cell {
     display: flex;
@@ -1896,7 +2089,7 @@
     min-width: 0;
   }
   .heatmap-tooltip .tt-hdr-stat-cell > span {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1908,12 +2101,12 @@
   .heatmap-tooltip .tt-hdr-stat-cell > b {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 600;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text);
     max-width: 100%;
   }
   .heatmap-tooltip .tt-decile-title {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -2007,7 +2200,7 @@
     border-radius: 4px;
     background: rgba(198, 78, 255, 0.12);
     color: var(--text);
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     line-height: 1;
     cursor: pointer;
     user-select: none;
@@ -2049,7 +2242,7 @@
   }
 
   .stat-card .stat-label {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2059,7 +2252,7 @@
 
   .stat-card .stat-value {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 15px;
+    font-size: calc(15px * var(--ui-scale));
     font-weight: 500;
   }
 
@@ -2083,7 +2276,9 @@
     margin-bottom: 12px;
   }
   @media (max-width: 600px) {
-    .chart-legend { grid-template-columns: 1fr; }
+    /* minmax(0, 1fr), not 1fr: a bare 1fr is at least its content, and a chip
+       that outgrows a phone's width would widen the page instead of overflowing. */
+    .chart-legend { grid-template-columns: minmax(0, 1fr); }
   }
   .legend-chip {
     display: flex;
@@ -2093,7 +2288,7 @@
     background: rgba(219, 223, 241, 0.45);
     border: 1px solid var(--border);
     border-radius: 6px;
-    font: 500 11px 'Open Sans', sans-serif;
+    font: 500 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--text);
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, opacity 0.15s;
@@ -2157,7 +2352,7 @@
     line-height: 1.1;
   }
   .legend-chip .legend-metric-label {
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2166,13 +2361,13 @@
   .legend-chip .legend-metric-value {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 600;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
   }
   .legend-chip .legend-metric-value.positive { color: var(--green-text); }
   .legend-chip .legend-metric-value.negative { color: var(--red-text); }
   .legend-chip .legend-metric-range {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     margin-left: 2px;
     white-space: nowrap;
@@ -2235,7 +2430,7 @@
   /* ===== Saved configurations (Parameters panel) ===== */
   #saved-configs { margin-top: 18px; }
   .saved-configs-label {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.6px;
@@ -2258,7 +2453,7 @@
     background: rgba(134, 118, 255, 0.08);
     border: 1px solid rgba(134, 118, 255, 0.3);
     border-radius: 6px;
-    font: 500 11px 'Open Sans', sans-serif;
+    font: 500 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--text);
     line-height: 1.4;
   }
@@ -2270,7 +2465,7 @@
     color: #ffffff;
     border: none;
     border-radius: 4px;
-    font: 700 11px 'Open Sans', sans-serif;
+    font: 700 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     letter-spacing: 0.3px;
     cursor: pointer;
     transition: filter 0.15s;
@@ -2333,7 +2528,7 @@
   .saved-config-pill .sc-name {
     flex: 1 1 auto;
     min-width: 0;
-    font: 500 11px 'Open Sans', sans-serif;
+    font: 500 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2379,7 +2574,7 @@
     max-width: 100%;
   }
   .saved-config-pill .sc-metric-label {
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2388,13 +2583,13 @@
   .saved-config-pill .sc-metric-value {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 600;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
   }
   .saved-config-pill .sc-metric-value.positive { color: var(--green-text); }
   .saved-config-pill .sc-metric-value.negative { color: var(--red-text); }
   .saved-config-pill .sc-metric-range {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     color: var(--text-muted);
     white-space: nowrap;
     flex-basis: 100%;
@@ -2416,7 +2611,7 @@
     margin: 4px 0 12px;
   }
   .config-colorbar-label {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 600;
     color: var(--text-muted);
   }
@@ -2466,12 +2661,12 @@
   .lc-hash {
     color: var(--text-muted);
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
   }
   .lc-hex {
     width: 80px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     padding: 5px 8px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2484,7 +2679,7 @@
   .lc-ok {
     margin-left: auto;
     padding: 5px 14px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 5px;
     border: 1px solid rgba(134, 118, 255, 0.5);
     background: rgba(134, 118, 255, 0.14);
@@ -2526,7 +2721,7 @@
     justify-content: center;
   }
   .datecal-title-group .inline-select {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     padding: 2px 3px 2px 5px;
   }
   .datecal-month-select { width: 52px; }
@@ -2540,7 +2735,7 @@
     background: rgba(134, 118, 255, 0.08);
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-scale));
     line-height: 1;
   }
   .datecal-nav:hover:not(:disabled) { background: rgba(134, 118, 255, 0.18); border-color: var(--accent); }
@@ -2552,14 +2747,14 @@
     gap: 2px;
   }
   .datecal-weekdays span {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     text-align: center;
     color: var(--text-muted);
     text-transform: uppercase;
   }
   .datecal-day {
     aspect-ratio: 1;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-family: 'JetBrains Mono', monospace;
     border-radius: 4px;
     cursor: pointer;
@@ -2584,7 +2779,7 @@
     text-align: center;
   }
   .datecal-clear {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     background: none;
     border: none;
@@ -2613,13 +2808,13 @@
     box-shadow: var(--shadow-lg);
   }
   .sc-modal-title {
-    font-size: 15px;
+    font-size: calc(15px * var(--ui-scale));
     font-weight: 700;
     color: var(--text);
     margin-bottom: 8px;
   }
   .sc-modal-body {
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-scale));
     color: var(--text-muted);
     line-height: 1.5;
     margin-bottom: 18px;
@@ -2632,7 +2827,7 @@
   }
   .sc-modal-btn {
     padding: 8px 16px;
-    font: 600 13px 'Open Sans', sans-serif;
+    font: 600 calc(13px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--surface2);
@@ -2660,18 +2855,18 @@
     padding: 22px;
     box-shadow: var(--shadow-lg);
   }
-  .builder-modal .sc-modal-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
-  .builder-help { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 14px; }
+  .builder-modal .sc-modal-title { font-size: calc(16px * var(--ui-scale)); font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .builder-help { font-size: calc(13px * var(--ui-scale)); color: var(--text-muted); line-height: 1.55; margin-bottom: 14px; }
   .builder-help b { color: var(--text); }
   .builder-step-label {
-    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    font-size: calc(11px * var(--ui-scale)); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
     color: var(--text-muted); margin: 16px 0 6px;
   }
   .builder-textarea {
     width: 100%;
     min-height: 140px;
     resize: vertical;
-    font: 400 14px 'Open Sans', sans-serif;
+    font: 400 calc(14px * var(--ui-scale)) 'Open Sans', sans-serif;
     line-height: 1.55;
     background: var(--surface2);
     color: var(--text);
@@ -2691,7 +2886,7 @@
   .tx-tab-btn {
     flex: 1;
     padding: 7px 10px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--surface2);
@@ -2701,7 +2896,7 @@
   }
   .tx-tab-btn:hover { border-color: var(--accent); color: var(--text); }
   .tx-tab-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(134, 118, 255, 0.12); }
-  .tx-preview-stats { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 6px; }
+  .tx-preview-stats { font-size: calc(13px * var(--ui-scale)); color: var(--text-muted); line-height: 1.5; margin-bottom: 6px; }
   .tx-preview-stats b { color: var(--text); }
   /* Lets the user override which parsed column is the date vs. the value —
      js/transactions.js's #tx-date-col/#tx-amount-col selects. */
@@ -2711,7 +2906,7 @@
     flex-direction: column;
     gap: 3px;
     flex: 1;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2723,7 +2918,7 @@
   .tx-sheet-url-input {
     flex: 1;
     min-width: 0;
-    font: 400 13px 'Open Sans', sans-serif;
+    font: 400 calc(13px * var(--ui-scale)) 'Open Sans', sans-serif;
     background: var(--surface2);
     color: var(--text);
     border: 1px solid var(--border);
@@ -2735,7 +2930,7 @@
   .tx-sheet-url-input::placeholder { color: var(--text-muted); }
   .builder-textarea.code {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     line-height: 1.5;
     background: #f8f9fc;
     color: #383874;
@@ -2767,7 +2962,7 @@
     margin: 0;
     padding: 12px 8px 12px 0;
     box-sizing: border-box;
-    font: 400 12px/1.5 'JetBrains Mono', ui-monospace, monospace;
+    font: 400 calc(12px * var(--ui-scale))/1.5 'JetBrains Mono', ui-monospace, monospace;
     text-align: right;
     white-space: pre;
     color: #a8a8c4;               /* faint — dimmer than comments, blends into the editor */
@@ -2789,7 +2984,7 @@
     box-sizing: border-box;
     padding: 12px 14px;
     border: 0;
-    font: 400 12px/1.5 'JetBrains Mono', ui-monospace, monospace;
+    font: 400 calc(12px * var(--ui-scale))/1.5 'JetBrains Mono', ui-monospace, monospace;
     tab-size: 2;
     white-space: pre;
     word-wrap: normal;
@@ -2846,7 +3041,7 @@
   .custom-edit-btn {
     width: 100%;
     padding: 9px 12px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid rgba(134, 118, 255, 0.5);
     background: rgba(134, 118, 255, 0.14);
@@ -2855,17 +3050,6 @@
     transition: background 0.15s;
   }
   .custom-edit-btn:hover { background: rgba(134, 118, 255, 0.26); }
-  .custom-desc-readout {
-    margin-top: 10px;
-    padding: 10px 12px;
-    border-radius: 8px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    font-size: 12px;
-    line-height: 1.55;
-    color: var(--text-muted);
-    white-space: pre-wrap;
-  }
   .custom-error-hint { color: var(--text-muted); font-weight: 400; }
 
   /* "Work in progress" banner shown on not-yet-finalized strategies (SMA, custom). */
@@ -2878,14 +3062,14 @@
     border-radius: 6px;
     background: rgba(232, 137, 11, 0.1);
     border: 1px solid rgba(232, 137, 11, 0.3);
-    font: 600 11px 'Open Sans', sans-serif;
+    font: 600 calc(11px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--orange-text);
     line-height: 1.45;
   }
   /* Which tickers a custom strategy can read (TQQQ / QQQ / SPY / QQQ5). */
   .custom-tickers-note {
     margin: 0 0 12px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text-muted);
     line-height: 1.55;
   }
@@ -2895,7 +3079,7 @@
     background: var(--surface2);
     padding: 1px 5px;
     border-radius: 4px;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
   }
 
   /* + Custom strategy button (Parameters panel) */
@@ -2903,7 +3087,7 @@
     margin-top: 12px;
     width: 100%;
     padding: 9px 10px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px dashed var(--border);
     background: transparent;
@@ -2913,36 +3097,42 @@
   }
   .new-custom-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(134, 118, 255, 0.06); }
 
-  /* Active-state summary shown in place of the Initial/Monthly sliders once a
-     real transaction history is loaded (js/transactions.js). */
-  .tx-summary {
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--text);
-    margin-bottom: 10px;
+  /* Active-state row shown in place of the Initial/Monthly sliders once a
+     real transaction history is loaded (js/transactions.js): one eye toggle
+     per account line, then the edit / first-date / delete buttons. All six
+     need ~280px: one line in the docked header, while the 238px sidebar
+     column wraps the buttons under the toggles. */
+  .tx-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px 10px;
   }
-  .tx-summary b { font-family: 'JetBrains Mono', monospace; }
-  .tx-sheet-tag { color: var(--text-muted); font-size: 12px; }
-  /* Terse row-per-line tx summary; the "My portfolio" row's dot color
-     mirrors TX_ACTUAL_COLOR (js/saved-configs.js). */
-  .tx-summary-row { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .tx-summary-row + .tx-summary-row { margin-top: 4px; }
-  .tx-actual-row { font-size: 12px; }
-  .tx-actual-name { font-weight: 600; }
-  .tx-actual-stat { color: var(--text-muted); margin-left: 4px; }
-  .tx-actual-dot { width: 10px; height: 10px; border-radius: 50%; background: #0d9488; display: inline-block; flex: 0 0 auto; }
-  .tx-actual-eye {
-    background: none; border: none; cursor: pointer; padding: 0 2px;
-    color: var(--text-muted); display: inline-flex; align-items: center; flex: 0 0 auto;
+  .tx-summary { display: flex; align-items: center; gap: 10px; }
+  .tx-actions { display: flex; gap: 6px; }
+  .tx-line-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: none; border: none; padding: 0; cursor: pointer;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif; color: var(--text); white-space: nowrap;
   }
-  .tx-actual-eye svg { width: 13px; height: 13px; }
-  .tx-actual-eye:hover { color: var(--accent-text); }
-  .tx-actual-pos { color: var(--green-text); }
-  .tx-actual-neg { color: var(--red-text); }
+  .tx-line-toggle svg { width: 13px; height: 13px; color: var(--text-muted); flex: 0 0 auto; }
+  .tx-line-toggle:hover svg { color: var(--accent-text); }
+  /* Hidden = the same "off" reading as a hidden legend chip. */
+  .tx-line-toggle.is-off { opacity: var(--state-hidden-opacity); }
+  .tx-line-toggle.is-off:hover { opacity: 0.75; }
+  .tx-line-toggle.is-off span { text-decoration: line-through; text-decoration-color: rgba(122, 122, 166, 0.6); }
+  /* "Day change like [strategy]": the select takes the rest of the row and
+     truncates a long strategy name rather than widening the sidebar. */
+  .tx-follow:not([hidden]) {
+    display: flex; align-items: center; gap: 4px;
+    margin-top: 8px; font-size: calc(12px * var(--ui-scale)); color: var(--text-muted); white-space: nowrap;
+  }
+  .tx-follow select { flex: 1 1 auto; min-width: 0; text-overflow: ellipsis; }
   .tx-clear-btn {
     width: 100%;
     padding: 9px 10px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px dashed var(--border);
     background: transparent;
@@ -2951,6 +3141,20 @@
     transition: border-color 0.15s, color 0.15s, background 0.15s;
   }
   .tx-clear-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(134, 118, 255, 0.06); }
+  #tx-mode-toggle-btn { margin-bottom: 10px; }
+  /* A custom strategy bringing its own money turns the money controls off
+     (js/transactions.js's renderOwnMoneyState): they dim, the note stays. */
+  .contrib-own-note {
+    font-size: calc(12px * var(--ui-scale));
+    line-height: 1.45;
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  #contrib-controls.is-own-money > :not(.contrib-own-note) { opacity: .4; }
+  /* In the docked header the switched-off controls make way for the note,
+     which says why they are off. */
+  body.panel-docked .header #contrib-controls.is-own-money > :not(.contrib-own-note) { display: none; }
+  body.panel-docked .header .contrib-own-note { margin: 0; max-width: 520px; }
   .tx-delete-btn:hover { border-color: var(--red-text); color: var(--red-text); background: rgba(var(--red-rgb), 0.08); }
 
   /* Parsed-rows preview inside the transaction-upload modal. */
@@ -2965,7 +3169,7 @@
     width: 100%;
     border-collapse: collapse;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
   }
   .tx-preview-table th {
     position: sticky;
@@ -2987,7 +3191,7 @@
   /* Custom strategy pill badge */
   .saved-config-pill .sc-badge {
     flex-shrink: 0;
-    font: 600 9px 'JetBrains Mono', monospace;
+    font: 600 calc(9px * var(--ui-scale)) 'JetBrains Mono', monospace;
     padding: 1px 5px;
     border-radius: 4px;
     background: rgba(134, 118, 255, 0.16);
@@ -3004,14 +3208,14 @@
     border: 1px solid rgba(232, 137, 11, 0.45);
     background: rgba(232, 137, 11, 0.10);
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     line-height: 1.5;
   }
   .custom-run-btn {
     display: block;
     margin-top: 8px;
     padding: 7px 12px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid rgba(232, 137, 11, 0.6);
     background: rgba(232, 137, 11, 0.16);
@@ -3044,59 +3248,115 @@
     padding: 8px 10px;
     box-shadow: var(--shadow-lg);
     font-family: 'Open Sans', sans-serif;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--ui-scale));
     color: var(--text);
   }
   #mini-chart-tip .mct-date {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-muted);
     margin-bottom: 4px;
   }
+  /* What the strategy holds at the hovered day, by name. */
+  #mini-chart-tip .mct-hold { color: var(--text-muted); margin: -2px 0 5px; line-height: 1.5; max-width: 340px; }
+  #mini-chart-tip .mct-hold b { font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--text); }
+  /* Value readouts: a row per panel, its reading and then its levels in
+     brackets, wrapping under the name past max-width. */
   #mini-chart-tip .mct-row {
-    display: flex; align-items: center; gap: 6px;
-    line-height: 1.7;
+    display: flex; align-items: flex-start; gap: 6px;
+    max-width: 340px; line-height: 1.55; margin: 2px 0;
   }
-  #mini-chart-tip .mct-row b {
+  #mini-chart-tip .mct-row .mct-dot { margin-top: 5px; }
+  #mini-chart-tip .mct-row b, #mini-chart-tip .mct-from {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 600;
-    margin-left: auto;
-    padding-left: 12px;
   }
+  #mini-chart-tip .mct-from { font-weight: 400; color: var(--text-muted); }
+  #mini-chart-tip .mct-levels { color: var(--text-muted); }
+  /* The line nearest the cursor. */
+  #mini-chart-tip .mct-hot { font-weight: 700; color: var(--text); }
   #mini-chart-tip .mct-dot {
     width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   }
-  /* Drag-range readout: colored % change + exact from → to values. */
+  /* Trade-event bands on the signal chart (one per trade, or per cluster of
+     trades a few days apart), with a tick per trade coloured by action. */
+  .custom-lines-chart .mini-ev { fill: rgba(134, 118, 255, 0.10); }
+  .custom-lines-chart .mini-ev.is-hover { fill: rgba(134, 118, 255, 0.22); }
+  .custom-lines-chart .mini-ev-cap { fill: rgba(134, 118, 255, 0.22); cursor: pointer; }
+  .custom-lines-chart .mini-ev-cap.is-hover { fill: rgba(134, 118, 255, 0.5); }
+  /* A band a few pixels wide (one trade, zoomed in) needs more colour to be seen at all. */
+  .custom-lines-chart .mini-ev.mini-ev-thin { fill: rgba(134, 118, 255, 0.24); }
+  .custom-lines-chart .mini-ev.mini-ev-thin.is-hover { fill: rgba(134, 118, 255, 0.36); }
+  .custom-lines-chart .mini-ev-cap.mini-ev-thin { fill: rgba(134, 118, 255, 0.5); }
+  .custom-lines-chart .mini-ev-cap.mini-ev-thin.is-hover { fill: rgba(134, 118, 255, 0.75); }
+  .custom-lines-chart .mini-ev-mark { pointer-events: none; }
+  body.mini-panning .custom-lines-chart { cursor: grabbing; }
+  .custom-lines-chart .mini-zoom-reset { cursor: pointer; }
+  .custom-lines-chart .mini-zoom-reset rect { fill: rgba(134, 118, 255, 0.16); stroke: rgba(134, 118, 255, 0.55); stroke-width: 0.3; }
+  .custom-lines-chart .mini-zoom-reset:hover rect { fill: rgba(134, 118, 255, 0.34); }
+  .custom-lines-chart .mini-zoom-reset text { fill: #383874; }
+  /* The eye on each end label hides its line (the shared .cfg-sub-chip handler flips it). */
+  /* A finger over the chart: the page still scrolls under a vertical drag; a
+     pinch or a sideways drag goes to the chart's own zoom and pan
+     (js/signal-chart.js), not to the browser's page zoom. */
+  .custom-lines-chart { touch-action: pan-y; }
+  .custom-lines-chart .mini-line-toggle { cursor: pointer; }
+  .custom-lines-chart .mini-line-toggle.legend-hidden { opacity: var(--state-hidden-opacity); }
+  .custom-lines-chart .mini-line-toggle.legend-hidden:hover { opacity: 0.8; }
+  .custom-lines-chart .mini-latest { cursor: pointer; }
+  .custom-lines-chart .mini-latest rect { fill: rgba(134, 118, 255, 0.16); stroke: rgba(134, 118, 255, 0.55); stroke-width: 0.3; }
+  .custom-lines-chart .mini-latest:hover rect { fill: rgba(134, 118, 255, 0.34); }
+  .custom-lines-chart .mini-latest text { fill: #383874; }
+  body.mini-panning, body.mini-panning * { user-select: none; }
+  #mini-chart-tip .mct-ev-head {
+    font-size: calc(10px * var(--ui-scale)); color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: .04em; margin: 2px 0;
+  }
+  /* A trade: what moved and its day on one line, the note wrapping under it
+     past max-width, the day's readout rows' own (.mct-row) under it. */
+  #mini-chart-tip .mct-ev {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    max-width: 340px;
+    line-height: 1.6; padding: 2px 0 3px;
+    border-bottom: 1px dashed rgba(134, 118, 255, 0.3);
+    margin-bottom: 3px;
+  }
+  #mini-chart-tip .mct-ev-when {
+    font-family: 'JetBrains Mono', monospace; font-size: calc(10px * var(--ui-scale));
+    color: var(--text-muted); margin-left: auto; padding-left: 12px;
+  }
+  #mini-chart-tip .mct-ev-note {
+    flex-basis: 100%; font-size: calc(10.5px * var(--ui-scale)); color: var(--text-muted); padding-left: 14px;
+  }
+  /* A latest-day trade on a price so far: the trade stands only if the close agrees. */
+  #mini-chart-tip .mct-ev-open { color: var(--text); font-weight: 600; }
+  /* Drag-range readout: the end value coloured by direction. */
   #mini-chart-tip .mct-pos { color: var(--green, #00b929); }
   #mini-chart-tip .mct-neg { color: var(--red-text, #dc2626); }
-  #mini-chart-tip .mct-range {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
-    color: var(--text-muted);
-    padding-left: 8px;
-  }
-  .custom-stat span { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
-  .custom-stat b { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text); }
+  /* A dragged range's last row, under the lines' changes: the strategy's return over it. */
+  #mini-chart-tip .mct-range { display: flex; gap: 6px; line-height: 1.6; margin-top: 6px; padding-top: 4px; border-top: 1px dashed rgba(134, 118, 255, 0.3); }
+  #mini-chart-tip .mct-range b { font-family: 'JetBrains Mono', monospace; font-weight: 600; margin-left: auto; padding-left: 12px; }
+  .custom-stat span { font-size: calc(9px * var(--ui-scale)); text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+  .custom-stat b { font-family: 'JetBrains Mono', monospace; font-size: calc(13px * var(--ui-scale)); color: var(--text); }
   .custom-stat b.positive { color: var(--green-text); }
   .custom-stat b.negative { color: var(--red-text); }
   .custom-stat-range {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-subtle);
     margin-top: 1px;
     white-space: nowrap;
   }
-  .custom-params { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-  .custom-param-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
+  /* One sentence per setting with its dropdown inline, in the 9sig panel's
+     type; a section's sentences run on as one paragraph. The line height
+     leaves room for the dropdowns when the paragraph wraps. */
+  .custom-params { margin-top: 8px; }
+  .custom-param-line { font-size: calc(12px * var(--ui-scale)); line-height: 2.3; color: var(--text-muted); }
+  .custom-param-line .cp-tail { white-space: nowrap; }
   /* { section: "Label" } schema entries — sub-headers dividing a long
      settings list into logical blocks. */
   .custom-param-group {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.6px;
@@ -3110,20 +3370,6 @@
     padding-top: 0;
     border-top: 0;
   }
-  .custom-param-row label { font-size: 12px; color: var(--text); }
-  .custom-param-row .inline-select,
-  .custom-param-row .custom-text-input {
-    background: var(--surface2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 8px;
-    font-size: 12px;
-    max-width: 55%;
-  }
-  .custom-param-row .custom-text-input { width: 90px; }
-  .custom-param-row .inline-select:focus,
-  .custom-param-row .custom-text-input:focus { outline: none; border-color: var(--accent); }
   .custom-error {
     margin-top: 12px;
     padding: 10px 12px;
@@ -3131,18 +3377,18 @@
     border: 1px solid rgba(255, 45, 46, 0.5);
     background: rgba(255, 45, 46, 0.10);
     color: #d92626;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     line-height: 1.5;
     word-break: break-word;
   }
   .custom-error b { color: var(--red-text); }
   .custom-steps { margin: 2px 0 10px; display: flex; flex-direction: column; gap: 6px; }
-  .custom-step { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .custom-step { font-size: calc(12px * var(--ui-scale)); color: var(--text-muted); line-height: 1.5; }
   .custom-step b { color: var(--text); margin-right: 3px; }
   .custom-copy-btn {
     width: 100%;
     padding: 9px 12px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid rgba(134, 118, 255, 0.5);
     background: rgba(134, 118, 255, 0.14);
@@ -3155,7 +3401,7 @@
     width: 100%;
     min-height: 90px;
     resize: vertical;
-    font: 400 13px 'Open Sans', sans-serif;
+    font: 400 calc(13px * var(--ui-scale)) 'Open Sans', sans-serif;
     line-height: 1.5;
     background: var(--surface2);
     color: var(--text);
@@ -3167,10 +3413,10 @@
   }
   .custom-desc:focus { border-color: var(--accent); }
   .custom-desc::placeholder { color: var(--text-muted); }
-  .custom-code-hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 6px; }
+  .custom-code-hint { font-size: calc(11px * var(--ui-scale)); color: var(--text-muted); line-height: 1.5; margin: 4px 0 6px; }
   .custom-code-hint code {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     background: var(--surface2);
     padding: 1px 4px;
     border-radius: 3px;
@@ -3181,7 +3427,7 @@
     min-height: 220px;
     resize: vertical;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     line-height: 1.5;
     background: #f8f9fc;
     color: #383874;
@@ -3197,7 +3443,7 @@
   .custom-apply-btn {
     margin-top: 8px;
     padding: 8px 16px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid rgba(134, 118, 255, 0.5);
     background: rgba(134, 118, 255, 0.14);
@@ -3206,7 +3452,7 @@
   }
   .custom-apply-btn:hover { background: rgba(134, 118, 255, 0.26); }
   .custom-log-wrap { max-height: 420px; overflow: auto; margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; }
-  table.custom-log { width: 100%; border-collapse: collapse; font-size: 11px; }
+  table.custom-log { width: 100%; border-collapse: collapse; font-size: calc(11px * var(--ui-scale)); }
   table.custom-log th, table.custom-log td {
     padding: 5px 8px;
     text-align: right;
@@ -3220,7 +3466,7 @@
     color: var(--text-muted);
     font-weight: 600;
     text-transform: uppercase;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     letter-spacing: 0.4px;
   }
   table.custom-log td { color: var(--text); font-family: 'JetBrains Mono', monospace; }
@@ -3252,7 +3498,7 @@
   .config-savebar-btn {
     flex: 1 1 auto;
     padding: 8px 10px;
-    font: 600 12px 'Open Sans', sans-serif;
+    font: 600 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--surface2);
@@ -3362,6 +3608,9 @@
     height: 100%;
     cursor: ew-resize;
     z-index: 5;
+    /* A finger dragging it resizes the panel (js/controls.js); without this
+       the browser takes the drag for a scroll and the divider never moves. */
+    touch-action: none;
     /* The visible 1px accent line is drawn with a pseudo so the hit area can
        stay a comfortable 8px wide without showing an 8px bar. */
   }
@@ -3389,11 +3638,141 @@
      (dragging it wouldn't mean anything against the screen edge) is hidden.
      Must come AFTER the base .strategy-panel-content rule above: equal
      specificity means source order decides, and a media query earlier in the
-     file does NOT win against a later plain rule just because it's scoped. */
-  @media (max-width: 900px) {
+     file does NOT win against a later plain rule just because it's scoped.
+     Under 680px only: from there up the panel docks beside the chart
+     (js/chart.js's PANEL_DOCK_MQ, the same line). */
+  @media (max-width: 679px) {
     .strategy-panel-content { width: 100vw; max-width: 100vw; }
     .strategy-panel-resizer { display: none; }
   }
+  /* Docked strategy panel (wider than 900px; js/chart.js's syncPanelDock).
+     The open panel becomes the layout's first column instead of an overlay,
+     so the chart beside it stays whole and both can be used at once. The
+     controls card it replaces hides, and the card's contribution controls
+     move into the header. The panel's content is absolutely positioned in
+     its column, so the column adds no height of its own: it is exactly as
+     tall as the chart column (fitChartHeight sizes that one to the window)
+     and the panel body scrolls inside it. --panel-w is the width dragged on
+     the divider (js/controls.js's applyPanelWidth). */
+  body.panel-docked .layout { grid-template-columns: var(--panel-w, 360px) minmax(0, 1fr); }
+  body.panel-docked .layout > .panel { display: none; }
+  body.panel-docked .strategy-panel {
+    position: relative;
+    inset: auto;
+    z-index: auto;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  body.panel-docked .strategy-panel-backdrop { display: none; }
+  body.panel-docked .strategy-panel .strategy-panel-content {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    max-width: none;
+    height: auto;
+    transform: none;
+    transition: none;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: none;
+  }
+  /* The resizer is the divider between the panel and the chart: it fills the
+     column gap just past the panel's 1px border, shows a grip at rest, and
+     the accent line down the gap's middle takes over while hovered or
+     dragged. */
+  body.panel-docked .strategy-panel-resizer {
+    right: calc(-1px - var(--layout-gap));
+    width: var(--layout-gap);
+  }
+  body.panel-docked .strategy-panel-resizer::after { right: calc(var(--layout-gap) / 2 - 1px); }
+  body.panel-docked .strategy-panel-resizer::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: calc(var(--layout-gap) / 2 - 2px);
+    width: 4px;
+    height: 36px;
+    margin-top: -18px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: opacity 0.15s;
+  }
+  body.panel-docked .strategy-panel-resizer:hover::before,
+  body.panel-docked .strategy-panel-content.is-resizing .strategy-panel-resizer::before { opacity: 0; }
+  /* Under a finger the divider's grab area reaches 10px past each edge of
+     the gap, and the grip is longer; the line and the grip stay in the gap's
+     middle. */
+  @media (hover: none) and (pointer: coarse) {
+    body.panel-docked .strategy-panel-resizer {
+      right: calc(-11px - var(--layout-gap));
+      width: calc(var(--layout-gap) + 20px);
+    }
+    body.panel-docked .strategy-panel-resizer::after { right: calc(var(--layout-gap) / 2 + 9px); }
+    body.panel-docked .strategy-panel-resizer::before {
+      right: calc(var(--layout-gap) / 2 + 8px);
+      height: 56px;
+      margin-top: -28px;
+    }
+  }
+  /* While the divider is dragged, a transparent sheet over the page keeps
+     the resize cursor and stops the charts under the pointer from showing
+     their hover readouts. The drag itself listens on the document. */
+  body.panel-resizing { user-select: none; }
+  body.panel-resizing::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    cursor: ew-resize;
+  }
+  /* The contribution controls in the header while docked: one row in the
+     free space between the subtitle and the actions. */
+  body.panel-docked .header #contrib-controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    margin-left: auto;
+    margin-right: 16px;
+    align-self: center;
+  }
+  body.panel-docked .header #tx-mode-toggle-btn {
+    width: auto;
+    margin: 0;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+  body.panel-docked .header #contrib-default-controls:not([hidden]) {
+    display: flex;
+    gap: 24px;
+  }
+  body.panel-docked .header #contrib-default-controls .control-group {
+    width: 220px;
+    margin: 0;
+    row-gap: 6px;
+  }
+  /* Monthly Contribution keeps to two rows like Initial Investment: its
+     label, yearly increase and value share the first, the slider the second. */
+  body.panel-docked .header #contrib-default-controls .control-group:has(> .mc-head) {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: "label raise value" "range range range";
+    align-items: baseline;
+    column-gap: 8px;
+    width: 300px;
+  }
+  body.panel-docked .header .mc-head { display: contents; }
+  body.panel-docked .header .mc-head > label { grid-area: label; }
+  body.panel-docked .header .mc-head > div { grid-area: value; }
+  body.panel-docked .header .control-group .mc-raise { grid-area: raise; margin: 0; }
+  body.panel-docked .header #slider-monthly { grid-area: range; }
+  body.panel-docked .header #contrib-tx-active:not([hidden]) {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+  }
+  body.panel-docked .header .tx-follow { margin-top: 0; }
+  body.panel-docked .header .tx-follow select { flex: 0 1 200px; }
   .strategy-panel-header {
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
@@ -3413,7 +3792,7 @@
     flex: 1 1 auto;
   }
   .strategy-panel-header h3 {
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -3471,7 +3850,7 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-muted);
-    font-size: 18px;
+    font-size: calc(18px * var(--ui-scale));
     line-height: 1;
     cursor: pointer;
     display: inline-flex;
@@ -3490,7 +3869,7 @@
     overflow-x: hidden;
     padding: 16px;
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-scale));
     /* Without min-width:0 a wide table would stretch this flex item past
        the panel and force a horizontal scroll on the whole panel. */
     min-width: 0;
@@ -3507,7 +3886,7 @@
   .strategy-panel-body::-webkit-scrollbar-thumb:hover { background: rgba(134, 118, 255,0.6); }
   .strategy-panel-body::-webkit-scrollbar-corner { background: transparent; }
   .strategy-panel-section-label {
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.6px;
@@ -3547,9 +3926,9 @@
     padding: 12px 15px; border-radius: 10px; margin-bottom: 10px;
     border: 1px solid var(--border); background: var(--surface2);
   }
-  .sd-hero-lead { font-size: 12px; color: var(--text-muted); }
-  .sd-hero-action { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.2px; }
-  .sd-hero-note { flex-basis: 100%; font-size: 11px; color: var(--text-muted); }
+  .sd-hero-lead { font-size: calc(12px * var(--ui-scale)); color: var(--text-muted); }
+  .sd-hero-action { font-size: calc(17px * var(--ui-scale)); font-weight: 700; color: var(--text); letter-spacing: -0.2px; }
+  .sd-hero-note { flex-basis: 100%; font-size: calc(11px * var(--ui-scale)); color: var(--text-muted); }
   .sd-hero.sd-buy  { border-color: rgba(0, 185, 41, 0.5);  background: rgba(0, 185, 41, 0.10); }
   .sd-hero.sd-buy  .sd-hero-action { color: var(--green-text); }
   .sd-hero.sd-hold { border-color: rgba(232, 137, 11, 0.45); background: rgba(232, 137, 11, 0.09); }
@@ -3560,13 +3939,13 @@
   .sd-signals { display: flex; flex-direction: column; }
   .sd-sig {
     display: grid; grid-template-columns: 8px auto 1fr auto; align-items: center; gap: 9px;
-    padding: 7px 5px; font-size: 11.5px; border-top: 1px solid var(--border);
+    padding: 7px 5px; font-size: calc(11.5px * var(--ui-scale)); border-top: 1px solid var(--border);
   }
   .sd-sig:first-child { border-top: 0; }
   .sd-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
   .sd-sig-name { color: var(--text); font-weight: 600; }
   .sd-sig-val { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-  .sd-sig-tag { font-size: 10px; font-weight: 700; letter-spacing: 0.2px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .sd-sig-tag { font-size: calc(10px * var(--ui-scale)); font-weight: 700; letter-spacing: 0.2px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
   .sd-lean-buy  .sd-dot { background: var(--green); }
   .sd-lean-buy  .sd-sig-tag { color: var(--green-text); background: rgba(0, 185, 41, 0.14); }
   .sd-lean-out  .sd-dot { background: #e8890b; }
@@ -3580,7 +3959,7 @@
     padding: 8px 10px;
   }
   .strategy-stat-label {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -3589,13 +3968,13 @@
   }
   .strategy-stat-value {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-scale));
     font-weight: 600;
     color: var(--text);
   }
   .strategy-stat-range {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     color: var(--text-subtle);
     margin-top: 2px;
     white-space: nowrap;
@@ -3608,7 +3987,7 @@
      toned neutrally, so the two can't just share one class). */
   .strategy-stat-delta {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     font-weight: 600;
     color: var(--text-subtle);
   }
@@ -3629,7 +4008,7 @@
     padding: 12px 14px;
     border-radius: 4px;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     line-height: 1.7;
   }
   /* Quarterly rebalance log table inside the panel. */
@@ -3654,7 +4033,7 @@
     border-collapse: separate !important;
     border-spacing: 0;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
   }
   /* Belt + suspenders: make BOTH thead and each th sticky, and override the
      global `table thead { position: sticky }` z-index so a row's cells can't
@@ -3682,7 +4061,7 @@
     border-radius: 50%;
     background: rgba(134, 118, 255,0.12);
     color: var(--accent-text);
-    font-size: 8px;
+    font-size: calc(8px * var(--ui-scale));
     line-height: 1;
     font-style: normal;
     font-weight: 600;
@@ -3704,7 +4083,8 @@
      overflow:auto clipping — otherwise tooltips near the body's top edge
      render behind the panel header. */
   .info-icon[data-tip]:hover::after,
-  .info-icon[data-tip]:focus::after {
+  .info-icon[data-tip]:focus::after,
+  .info-tip-measure {
     content: attr(data-tip);
     position: fixed;
     left: var(--tip-left, 50%);
@@ -3715,7 +4095,7 @@
     padding: 6px 10px;
     border-radius: 4px;
     border: 1px solid var(--border);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 400;
     font-style: normal;
     line-height: 1.4;
@@ -3733,11 +4113,27 @@
     box-shadow: var(--shadow-md);
   }
 
+  /* The tooltip's stand-in for measuring (js/controls.js infoTipHeight): the
+     same box and type as the ::after above, off screen and unseen. */
+  .info-tip-measure {
+    left: -9999px;
+    top: 0;
+    transform: none;
+    visibility: hidden;
+  }
+  /* With no room above the icon the tooltip hangs below it (positionInfoTip
+     sets data-tip-below and puts --tip-top at the icon's bottom edge). */
+  .info-icon[data-tip-below][data-tip]:hover::after,
+  .info-icon[data-tip-below][data-tip]:focus::after {
+    transform: translate(-50%, 0);
+  }
+
   /* Strategy-library ⓘ: more room, since a full rule set is several lines. */
   .info-icon[data-tip-wide][data-tip]:hover::after,
-  .info-icon[data-tip-wide][data-tip]:focus::after {
+  .info-icon[data-tip-wide][data-tip]:focus::after,
+  .info-tip-measure[data-tip-wide] {
     max-width: 380px;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--ui-scale));
     padding: 8px 11px;
   }
   .sl-info { flex: 0 0 auto; margin-left: 6px; }
@@ -3750,7 +4146,7 @@
     background: var(--surface2);
     color: var(--text-muted);
     font-weight: 600;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     text-transform: uppercase;
     letter-spacing: 0.4px;
     text-align: right;
@@ -3803,7 +4199,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text-muted);
     cursor: pointer;
     margin-bottom: 8px;
@@ -3811,12 +4207,14 @@
   }
   .strategy-panel-body .log-contrib-toggle input { cursor: pointer; margin: 0; }
   /* CSV download button in each transaction-log section header. */
-  .log-csv-btn {
+  /* Small buttons in a section header: a log's CSV download, a code
+     strategy's Reset to default. */
+  .log-csv-btn, .settings-reset-btn {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: calc(10px * var(--ui-scale));
     font-weight: 600;
     letter-spacing: 0.4px;
     text-transform: uppercase;
@@ -3828,17 +4226,43 @@
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
-  .log-csv-btn:hover {
+  .log-csv-btn:hover, .settings-reset-btn:hover:not(:disabled) {
     color: var(--accent-text);
     border-color: var(--accent);
     background: rgba(134, 118, 255, 0.08);
   }
+  .settings-reset-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* Fit (js/saved-configs.js buildFitButtonHtml): beside Reset to default, with its goal menu and result line. */
+  .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .settings-actions { display: inline-flex; align-items: center; gap: 8px; }
+  .settings-fit-wrap { display: inline-flex; align-items: center; gap: 3px; }
+  .settings-fit-btn.running {
+    color: var(--accent-text); border-color: var(--accent); text-transform: none; letter-spacing: 0;
+    /* fills left to right as the search runs (js/saved-configs.js fitShowProgress) */
+    background: linear-gradient(to right, rgba(134, 118, 255, 0.18) var(--fit-pct, 0%), transparent var(--fit-pct, 0%));
+  }
+  .fit-menu { padding: 4px; }
+  .fit-menu-item { display: flex; flex-direction: column; gap: 2px; max-width: 280px; padding: 7px 9px; border-radius: 6px; cursor: pointer; }
+  .fit-menu-item:hover { background: rgba(134, 118, 255, 0.08); }
+  .fit-menu-item b { font-size: calc(12px * var(--ui-scale)); color: var(--text); }
+  .fit-menu-item span { font-size: calc(11px * var(--ui-scale)); line-height: 1.35; color: var(--text-muted); }
+  .fit-note { margin: 6px 0 2px; font-size: calc(11.5px * var(--ui-scale)); line-height: 1.4; color: var(--text-muted); }
+  .fit-changes { margin: 4px 0 0; padding: 0; list-style: none; }
+  /* A code strategy's explanation (js/saved-configs.js buildExplainHtml), as the 9sig panel's rules box. */
+  .strategy-rules .explain-heading { margin-top: 14px; font-weight: 600; color: var(--text); }
+  .strategy-rules .explain-heading:first-child { margin-top: 0; }
+  .strategy-rules .explain-text { margin-top: 6px; }
+  .strategy-rules .explain-list { margin: 4px 0 0 18px; padding: 0; }
+  .fit-changes b { color: var(--text); font-weight: 600; }
+  /* "Strategy trades only", on every log table: only the rows the strategy
+     itself traded on stay (js/utils.js toggleLogTradesOnly). */
+  .log-section.trades-only tbody tr:not(.log-row-trade) { display: none; }
   /* Collapsed state: drop the monthly-contribution rows from the table. */
   .strategy-panel-body .quarter-table-wrap.hide-contrib tr.log-row-contrib { display: none; }
   /* Collapsed state: drop the ease-in "Buy more" slice rows. */
   .strategy-panel-body .quarter-table-wrap.hide-dca tr.log-row-dca { display: none; }
   /* Allocation-mix cell: compact, muted, never wraps. */
-  .strategy-panel-body .quarter-table-wrap td.log-mix { white-space: nowrap; color: var(--text-muted); font-size: 11px; }
+  .strategy-panel-body .quarter-table-wrap td.log-mix { white-space: nowrap; color: var(--text-muted); font-size: calc(11px * var(--ui-scale)); }
   /* Trade rows (those with a chart action-point) highlight on hover, cueing that
      hovering also lights up the matching marker on the chart. */
   .strategy-panel-body .quarter-table-wrap tr.log-row-mk { cursor: pointer; }
@@ -3854,7 +4278,7 @@
      "(spike)" still fit on one line thanks to the smaller cap. */
   .strategy-panel-body .quarter-table-wrap th.log-action,
   .strategy-panel-body .quarter-table-wrap td.log-action {
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     padding-left: 4px;
     padding-right: 4px;
     letter-spacing: 0.2px;
@@ -3905,7 +4329,7 @@
     to { transform: rotate(360deg); }
   }
   .chart-loading-text {
-    font: 500 12px 'Open Sans', sans-serif;
+    font: 500 calc(12px * var(--ui-scale)) 'Open Sans', sans-serif;
     color: var(--text-muted);
   }
   .chart-loading-text.is-error { color: var(--red-text, #d64545); }
@@ -3918,7 +4342,7 @@
     left: -4px;
     bottom: 3px;
     padding: 3px 7px;
-    font: 600 10px 'Open Sans', sans-serif;
+    font: 600 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--state-off-text);
@@ -3953,6 +4377,45 @@
     border-color: var(--state-on-border);
   }
 
+  /* Zoom controls in the chart's bottom-right corner, right of the last x-axis
+     label (js/chart.js's renderChartZoomUi, fitChartZoomUi): a hint, and
+     Latest → and Reset zoom after a zoom. The buttons wear the LOG pill's
+     look. Touch screens get no wheel, so no controls either. */
+  .chart-zoom-ui {
+    position: absolute;
+    right: 0;
+    bottom: 3px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .chart-zoom-hint {
+    font: 500 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
+    color: var(--text-muted);
+    opacity: .75;
+  }
+  .chart-zoom-btn {
+    padding: 3px 7px;
+    font: 600 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--state-off-text);
+    background: var(--state-off-bg);
+    border: 1px solid var(--state-off-border);
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .chart-zoom-btn:hover {
+    color: var(--text);
+    background: var(--state-hover-bg);
+    border-color: var(--state-hover-border);
+  }
+  @media (hover: none) { .chart-zoom-ui { display: none; } }
+  body.chart-panning, body.chart-panning * { cursor: grabbing; user-select: none; }
+
   /* "deinflated $" toggle — JS parks it at the plot's top-left corner (endLabels
      plugin); these are just the pre-first-draw fallback coordinates. */
   .chart-infl-toggle {
@@ -3960,7 +4423,7 @@
     left: 58px;
     top: 6px;
     padding: 3px 7px;
-    font: 600 10px 'Open Sans', sans-serif;
+    font: 600 calc(10px * var(--ui-scale)) 'Open Sans', sans-serif;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--state-off-text);
@@ -3993,7 +4456,7 @@
     overflow: hidden;
     z-index: 10050;
     box-shadow: var(--shadow-lg);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--ui-scale));
     line-height: 1.4;
     white-space: nowrap;
     min-width: 212px;
@@ -4008,11 +4471,11 @@
   }
   #marker-tooltip .mt-shape { flex-shrink: 0; margin-top: 1px; display: inline-flex; }
   #marker-tooltip .mt-htext { flex: 1; min-width: 0; }
-  #marker-tooltip .mt-title { font-weight: 700; font-size: 12.5px; }
-  #marker-tooltip .mt-sub { color: var(--text-muted); font-size: 10px; margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+  #marker-tooltip .mt-title { font-weight: 700; font-size: calc(12.5px * var(--ui-scale)); }
+  #marker-tooltip .mt-sub { color: var(--text-muted); font-size: calc(10px * var(--ui-scale)); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
   #marker-tooltip .mt-gain {
     flex-shrink: 0; align-self: center;
-    font-size: 11px; font-weight: 700;
+    font-size: calc(11px * var(--ui-scale)); font-weight: 700;
     padding: 2px 8px; border-radius: 999px;
   }
   /* Metric rows: muted iconed label on the left, mono value on the right. */
@@ -4021,13 +4484,13 @@
   #marker-tooltip .mt-k { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
   #marker-tooltip .mt-ico { opacity: 0.7; flex-shrink: 0; }
   #marker-tooltip .mt-row b { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: var(--text); }
-  #marker-tooltip .mt-strong b { font-size: 13px; font-weight: 700; }
+  #marker-tooltip .mt-strong b { font-size: calc(13px * var(--ui-scale)); font-weight: 700; }
   /* Strategy note line under the rows ("dd 10.8% → tier 5% · …") — without
      this it renders flush against the tooltip's bottom edge. */
   #marker-tooltip .mt-note { padding: 0 12px 10px; }
 
   /* Live signal-metrics dashboard inside the SMA strategy panel. */
-  .signal-metrics { font-size: 12px; margin-top: 2px; }
+  .signal-metrics { font-size: calc(12px * var(--ui-scale)); margin-top: 2px; }
   .signal-metrics .sm-row {
     display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
     padding: 6px 0; border-bottom: 1px solid rgba(122, 122, 166,0.09);
@@ -4035,49 +4498,101 @@
   .signal-metrics .sm-row:last-child { border-bottom: 0; }
   .signal-metrics .sm-k { color: var(--text-muted); flex: 1 1 auto; }
   .signal-metrics .sm-v { font-family: 'JetBrains Mono', monospace; font-weight: 600; white-space: nowrap; }
-  .signal-metrics .sm-n { flex: 1 1 100%; text-align: right; font-size: 10.5px; }
+  .signal-metrics .sm-n { flex: 1 1 100%; text-align: right; font-size: calc(10.5px * var(--ui-scale)); }
   .signal-metrics .sm-muted { color: var(--text-muted); }
   .signal-metrics .positive { color: var(--green, #00b929); }
   .signal-metrics .negative { color: var(--red-text); }
 
+  /* Main-chart hover: a positioning root over the panel (no box of its own),
+     holding one .tt-card per visible line, a date chip above the plot and an
+     SVG of leader lines from each point to its card. Built in externalTooltip
+     (js/chart.js). */
   #custom-tooltip {
     display: none;
     position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    overflow: visible;
     /* The tooltip follows the cursor, so it MUST ignore pointer events — if it
        caught them, the cursor landing on it would fire mouseleave on the canvas
        (hiding the tooltip), then re-enter the canvas (showing it again), in a
        flicker loop. The close × re-enables pointer events on itself for touch. */
     pointer-events: none;
+    z-index: 20;
+  }
+  #custom-tooltip .tt-leaders {
+    position: absolute;
+    left: 0;
+    top: 0;
+    overflow: visible;
+  }
+  #custom-tooltip .tt-leaders line {
+    stroke-width: 1;
+    stroke-opacity: 0.55;
+  }
+  #custom-tooltip .tt-card {
+    position: absolute;
+    box-sizing: border-box;
     background: #ffffff;
     border: 1px solid #dbdff1;
-    border-radius: 10px;
-    padding: 14px 16px;
-    z-index: 20;
-    min-width: 220px;
-    max-width: calc(100vw - 24px);
-    /* Backstop for the pathological case (content taller than the whole
-       viewport) — the JS repositioning in externalTooltip (js/chart.js)
-       handles the normal "many visible lines" case by moving the tooltip up
-       so it fits; this just guarantees it can never itself grow the page's
-       scrollable height even if that math is somehow insufficient. */
-    max-height: calc(100vh - 20px);
-    overflow-y: auto;
+    border-radius: 8px;
+    padding: 5px 10px;
     box-shadow: var(--shadow-lg);
+    white-space: nowrap;
+    overflow: hidden;
   }
-  /* Close × inside the main-chart tooltip. Hidden on desktop (hover/leave
-     handles dismissal automatically) and shown on touch / narrow viewports
-     where the tooltip stays pinned until explicitly dismissed. */
-  #custom-tooltip .tt-close {
+  #custom-tooltip .tt-fill {
     position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 26px;
-    height: 26px;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 0;
+    pointer-events: none;
+  }
+  #custom-tooltip .tt-card .tt-row {
+    position: relative;
+    padding: 0;
+    gap: 12px;
+  }
+  #custom-tooltip .tt-card .tt-row-left {
+    min-width: 0;
+  }
+  #custom-tooltip .tt-card .tt-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #custom-tooltip .tt-card .tt-val {
+    flex-shrink: 0;
+  }
+  #custom-tooltip .tt-date-chip {
+    position: absolute;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px;
+    background: #ffffff;
+    border: 1px solid #dbdff1;
+    border-radius: 6px;
+    box-shadow: var(--shadow-lg);
+    font-family: 'Open Sans', sans-serif;
+    font-size: calc(11px * var(--ui-scale));
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  /* Close × on the date chip. Hidden on desktop (hover/leave handles
+     dismissal automatically) and shown on touch / narrow viewports where the
+     tooltip stays pinned until explicitly dismissed. */
+  #custom-tooltip .tt-close {
+    width: 22px;
+    height: 22px;
     border-radius: 4px;
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-muted);
-    font-size: 16px;
+    font-size: calc(15px * var(--ui-scale));
     line-height: 1;
     cursor: pointer;
     /* Re-enable pointer events (parent is none) so touch users can dismiss. */
@@ -4092,14 +4607,11 @@
   }
   @media (hover: none), (max-width: 600px) {
     #custom-tooltip .tt-close { display: inline-flex; }
-    /* Reserve right padding on the date row so the close button doesn't
-       collide with it. */
-    #custom-tooltip .tt-date { padding-right: 30px; }
   }
 
   .tt-date {
     font-family: 'Open Sans', sans-serif;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     font-weight: 600;
     color: var(--text-muted);
     margin-bottom: 10px;
@@ -4129,13 +4641,13 @@
 
   .tt-name {
     font-family: 'Open Sans', sans-serif;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text-muted);
   }
 
   .tt-val {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 500;
     color: var(--text);
     margin-left: 16px;
@@ -4168,7 +4680,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text-muted);
   }
 
@@ -4192,7 +4704,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
   }
 
   table thead {
@@ -4209,7 +4721,7 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    font-size: 9px;
+    font-size: calc(9px * var(--ui-scale));
     white-space: nowrap;
   }
 
@@ -4219,7 +4731,7 @@
     padding: 6px 8px;
     text-align: right;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 10.5px;
+    font-size: calc(10.5px * var(--ui-scale));
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -4241,7 +4753,7 @@
   }
 
   .info-note {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-scale));
     color: var(--text-muted);
     line-height: 1.5;
     margin-top: 12px;
@@ -4283,6 +4795,90 @@
     border-color: var(--accent);
   }
 
+  /* Resources dropdown — same quiet treatment as the GitHub link. A native
+     <details>; the inline script in index.html closes it on outside clicks. */
+  .resources-menu {
+    position: relative;
+  }
+  .resources-menu summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 8px;
+    color: var(--text-muted);
+    background: rgba(122, 122, 166, 0.08);
+    border: 1px solid rgba(122, 122, 166, 0.25);
+    font-size: calc(13px * var(--ui-scale));
+    font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .resources-menu summary::-webkit-details-marker { display: none; }
+  .resources-menu summary:hover,
+  .resources-menu[open] summary {
+    color: var(--accent-text);
+    background: rgba(134, 118, 255, 0.14);
+    border-color: var(--accent);
+  }
+  .resources-menu[open] summary svg { transform: rotate(180deg); }
+  .resources-list,
+  .analytics-menu-list {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 200px;
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(20, 30, 50, 0.12);
+    z-index: 50;
+  }
+  .analytics-menu-list button {
+    width: 100%;
+    border: 0;
+    background: none;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .resources-list a,
+  .analytics-menu-list button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--text);
+    font-size: calc(13px * var(--ui-scale));
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  /* The icon before a dropdown item: a drawing from images/icons/ shown through
+     a mask, so it wears the item's own colour, hover included. */
+  .menu-icon {
+    flex: none;
+    width: calc(16px * var(--ui-scale));
+    height: calc(16px * var(--ui-scale));
+    background: currentColor;
+    -webkit-mask: var(--icon) center / contain no-repeat;
+    mask: var(--icon) center / contain no-repeat;
+  }
+  .menu-icon--comparison-grid { --icon: url("images/icons/comparison-grid.svg"); }
+  .menu-icon--years-held      { --icon: url("images/icons/years-held.svg"); }
+  .menu-icon--intraday        { --icon: url("images/icons/intraday.svg"); }
+  .menu-icon--ninesig         { --icon: url("images/icons/ninesig.svg"); }
+  .menu-icon--sma             { --icon: url("images/icons/sma.svg"); }
+  .resources-list a:hover,
+  .analytics-menu-list button:hover {
+    background: rgba(134, 118, 255, 0.12);
+    color: var(--accent-text);
+  }
+
   /* Share button — icon + text on desktop, icon-only on smaller viewports
      (the @media (max-width: 900px) override below hides .share-btn-label). */
   #share-btn {
@@ -4297,7 +4893,7 @@
     border-radius: 8px;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-scale));
     font-weight: 500;
     transition: all 0.2s;
   }
@@ -4324,6 +4920,7 @@
       padding: 0;
     }
     #share-btn .share-btn-label { display: none; }
+    .resources-menu .resources-label { display: none; }
   }
 
   /* Shown only when localStorage was written by an older APP_VERSION. Pinned
@@ -4348,7 +4945,7 @@
     border-radius: 8px;
     color: var(--orange-text);
     cursor: pointer;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 500;
     white-space: nowrap;
     transition: all 0.2s;
@@ -4359,7 +4956,7 @@
   }
   @media (max-width: 900px) {
     #reset-version-btn {
-      font-size: 11px;
+      font-size: calc(11px * var(--ui-scale));
       padding: 0 8px;
     }
   }
@@ -4372,7 +4969,7 @@
     padding: 8px 16px;
     background: var(--green);
     color: var(--bg);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-scale));
     font-weight: 600;
     border-radius: 6px;
     opacity: 0;
@@ -4385,3 +4982,28 @@
   #share-toast.show {
     opacity: 1;
   }
+
+/* The type scale. Every font size above is calc(Npx * var(--ui-scale)): 1 on a
+   desktop, so nothing there changes; 1.25 on a coarse-pointer screen (phones,
+   tablets, a folding phone's inner panel), where the page is held close and
+   its CSS pixels are a third smaller, so 12 px desktop type read tiny (the
+   user's Z Fold 6, 2026-11-05). Text drawn on canvas and in the signal chart
+   follows through js/utils.js uiScale(). */
+:root { --ui-scale: 1; }
+@media (hover: none) and (pointer: coarse) {
+  :root { --ui-scale: 1.25; }
+  /* At the larger size a signal-metrics card's one-line reason ("$2.5K put in;
+     sold for the strategy at ...") outgrew half a phone's width and, since a
+     1fr column is at least its content, pushed the page past the screen, which
+     Chrome on Android answers by shrinking the whole page. The columns cap at
+     their share and the reason wraps; the desktop keeps its one line. */
+  .strategy-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strategy-stat { min-width: 0; }
+  .strategy-stat-range { white-space: normal; overflow-wrap: anywhere; }
+  /* The same for a legend chip once every chip carries a "more" button: its
+     metrics column may shrink, and the drawdown's date range drops to a line
+     of its own under the value instead of holding the chip at one line. */
+  .legend-chip .legend-metrics { min-width: 0; }
+  .legend-chip .legend-metric-row { flex-wrap: wrap; justify-content: flex-end; }
+  .legend-chip .legend-metric-range { white-space: normal; }
+}

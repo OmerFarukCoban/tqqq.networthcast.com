@@ -56,14 +56,38 @@ jobs:
       # a transient 429 into a slightly later refresh instead of a failed run.
       - name: Refresh QQQ / TQQQ / SPY
         if: steps.gate.outputs.run == 'true'
-        run: python3 update_data.py || (sleep 120 && python3 update_data.py)
+        run: python3 scripts/update_data.py || (sleep 120 && python3 scripts/update_data.py)
+
+      # Two Alpaca requests a fund per run (calendar + bars since the last day
+      # on disk) for the site's ten funds, well inside the free plan's
+      # 200/minute. A fund with no file yet gets its full three-year pull, so a
+      # new ticker fills in on its first run. Kept independent of the
+      # daily prices: an Alpaca outage shows as a failed step in the log but
+      # must not block committing the yfinance refresh above.
+      - name: Refresh 5-minute bars (Alpaca)
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+        run: python3 scripts/update_intraday.py --incremental
+
+      # One yfinance request for today's 1-minute bars. Alpaca's free plan
+      # holds back the latest 15 minutes, Yahoo serves the current minute, so
+      # the intraday page draws today from this file and history from Alpaca's.
+      - name: Refresh today's TQQQ 1-minute bars (Yahoo)
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        run: python3 scripts/update_intraday_today.py
 
       - name: Commit and push if data changed
         if: steps.gate.outputs.run == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- 'data/*.tsv'; then
+          # Changed files and new ones: a fund's first 5-minute file is untracked,
+          # which git diff does not see.
+          if [ -z "$(git status --porcelain -- 'data/*.tsv' 'data/intraday/*.tsv')" ]; then
             echo "No data changes."
             exit 0
           fi
@@ -77,10 +101,16 @@ jobs:
           # it to the viewer's own local time for display.
           stamp_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "$stamp_utc" > data/last-updated.txt
-          git add 'data/*.tsv' data/last-updated.txt
+          git add 'data/*.tsv' 'data/intraday/*.tsv' data/last-updated.txt
           # Commit message stays ET so the nine same-day commits are told
           # apart at a glance in git log.
-          git commit -m "Refresh market data $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')"
+          subject="Refresh market data $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')"
+          # A fund split: the refresh added a row to data/splits.tsv
+          # (scripts/split_guard.py). It goes first in the subject so it
+          # stands out in the log: "SPLIT SOXX 3-for-1 (2026-11-05). Refresh …".
+          splits="$(git diff --cached -U0 -- data/splits.tsv | { grep '^+[A-Z]' || true; } | cut -c2- | awk -F'\t' '{printf "%s%s %s (%s)", (NR > 1 ? ", " : ""), $1, $3, $2}')"
+          if [ -n "$splits" ]; then subject="SPLIT $splits. $subject"; fi
+          git commit -m "$subject"
           # Another run may have pushed while this one was fetching.
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push

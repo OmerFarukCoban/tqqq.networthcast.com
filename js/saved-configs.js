@@ -73,11 +73,15 @@ function getSavedConfigs() { return savedConfigs; }
 // Saved strategies store their colour on the config (cfg.color). Base
 // strategies are canonical, so their colour override is SESSION-ONLY — it's
 // kept in memory but never persisted, so a refresh restores the default hue.
-const DEFAULT_BASE_COLORS = { '9sig': '#45818e', 'bh': '#ff2d2e', 'invested': '#bf9000', 'sma': '#c64eff' };
+// Buy & Hold's default is the picked fund's colour (js/data.js FUND_COLORS),
+// so a saved Buy & Hold SOXL is orange like every other SOXL line.
+const DEFAULT_BASE_COLORS = { '9sig': '#45818e', 'invested': '#bf9000', 'sma': '#c64eff' };
 const BASE_COLOR_DATASET_IDX = { '9sig': 0, 'bh': 2, 'invested': 7, 'sma': 8 };
 window._lineColorOverrides = {};
+function bhUnderlying() { return ((document.getElementById('select-bh-underlying') || {}).value) || 'tqqq'; }
 function getBaseColor(type) {
   const ov = window._lineColorOverrides || {};
+  if (type === 'bh') return ov.bh || FUND_COLORS[bhUnderlying()];
   return ov[type] || DEFAULT_BASE_COLORS[type] || '#7a7aa6';
 }
 function setBaseColor(type, color) {
@@ -109,10 +113,13 @@ function applyNineSigFamily(chart) {
 // strategy owns its breakdown lines, drawn from ITS params and tied to it — so
 // they persist correctly (no flipping to the canonical base on close). Toggled
 // via cfg.subShown[key]; the main 9sig keeps its own datasets 1/5/6.
+// The dash of a strategy's extra lines on the main chart, a saved 9sig's
+// breakdown and a code strategy's `series` alike.
+const SERIES_DASH = { dot: [2, 2], dash: [9, 4], dashdot: [2, 4, 9, 4] };
 const CONFIG_SUB_DEFS = [
-  { key: 'holding', label: 'Holding', src: 'tqqqVal', dash: [2, 2] },
-  { key: 'target',  label: 'Target',  src: 'target',  dash: [9, 4] },
-  { key: 'cash',    label: 'Cash',    src: 'cash',    dash: [2, 4, 9, 4] },
+  { key: 'holding', label: 'Holding', src: 'tqqqVal', dash: SERIES_DASH.dot },
+  { key: 'target',  label: 'Target',  src: 'target',  dash: SERIES_DASH.dash },
+  { key: 'cash',    label: 'Cash',    src: 'cash',    dash: SERIES_DASH.dashdot },
 ];
 // Label a sub-series from the config's own chosen assets: "TQQQ holding",
 // "TQQQ target", and the park fund (e.g. "QQQ") — or "Cash" when the park is cash.
@@ -127,16 +134,15 @@ function configSubLabel(def, cfg) {
 }
 // One eye-toggle chip bound to cfg.subShown[key] (the shared .cfg-sub-chip
 // click handler flips it, persists, and re-renders). `defaultOn` is what an
-// unset key means: 9sig breakdown lines start hidden (main-chart clutter),
-// a custom strategy's signal chart starts fully shown (it's contained).
-function _configSubChipHtml(cfg, key, label, dotColor, defaultOn, lineSwatch) {
+// unset key means: 9sig breakdown lines start hidden (main-chart clutter). A
+// signal chart's lines have their eyes on the chart's own end labels
+// (js/signal-chart.js), which carry the same class and data.
+function _configSubChipHtml(cfg, key, label, dotColor, defaultOn) {
   const sv = (cfg.subShown || {})[key];
   const on = sv == null ? !!defaultOn : !!sv;
-  const eyeOpen = '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>';
-  const eyeOff = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-7-10-7a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>';
   return `<div class="legend-chip cfg-sub-chip${on ? '' : ' legend-hidden'}" data-config-id="${cfg.id}" data-config-sub="${_escHtml(key)}" role="button" tabindex="0" title="Show / hide">
-    <svg class="legend-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${on ? eyeOpen : eyeOff}</svg>
-    <span class="${lineSwatch ? 'legend-line-swatch' : 'legend-dot'}" style="background:${dotColor || cfg.color}"></span>
+    <svg class="legend-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${on ? MINI_EYE.open : MINI_EYE.off}</svg>
+    <span class="legend-dot" style="background:${dotColor || cfg.color}"></span>
     <span class="legend-name">${_escHtml(label)}</span>
   </div>`;
 }
@@ -144,285 +150,136 @@ function _configSubChipHtml(cfg, key, label, dotColor, defaultOn, lineSwatch) {
 function buildConfigSubChipsHtml(cfg) {
   return CONFIG_SUB_DEFS.map(def => _configSubChipHtml(cfg, def.key, configSubLabel(def, cfg), null, false)).join('');
 }
-// Chips for a CUSTOM strategy's declared signal lines — dots match the mini
-// chart's per-series colors, and unset keys count as VISIBLE.
-function buildCustomLineChipsHtml(cfg, lines) {
-  return lines.map((ln, i) => _configSubChipHtml(cfg, ln.key, ln.label, customLineColor(cfg, i), true, true)).join('');
+// --- the detail run behind the zoom ---------------------------------------
+// The display log holds one plain "hold" row a week or a month (the transaction
+// table renders every row and the main chart wants no more), so a zoom into
+// one month would show four points per line. The chart therefore gets a second
+// run of the same code, settings, money and Entry with p.dailyDisplay set, which
+// logs every day; the library snippet and the prompt both honour the flag. It
+// runs on past the main chart's Exit to the data's latest day (customDetailCtx),
+// so the chart can be moved forward from the main chart's range on the same
+// account, deposits and holdings (the user, 2026-11-22: "I can make signal
+// chart to go past in time, but I can't make it to go forward from main
+// chart"). Cached per signature beside the display result and used only here;
+// a strategy that ignores the flag returns its ordinary log.
+window._customDetailLogs = window._customDetailLogs || {};   // cfgId → { sig, log | null while running, holdings } (holdings: the run's per-day holdings, for the chart's tooltip)
+// The main run's ctx with its Exit on the data's latest day, named the way the
+// main window is named (an exact day when the window is exact, else the last
+// quarter), so the engines read the window as they do for the main run
+// (computeCustomGlobals's exactWindow). The run reaches the latest row, so it
+// follows a live price (customDataStamp).
+function customDetailCtx(ctx) {
+  const exact = !!(ctx.entryDateOverride || ctx.exitDateOverride);
+  const exit = exact ? { exitDateOverride: daily[daily.length - 1].date } : { exitIdx: quarterlyData.length - 1 };
+  return Object.assign({}, ctx, exit, { isLatestDaySelected: true });
 }
-// Whether a custom signal line is currently shown (unset = shown).
-function customLineShown(cfg, key) { return ((cfg.subShown || {})[key]) !== false; }
-
-// The signal mini chart: the strategy's declared lines drawn in the sidebar
-// panel on their own scale. These are price-scale values ($50–$80) that would
-// be squashed unreadably under six-figure portfolio lines on the main chart —
-// here they get a log y-axis of their own, so a constant-% trigger renders as
-// a constant vertical gap and the crossings the rules fire on are visible.
-// Fixed viewBox geometry, shared with the hover handler below so the
-// crosshair math matches the drawing exactly. The SVG scales with the panel
-// (lines and layout grow proportionally); ONLY text is compensated — font
-// sizes are divided by the render scale so labels keep their pixel size at
-// any panel width instead of blowing up on a wide one.
-const MINI_CHART = { W: 320, H: 148, padL: 6, padT: 8, padB: 16 };
-// fmt() rounds sub-$1000 values to whole dollars, which turns the low end of
-// a log axis (TQQQ opened at $0.42) into a "$0" label — keep decimals on
-// small prices instead.
-function _miniFmtPrice(v) { return v >= 1000 ? fmt(v) : '$' + (v < 10 ? v.toFixed(2) : String(Math.round(v))); }
-function buildCustomLinesChartHtml(cfg, lines, log, cw) {
-  const series = [];
-  lines.forEach((ln, i) => {
-    if (!customLineShown(cfg, ln.key)) return;
-    const pts = [];
-    for (const r of log) {
-      if (r && r.date != null && typeof r[ln.key] === 'number' && isFinite(r[ln.key]) && r[ln.key] > 0) {
-        pts.push({ t: Date.parse(r.date), v: r[ln.key], d: String(r.date) });
-      }
-    }
-    if (pts.length > 1) series.push({ label: ln.label, color: customLineColor(cfg, i), pts });
+function customDetailLog(cfg) {
+  const ctx = window._customCtx, shown = (window._customResults || {})[cfg.id];
+  if (!ctx || !shown || shown.error) return null;
+  const detailCtx = customDetailCtx(ctx), sig = customSig(cfg, detailCtx);
+  const have = window._customDetailLogs[cfg.id];
+  if (have && have.sig === sig) return have.log;
+  // A new live price (the signature's data stamp) keeps the last log on screen
+  // until the run with the price is in; any other change (settings, the range)
+  // draws the display log until then, since the old log shows the old rules.
+  const carried = have && have.log && _sigSansStamp(have.sig) === _sigSansStamp(sig) ? have.log : null;
+  if (shown.sig !== customSig(cfg, ctx)) return carried;   // the display run is still catching up; its arrival re-renders the panel
+  window._customDetailLogs[cfg.id] = { sig, log: carried, holdings: carried ? have.holdings : null };
+  postCustomJob(cfg, cfg.params || {}, Object.assign({}, computeCustomGlobals(cfg, detailCtx), { dailyDisplay: true }), (msg, err) => {
+    const slot = window._customDetailLogs[cfg.id];
+    if (!slot || slot.sig !== sig) return;   // superseded by a newer signature
+    slot.log = (!err && msg && Array.isArray(msg.log)) ? msg.log : [];
+    slot.holdings = (!err && msg && Array.isArray(msg.holdings)) ? msg.holdings : null;
+    if (window._openCustomCfgId === cfg.id) _miniChartRerender();
   });
-  window._miniChartHover = null;
-  if (!series.length) return '';
-
-  const { W, H, padL, padT, padB } = MINI_CHART;
-  const k = Math.max(1, (cw || W) / W);   // render scale; divide TEXT sizes by it
-  // Right gutter fits "$value  series name" on one line (both descaled, JetBrains
-  // Mono advance ≈ 0.6em), capped so a narrow panel keeps a usable plot area —
-  // when capped, long names clip at the right edge instead of covering lines.
-  const _valTxt = v => v >= 1000 ? fmt(v) : '$' + v.toFixed(2);
-  const valColW = Math.max(...series.map(s => _valTxt(s.pts[s.pts.length - 1].v).length)) * (9 / k) * 0.6;
-  const nameColW = Math.max(...series.map(s => s.label.length)) * (7 / k) * 0.6;
-  const padR = Math.min(4 / k + valColW + 4 / k + nameColW + 2 / k, 0.45 * W);
-  let t0 = Infinity, t1 = -Infinity, lo = Infinity, hi = -Infinity;
-  for (const s of series) for (const p of s.pts) {
-    if (p.t < t0) t0 = p.t; if (p.t > t1) t1 = p.t;
-    if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v;
-  }
-  if (!(t1 > t0) || !(hi > 0)) return '';
-  const l0 = Math.log10(lo), l1 = Math.log10(hi);
-  const lPad = Math.max((l1 - l0) * 0.05, 0.01);
-  const yLo = l0 - lPad, yHi = l1 + lPad;
-  const xAt = t => padL + (t - t0) / (t1 - t0) * (W - padL - padR);
-  const yAt = v => padT + (yHi - Math.log10(v)) / (yHi - yLo) * (H - padT - padB);
-  const fmtP = _miniFmtPrice;
-  // Everything the hover handler needs to resolve a cursor position back to
-  // per-series values. One custom panel is open at a time, so a single slot
-  // (always the most recently built chart) is enough.
-  window._miniChartHover = { series, t0, t1, yLo, yHi, W, H, padR, k };
-
-  // Horizontal gridlines at three log-spaced levels, labeled with fmt().
-  let grid = '';
-  for (let g = 0; g < 3; g++) {
-    const lv = Math.pow(10, yLo + (yHi - yLo) * (0.15 + 0.35 * g));
-    const y = yAt(lv).toFixed(1);
-    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="rgba(122,122,166,0.14)" stroke-width="0.5"/>
-      <text x="${padL + 1}" y="${(+y - 2).toFixed(1)}" font-family="JetBrains Mono" font-size="${(8 / k).toFixed(2)}" fill="rgba(122,122,166,0.75)" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${fmtP(lv)}</text>`;
-  }
-  // Year ticks along the bottom, sampled to at most ~6. Label centers are
-  // clamped inside the viewBox so the first/last year never render half-cut
-  // at the edges ("010" instead of "2010").
-  const y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
-  const step = Math.max(1, Math.ceil((y1 - y0) / 6));
-  const halfLbl = 10 / k; // ≈ half the (descaled) width of "2010"
-  let xAxis = '';
-  for (let y = y0 + 1; y <= y1; y += step) {
-    const t = Date.parse(y + '-01-01');
-    if (t <= t0 || t >= t1) continue;
-    const lx = Math.max(halfLbl, Math.min(W - halfLbl, xAt(t)));
-    xAxis += `<text x="${lx.toFixed(1)}" y="${H - 4}" text-anchor="middle" font-family="JetBrains Mono" font-size="${(8 / k).toFixed(2)}" fill="rgba(122,122,166,0.75)">${y}</text>`;
-  }
-
-  // Polylines + right-edge end labels (pushed apart when endpoints collide).
-  let paths = '';
-  const ends = [];
-  for (const s of series) {
-    let d = '';
-    for (const p of s.pts) d += (d ? 'L' : 'M') + xAt(p.t).toFixed(1) + ',' + yAt(p.v).toFixed(1);
-    paths += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="0.45"/>`;
-    const last = s.pts[s.pts.length - 1];
-    ends.push({ y: yAt(last.v), v: last.v, color: s.color, name: s.label });
-  }
-  // One line per series in the gutter: value column, then the name beside it,
-  // both on the same baseline so neither ever covers the plot.
-  ends.sort((a, b) => a.y - b.y);
-  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 10 / k) ends[i].y = ends[i - 1].y + 10 / k;
-  let endLabels = '';
-  for (const e of ends) {
-    endLabels += `<text x="${(W - padR + 4 / k).toFixed(1)}" y="${(e.y + 3 / k).toFixed(1)}" font-family="JetBrains Mono" font-size="${(9 / k).toFixed(2)}" font-weight="600" fill="${e.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2.5 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_valTxt(e.v)}</text>
-      <text x="${(W - padR + 8 / k + valColW).toFixed(1)}" y="${(e.y + 3 / k).toFixed(1)}" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600" fill="${e.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_escHtml(e.name)}</text>`;
-  }
-
-
-  return `<svg class="custom-lines-chart" viewBox="0 0 ${W} ${H}">${grid}${paths}${endLabels}${xAxis}</svg>`;
+  return carried;
+}
+// The years before the main chart's range, for the panel's signal chart: the
+// same code and settings over the whole history in the data, logged daily,
+// on a plain $10,000 with no contributions (the chart draws the strategy's
+// lines and trades, which follow prices; it never shows this run's money).
+// Cached per signature; its arrival redraws the open panel.
+const CUSTOM_HISTORY_MONEY = 10000;
+window._customHistoryLogs = window._customHistoryLogs || {};   // cfgId → { sig, log | null while running, holdings }
+function customHistoryLog(cfg) {
+  const ctx = { initial: CUSTOM_HISTORY_MONEY, monthly: 0, annualRaise: 0, entryDateOverride: daily[0].date, exitDateOverride: daily[daily.length - 1].date, contribSchedule: null };
+  const sig = customSig(cfg, ctx);
+  const have = window._customHistoryLogs[cfg.id];
+  if (have && have.sig === sig) return have.log;
+  window._customHistoryLogs[cfg.id] = { sig, log: null, holdings: null };
+  postCustomJob(cfg, cfg.params || {}, Object.assign({}, computeCustomGlobals(cfg, ctx), { dailyDisplay: true }), (msg, err) => {
+    const slot = window._customHistoryLogs[cfg.id];
+    if (!slot || slot.sig !== sig) return;   // superseded by a newer signature
+    slot.log = (!err && msg && Array.isArray(msg.log)) ? msg.log : [];
+    slot.holdings = (!err && msg && Array.isArray(msg.holdings)) ? msg.holdings : null;
+    if (window._openCustomCfgId === cfg.id) _miniChartRerender();
+  });
+  return null;
+}
+// What the signal chart draws: the detail run (the main run carried on to the
+// data's latest day; the display log until it is in, and for good when it
+// failed), after the history run's rows from before its first day, so the
+// chart reaches from the data's start to its latest day whatever the main
+// chart's Entry and Exit. It rests on the main run's own range (home) and
+// zooms out over the rest.
+function customSignalChartView(cfg, displayLog) {
+  const detail = customDetailLog(cfg);
+  const main = detail && detail.length ? detail : displayLog;
+  if (!main.length) return { log: main, home: null, holdings: null, runs: null };
+  // The main run's last day: the display log's last row (the detail log runs on past it).
+  const exitRow = displayLog.length ? displayLog[displayLog.length - 1] : main[main.length - 1];
+  const home = { t0: Date.parse(main[0].date), t1: Date.parse(exitRow.date) };
+  const history = customHistoryLog(cfg);
+  const before = history ? history.filter(r => r.date < main[0].date) : [];
+  // The per-day holdings beside each log, for the tooltip: the detail run's
+  // when its log is the one shown, else the display run's; the history run's
+  // before the main run's first day.
+  const detailSlot = window._customDetailLogs[cfg.id], historySlot = window._customHistoryLogs[cfg.id];
+  const mainHoldings = detailSlot && detailSlot.log === main ? detailSlot.holdings : ((window._customResults || {})[cfg.id] || {}).holdings;
+  const beforeHoldings = history && historySlot && historySlot.log === history && historySlot.holdings ? historySlot.holdings.filter(e => e.date < main[0].date) : [];
+  const holdings = mainHoldings ? beforeHoldings.concat(mainHoldings) : null;
+  // The two runs the log joins, for the chart's own return over a dragged
+  // range (js/signal-chart.js's _miniRunReturn): the history run counts up to
+  // the main run's first day, the main run from there.
+  const runs = before.length ? [{ rows: history, until: main[0].date }, { rows: main }] : [{ rows: main }];
+  return { log: before.concat(main), home, holdings, runs };
+}
+// A code strategy's signal chart for the panel, `width` px wide: that view,
+// drawn. The panel's first draw and the chart's own redraw both come here,
+// so both hand the chart the same log, home view, holdings and runs.
+function customSignalChartHtml(cfg, lines, width) {
+  const view = customSignalChartView(cfg, (window._customLogs || {})[cfg.id] || []);
+  return buildCustomLinesChartHtml(cfg, lines, view.log, width, { home: view.home, holdings: view.holdings, runs: view.runs });
 }
 
-// The panel opens through a width transition (and can be resized), so the
-// signal chart's first render can measure a stale width — leaving its
-// width-compensated text scaled wrong. This observer re-renders JUST the
-// chart svg (nothing else in the panel) once the body's real width settles.
-const _miniChartResizeObs = (typeof ResizeObserver !== 'undefined') ? new ResizeObserver(() => {
-  clearTimeout(window._miniChartResizeT);
-  window._miniChartResizeT = setTimeout(() => {
-    const id = window._openCustomCfgId;
-    if (!id) return;
-    const body = document.getElementById('strategy-panel-body');
-    if (!body || !body.clientWidth) return;
-    const svg = body.querySelector('.custom-lines-chart');
-    if (!svg) return;
+// The strategy panel as the signal chart's host (js/signal-chart.js): redraw
+// just the chart svg of the open panel (nothing else in the panel) from the
+// current width, log and zoom — a custom strategy's, or a built-in SMA or
+// 9sig panel's (js/chart.js's nativeSignalChart).
+function redrawPanelSignalChart() {
+  const body = document.getElementById('strategy-panel-body');
+  if (!body || !body.clientWidth) return;
+  const svg = body.querySelector('.custom-lines-chart');
+  if (!svg) return;
+  const id = window._openCustomCfgId;
+  let html = '';
+  if (id) {
     const cfg = savedConfigs.find(c => c.id === id);
     const auxLines = (window._customLines || {})[id] || [];
     if (!cfg || !auxLines.length) return;
-    const html = buildCustomLinesChartHtml(cfg, auxLines, (window._customLogs || {})[id] || [], body.clientWidth);
-    if (!html) return;
-    const tpl = document.createElement('div');
-    tpl.innerHTML = html;
-    svg.replaceWith(tpl.firstElementChild);
-  }, 150);
-}) : null;
-
-// --- signal mini chart hover: crosshair + per-line value tooltip ---------
-function _miniChartTipEl() {
-  let el = document.getElementById('mini-chart-tip');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'mini-chart-tip';
-    el.setAttribute('hidden', '');
-    document.body.appendChild(el);
+    html = customSignalChartHtml(cfg, auxLines, body.clientWidth);
+  } else {
+    const signal = nativeSignalChart(_currentPanelIdx);
+    if (!signal) return;
+    html = buildCustomLinesChartHtml(signal.cfg, signal.lines, signal.log, body.clientWidth, { home: signal.home, holdings: signal.holdings });
   }
-  return el;
+  if (!html) return;
+  const tpl = document.createElement('div');
+  tpl.innerHTML = html;
+  svg.replaceWith(tpl.firstElementChild);
 }
-function _miniChartClearHover() {
-  const g = document.querySelector('.custom-lines-chart .mini-hover');
-  if (g) g.remove();
-  const tip = document.getElementById('mini-chart-tip');
-  if (tip) tip.setAttribute('hidden', '');
-  window._miniHoverActive = false;
-}
-// Nearest point to time t (pts are in date order — binary search).
-function _miniNearestPt(pts, t) {
-  let lo = 0, hi = pts.length - 1;
-  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m].t <= t) lo = m; else hi = m; }
-  return (t - pts[lo].t) <= (pts[hi].t - t) ? pts[lo] : pts[hi];
-}
-// Cursor position → the first series' nearest logged day. Every readout
-// (hover and drag-range alike) snaps to this anchor so all rows describe
-// the same real trading date.
-function _miniAnchorFromEvent(svg, e, data) {
-  const M = MINI_CHART;
-  const rect = svg.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / (rect.width / data.W);
-  const frac = Math.max(0, Math.min(1, (x - M.padL) / (data.W - M.padL - data.padR)));
-  return _miniNearestPt(data.series[0].pts, data.t0 + frac * (data.t1 - data.t0));
-}
-function _miniXAt(data, t) {
-  const M = MINI_CHART;
-  return M.padL + (t - data.t0) / (data.t1 - data.t0) * (data.W - M.padL - data.padR);
-}
-// Exact-value formatter for readouts: two decimals below $1000.
-function _miniFmtExact(v) { return v >= 1000 ? fmt(v) : '$' + v.toFixed(2); }
-function _miniHoverGroup(svg) {
-  let g = svg.querySelector('.mini-hover');
-  if (!g) {
-    g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    g.setAttribute('class', 'mini-hover');
-    svg.appendChild(g);
-  }
-  return g;
-}
-function _miniPlaceTip(tip, e) {
-  tip.removeAttribute('hidden');
-  let left = e.clientX + 14, top = e.clientY + 12;
-  if (left + tip.offsetWidth > window.innerWidth - 8) left = e.clientX - tip.offsetWidth - 12;
-  if (top + tip.offsetHeight > window.innerHeight - 8) top = e.clientY - tip.offsetHeight - 10;
-  tip.style.left = left + 'px';
-  tip.style.top = top + 'px';
-}
-// Drag-to-select a range, like the main chart's: while dragging, the overlay
-// shades the span, draws each line's chord between its two endpoints, and the
-// tooltip shows every line's % change with the exact from → to values.
-// Auto-clears on release.
-document.addEventListener('mousedown', (e) => {
-  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
-  const data = window._miniChartHover;
-  if (!svg || !data || !data.series.length) return;
-  window._miniDragAnchor = _miniAnchorFromEvent(svg, e, data);
-  e.preventDefault(); // no text selection while dragging
-});
-document.addEventListener('mouseup', () => {
-  if (!window._miniDragAnchor) return;
-  window._miniDragAnchor = null;
-  _miniChartClearHover();
-});
-document.addEventListener('mousemove', (e) => {
-  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
-  if (!svg) { if (window._miniHoverActive && !window._miniDragAnchor) _miniChartClearHover(); return; }
-  const data = window._miniChartHover;
-  if (!data || !data.series.length) return;
-  const M = MINI_CHART;
-  const yAt = v => M.padT + (data.yHi - Math.log10(v)) / (data.yHi - data.yLo) * (data.H - M.padT - M.padB);
-  const anchor = _miniAnchorFromEvent(svg, e, data);
-  const g = _miniHoverGroup(svg);
-  const tip = _miniChartTipEl();
+setMiniChartHost(redrawPanelSignalChart);
 
-  const drag = window._miniDragAnchor;
-  if (drag && drag.t !== anchor.t) {
-    // Range mode: shaded span + per-series chords, % change in the tooltip.
-    let lo = drag, hi = anchor;
-    if (hi.t < lo.t) { lo = anchor; hi = drag; }
-    const xA = _miniXAt(data, lo.t), xB = _miniXAt(data, hi.t);
-    const spans = data.series.map(s => ({ ...s, p0: _miniNearestPt(s.pts, lo.t), p1: _miniNearestPt(s.pts, hi.t) }));
-    g.innerHTML = `<rect x="${xA.toFixed(1)}" y="${M.padT}" width="${(xB - xA).toFixed(1)}" height="${data.H - M.padT - M.padB}" fill="rgba(134,118,255,0.10)"/>`
-      + `<line x1="${xA.toFixed(1)}" y1="${M.padT}" x2="${xA.toFixed(1)}" y2="${data.H - M.padB}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
-      + `<line x1="${xB.toFixed(1)}" y1="${M.padT}" x2="${xB.toFixed(1)}" y2="${data.H - M.padB}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
-      + spans.map(s => {
-          const y0 = yAt(s.p0.v).toFixed(1), y1 = yAt(s.p1.v).toFixed(1);
-          return `<line x1="${xA.toFixed(1)}" y1="${y0}" x2="${xB.toFixed(1)}" y2="${y1}" stroke="${s.color}" stroke-width="0.5" stroke-dasharray="2,1.5"/>
-            <circle cx="${xA.toFixed(1)}" cy="${y0}" r="0.9" fill="${s.color}" stroke="#fff" stroke-width="0.3"/>
-            <circle cx="${xB.toFixed(1)}" cy="${y1}" r="0.9" fill="${s.color}" stroke="#fff" stroke-width="0.3"/>`;
-        }).join('')
-      // % change at each chord's midpoint — just the percent, green/red by
-      // sign, pushed apart when chords run close together.
-      + (() => {
-          const mids = spans.map(s => {
-            const pct = s.p0.v > 0 ? (s.p1.v / s.p0.v - 1) * 100 : 0;
-            return { y: (yAt(s.p0.v) + yAt(s.p1.v)) / 2 - 2, pct };
-          }).sort((a, b) => a.y - b.y);
-          for (let i = 1; i < mids.length; i++) if (mids[i].y - mids[i - 1].y < 5) mids[i].y = mids[i - 1].y + 5;
-          const xM = (xA + xB) / 2;
-          return mids.map(m => {
-            const txt = (m.pct >= 0 ? '+' : '') + m.pct.toFixed(1) + '%';
-            const col = m.pct >= 0 ? '#00b929' : '#dc2626';
-            const tw = txt.length * 1.6;                  // ~mono glyph width at font-size 2.6
-            return `<rect x="${(xM - tw / 2 - 1.5).toFixed(1)}" y="${(m.y - 3.1).toFixed(1)}" width="${(tw + 3).toFixed(1)}" height="4.1" rx="2" fill="#fff" stroke="${col}" stroke-width="0.25"/>
-              <text x="${xM.toFixed(1)}" y="${m.y.toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono" font-size="2.6" font-weight="700" fill="${col}">${txt}</text>`;
-          }).join('');
-        })();
-    tip.innerHTML = `<div class="mct-date">${fmtLogDate(lo.d)} – ${fmtLogDate(hi.d)}</div>`
-      + spans.map(s => {
-          const pct = s.p0.v > 0 ? (s.p1.v / s.p0.v - 1) * 100 : 0;
-          const cls = pct >= 0 ? 'mct-pos' : 'mct-neg';
-          return `<div class="mct-row"><span class="mct-dot" style="background:${s.color}"></span>${_escHtml(s.label)}<b class="${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%</b><span class="mct-range">${_miniFmtExact(s.p0.v)} → ${_miniFmtExact(s.p1.v)}</span></div>`;
-        }).join('');
-    _miniPlaceTip(tip, e);
-    window._miniHoverActive = true;
-    return;
-  }
-
-  // Plain hover: crosshair + values at the snapped day.
-  const cx = _miniXAt(data, anchor.t);
-  const hits = data.series.map(s => ({ ...s, pt: _miniNearestPt(s.pts, anchor.t) }));
-  g.innerHTML = `<line x1="${cx.toFixed(1)}" y1="${M.padT}" x2="${cx.toFixed(1)}" y2="${data.H - M.padB}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
-    + hits.map(h => `<circle cx="${cx.toFixed(1)}" cy="${yAt(h.pt.v).toFixed(1)}" r="0.5" fill="${h.color}" stroke="#fff" stroke-width="0.25"/>`).join('');
-  tip.innerHTML = `<div class="mct-date">${fmtLogDate(anchor.d)}</div>`
-    + hits.map(h => `<div class="mct-row"><span class="mct-dot" style="background:${h.color}"></span>${_escHtml(h.label)}<b>${_miniFmtPrice(h.pt.v)}</b></div>`).join('');
-  _miniPlaceTip(tip, e);
-  window._miniHoverActive = true;
-});
-// Series colors for the signal mini chart: the strategy's own color for the
-// first declared line (usually the traded fund's price), then fixed hues
-// picked to stay distinguishable against it.
-const CUSTOM_MINI_COLORS = ['#e11d48', '#0284c7', '#059669', '#a16207', '#7c3aed'];
-function customLineColor(cfg, i) {
-  return i === 0 ? cfg.color : (CUSTOM_MINI_COLORS[(i - 1) % CUSTOM_MINI_COLORS.length]);
-}
 // Colour the sidebar picker should show: the saved strategy's colour when one
 // is being edited, otherwise the base strategy's (override or default).
 function currentLineColor(type) {
@@ -585,7 +442,7 @@ function applyParams(type, params) {
   }
 }
 function pget(p, id, dflt) { return (p && id in p) ? p[id] : dflt; }
-function ulColFromVal(v) { return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : 1; }
+function ulColFromVal(v) { return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : v === 'gld' ? 8 : v === 'soxl' ? 9 : v === 'soxx' ? 10 : 1; }
 
 // Canonical (HTML-default) value of every strategy knob, snapshotted ONCE at
 // load. This must NOT be re-read live: picking a value from a bar-preview
@@ -687,6 +544,7 @@ const CUSTOM_PROMPT = `You are writing ONE backtest strategy for a charting app.
   params:  [ ... ],   // the sidebar dropdowns — see PARAMS
   columns: [ ... ],   // labels + tooltips for your log's columns — see COLUMNS
   lines:   [ ... ],   // toggleable chart lines for your computed levels — see LINES
+  // money: "own",    // only when the rule decides its own deposits — see OWN MONEY
   run(data, p) {
     // build the portfolio value over time — see RETURN — and report where the
     // rules stand on the final day — see SIGNALS
@@ -696,13 +554,25 @@ const CUSTOM_PROMPT = `You are writing ONE backtest strategy for a charting app.
 
 === PARAMS: one dropdown per knob the DESCRIPTION actually specifies ===
 Each param becomes a dropdown in the sidebar; the chosen value arrives in run() as p.<id>.
-Shape:  { id, label, options: [...], default: <one of the options> }
+Shape:  { id, label, text, options: [...], default: <one of the options> }
+- "text" is the sentence the setting reads as in the sidebar, with {} where its dropdown sits:
+  text: "Sell when TQQQ closes {} above its median."   Write it as a plain rule, one sentence,
+  so the settings read top to bottom as the strategy. "label" stays a short name for the setting.
+- Add unit: "%" to a percent setting: every plain number on its dropdown then reads "55%". A
+  labelled option ({ value: 0, label: "Off" }) keeps its label.
 - "id" must be a valid JS identifier. Options may be numbers, strings, or { value, label } objects
   ({ value: "tqqq", label: "TQQQ" } shows a label but passes "tqqq"). Keep labels PLAIN — the bare
   ticker. Do not decorate them ("TQQQ · 3x Nasdaq" is noise; write "TQQQ").
 - For an on/off toggle use options: [true, false].
 - A long list scans badly — group it: insert { section: "Label" } entries (no id) between params
   and they render as sub-headers ("Holdings", "Signal lines", "Execution & costs").
+- An optional "tip" string on a param (or a section entry) renders an ⓘ hover note at the end of
+  its sentence: one or two plain sentences saying what the setting does. No filler.
+- Add fit: false to a setting that describes the market or the account rather than the rule
+  (trading cost, cash interest, how a switch is executed). The sidebar's Fit button searches every
+  other setting for the best result and leaves these alone.
+- Add when: { otherId: value } (or [values]) to a setting that only matters while another setting
+  holds that value: it shows only then. Example: when: { outAsset: "cash" } on the cash interest.
 
 *** THE TEST EVERY PARAM MUST PASS ***
 Point at the words in my description that this knob comes from. If you cannot, DO NOT ADD IT.
@@ -713,7 +583,7 @@ for, silently changing what my strategy does.
 *** ONE EXCEPTION — median and moving average are interchangeable ***
 Whenever a rule uses a rolling MEDIAN or a MOVING AVERAGE, add one extra param that lets the user
 swap the statistic, defaulting to whichever one the description names:
-  { id: "stat", label: "Center line", options: [
+  { id: "stat", label: "Center line", text: "Use the {} of those closes as the line.", options: [
     { value: "sma", label: "Moving average" }, { value: "median", label: "Median" } ], default: "sma" }
 Compute the level with the chosen statistic over the SAME window (the example below shows a rolling
 window kept as a running sum AND a sorted array, so both are cheap). This knob is wanted even though
@@ -730,18 +600,19 @@ Concretely, DO NOT add unless I mentioned it:
 WHAT DOES BECOME A PARAM:
 1. The traded fund. If I named one, it is the DEFAULT and the options are just the sensible
    alternatives (tqqq, qld, spxl, sso, qqq, spy — plus sqqq when hedging/inverse exposure fits
-   the described strategy). In run() index by the chosen id:
+   the described strategy, gld when gold fits it, and soxl or soxx when semiconductors fit it).
+   In run() index by the chosen id:
      const px = data[p.asset];   (NOT data.tqqq)
 2. What is held when OUT — only if the strategy has an out-state. Options must include "cash":
      options: ["cash", "qqq", "spy", "sso", "qld"], default: "cash".
    "cash" means hold dollars, buy nothing. Guard for it (data["cash"] does not exist).
 3. Every threshold, window, percentage and lookback I DID state — "55% above", "250-day median",
    "300 SMA" each become a dropdown, never baked into the code as a literal.
-4. "Cash interest (%/yr)" ([0,0.5,1,...,6,7,8]) — only when cash can actually be held, so parked
+4. "Cash interest (%/yr)" ([0,0.5,1,...,6,7,8], text: "Cash earns {} a year.", unit: "%", fit: false) — only when cash can actually be held, so parked
    money is not silently dead.
 5. ALWAYS include a trading-cost dropdown, exactly this one (it matches the app's other strategies):
-     { id: "tradeCost", label: "Trading cost (%)", default: 0.02,
-       options: [0,0.01,0.02,0.03,0.05,0.1,0.15,0.2,0.25,0.3,0.5,0.75,1] }
+     { id: "tradeCost", label: "Trading cost (%)", text: "Each buy and sell costs {} of the amount traded.",
+       unit: "%", fit: false, default: 0.02, options: [0,0.01,0.02,0.03,0.05,0.1,0.15,0.2,0.25,0.3,0.5,0.75,1] }
    Charge it as a percentage of the dollar amount TRADED, on every leg of every trade — each sell,
    each buy, both halves of a switch, and every ease-in slice — deduct it from the proceeds (or from
    the cash being deployed), and log it as "fee" on that row. A strategy that trades often has to pay
@@ -765,10 +636,27 @@ data.qld   : daily closing price of QLD   (2x Nasdaq-100, ProShares Ultra QQQ)
 data.sso   : daily closing price of SSO   (2x S&P 500, ProShares Ultra S&P500)
 data.spxl  : daily closing price of SPXL  (3x S&P 500, Direxion Daily S&P500 Bull 3x)
 data.sqqq  : daily closing price of SQQQ  (-3x Nasdaq-100 INVERSE — rises when QQQ falls), synthesized back to 1953
+data.gld   : daily closing price of GLD   (SPDR Gold Shares, gold bullion). Real from 2004-11-18; before that gold's
+             own price less GLD's 0.40% fee, back to 1953. Gold was pegged near $35 until 1968, and monthly prices
+             fill 1953 to June 1968 and 1999 to August 2000, so those stretches have no daily swings.
+data.soxl  : daily closing price of SOXL  (3x semiconductors, Direxion Daily Semiconductor Bull 3x). Real from
+             2010-03-11, SOXL's first trading day; before that the PHLX Semiconductor index (^SOX) at 3x with
+             financing, back to 1994-05-04, where that index starts. From 1953 to then a stand-in carries it:
+             the daily return of all listed US electronic-equipment companies (Ken French's "Chips" industry)
+             times 1.15. That stretch is rough: treat a result that rests on SOXL before 1994 as a sketch.
+data.soxx  : daily closing price of SOXX  (iShares Semiconductor ETF, 1x). Real from 2001-07-13, SOXX's first
+             trading day; before that the PHLX Semiconductor index (^SOX) less SOXX's fee, back to 1994-05-04,
+             where that index starts; from 1953 to then the same stand-in as SOXL's, at 1x.
 data.nfci  : Chicago Fed National Financial Conditions Index, weekly since 1971, forward-filled onto
              trading days with a 7-day publication lag (no look-ahead). NOT a price: a z-score-like
              level where above 0 = tighter-than-average financial conditions, above +0.5 = credit
-             stress. NaN before 1971 — ALWAYS guard with isFinite() before comparing.
+             stress. From May 2011 each reading is the value first published (the Chicago Fed revises
+             the history every week; the file is never rewritten), and none of them is above 0.07.
+             NaN before 1971 — ALWAYS guard with isFinite() before comparing.
+data.tqqqHigh, data.tqqqLow, data.qqqHigh, data.qqqLow, data.spyHigh, data.spyLow : each day's
+             high and low of that fund, on the same scale as its closes. Real bars only: NaN
+             before TQQQ's 2010-02-11, QQQ's 1999-03-10 and SPY's 1993-01-29. Guard with
+             isFinite() and say in your rule what stands in before then.
 - data[id] works for any of those ids, which is how an asset dropdown gets used.
 - Prices are positive numbers; a few of the earliest values may be 0 (missing history) — guard divisions.
 - The arrays span the FULL history. You MAY read indices before p.startIdx for warm-up (e.g. to seed a
@@ -776,15 +664,21 @@ data.nfci  : Chicago Fed National Financial Conditions Index, weekly since 1971,
 
 === INPUTS: p ===
 p.initial       : starting cash, available at p.startIdx (number)
-p.contributions : { "YYYY-MM-DD": amount } — every day new cash lands. Always an object
+p.contributions : { "YYYY-MM-DD": amount } — every day money moves. Always an object
                   (empty {} when the user contributes nothing at all — never null). Usually
-                  one entry per calendar month (the classic monthly-DCA case), but when the
-                  user has uploaded their OWN real transaction history it's whatever real
-                  dates and amounts they actually deposited — could be irregular, could skip
-                  months, could land mid-month. THIS is the source of truth for
-                  contributions, not a formula you compute yourself. On each day you simulate:
+                  one positive entry per calendar month (the classic monthly-DCA case), but
+                  when the user has uploaded their OWN real transaction history it's whatever
+                  they actually did: irregular dates, skipped months, and NEGATIVE amounts for
+                  withdrawals. THIS is the source of truth for contributions, not a formula
+                  you compute yourself. On each day you simulate:
                     var amt = p.contributions[data.dates[i]] || 0;
-                    if (amt > 0) { cash += amt; contributed = amt; action = "contribution"; }
+                    if (amt !== 0) { cash += amt; contributed = amt; action = "contribution"; }
+                  A withdrawal can leave cash below 0. Settle it the same day, straight after
+                  that line: cash has already paid what it could, so sell just enough of what
+                  you hold at that day's close to bring cash back to 0 (charge your trading
+                  cost on the sale if you model one). If the whole account cannot cover it,
+                  sell everything and set cash to 0. Every day ends with cash at 0 or above.
+                  The example at the bottom shows the block.
 p.monthly, p.annualRaise : the sidebar's "monthly contribution" + "% raise per year"
                   SLIDER SETTINGS (numbers). When the user has uploaded a real transaction
                   history these do NOT describe it — they keep their slider values while
@@ -798,6 +692,10 @@ p.weeklyDisplay : true when the chart's shared axis is at weekly resolution (a r
                   false/undefined otherwise (a longer run, still monthly). Controls ONLY how often you
                   push a "hold" snapshot row — see "When to push a row" below. Don't change any trading
                   decision based on it; it's a display-density flag, not a strategy input.
+p.dailyDisplay  : true on the app's second run of your code for the signal chart in the side panel,
+                  which the user can zoom into day by day; undefined on the main run. Then push a
+                  snapshot row EVERY day. Same rule as p.weeklyDisplay: logging density only, never
+                  a trading input, and the trades must come out identical on both runs.
 p.<yourId>      : the user's chosen value for each param you declared (already typed for you:
                   number for numeric options, boolean for [true, false], string otherwise)
 
@@ -816,15 +714,16 @@ log makes a useless table: fill in everything that applies, because each key bec
   shares      : share count of that asset after the trade
   holdingsValue : dollar value of everything you hold that isn't cash
   cash        : dollars sitting in cash after this row
-  invested    : cumulative money put in so far (initial + every contribution to date)
-  contributed : new cash added on THIS row (0 when none)
+  invested    : cumulative money put in so far (initial + every contribution to date, withdrawals subtracted)
+  contributed : money added on THIS row — negative for a withdrawal, 0 when none
   fee         : trading cost paid on this row, if you model one (0 when none)
 - Also log the numbers the DECISION was made from, one key per asset/indicator you consulted, so the
   user can see why the rule fired — e.g. signalPrice, signalMedian, assetPrice, parkPrice, abovePct.
   Use stable key names (assetPrice, parkPrice) rather than ticker-specific ones, since the ticker is
   a dropdown.
 - Number formatting follows the key name: a key containing "price" prints as a price, "share" as a
-  share count, "pct" as a percentage, anything else as dollars. Name keys accordingly.
+  share count, "pct" as a percentage, anything else as dollars. Name keys accordingly. A key you
+  also draw as a chart line with unit: "%" or unit: "num" (see lines below) prints in that unit.
 
 action vocabulary (lowercase, exactly these words; the app draws chart markers and filters from them):
   "start"        — the opening snapshot on your first simulated day
@@ -833,24 +732,30 @@ action vocabulary (lowercase, exactly these words; the app draws chart markers a
   "switch"       — swapped one fund straight for another
   "rebalance"    — adjusted an existing mix without fully switching
   "ease-in"      — one slice of a deliberately phased buy (many small rows)
-  "contribution" — a monthly contribution landed, no trade decision
+  "contribution" — money landed or left (a deposit, or a withdrawal with contributed < 0), no trade decision
   "hold"         — periodic snapshot, nothing traded
-  "end"          — final snapshot on p.endIdx
+  "end"          — final snapshot on p.endIdx, when nothing else happened that day
 You may append detail after the word ("buy — 3 of 5 slices"); the app matches on the leading word.
 
 When to push a row:
-- ALWAYS on p.startIdx ("start") and on p.endIdx ("end").
+- ALWAYS on p.startIdx ("start") and on p.endIdx ("end"). A trade on p.endIdx keeps its own word
+  ("buy", "sell"…): the data's last day is today, and the chart marks that trade as the action to take
+  at today's close. Write: if (i === p.endIdx && action === "hold") action = "end";
 - ALWAYS for every trade, every rebalance, and every ease-in slice.
-- ALWAYS for each monthly contribution (action "contribution", contributed = the amount added).
+- ALWAYS for every day in p.contributions, deposit or withdrawal (action "contribution", contributed = that day's amount).
 - Plus at least one "hold" snapshot per month when p.weeklyDisplay is false/undefined — or per WEEK
-  when p.weeklyDisplay is true. Skipping this on a weekly run is the single most common way a strategy
+  when p.weeklyDisplay is true — or EVERY day when p.dailyDisplay is true (the signal chart's detail
+  run). Skipping this on a weekly run is the single most common way a strategy
   ends up looking "blocky" next to the built-in engines: the chart step-resamples your sparse log onto
   its own weekly axis, so any week you didn't log renders as a flat line even though the real price kept
   moving. A cheap correct check inside your day loop (mirrors what the run() function already tracks):
     var monthEnd = i === p.endIdx || data.dates[i + 1].slice(0, 7) !== data.dates[i].slice(0, 7);
     var weekEnd = p.weeklyDisplay && (i === p.endIdx ||
       Math.floor((Date.parse(data.dates[i]) / 86400000 + 3) / 7) !== Math.floor((Date.parse(data.dates[i + 1]) / 86400000 + 3) / 7));
-    if (contributed || action !== "hold" || monthEnd || weekEnd) { /* push the row */ }
+    if (contributed || action !== "hold" || monthEnd || weekEnd || p.dailyDisplay) { /* push the row */ }
+  Those two checks are for logging only. A rule that TRADES at a month or week end must not count
+  p.endIdx as one: past the last row, take the next weekday as the next date, so the latest day
+  trades only when it really ends the month or week.
 
 === COLUMNS: tooltips for your table ===
 Optional but strongly wanted: a top-level "columns" array describing your log's keys. Each entry is
@@ -861,17 +766,70 @@ has tips for the standard keys (date, value, action, held, price, shares, cash, 
 fee) — describe those only if your strategy uses them unusually, and always describe your own keys.
 
 === LINES: the signal mini chart for your computed levels ===
-When a rule compares the price to a level you compute (a moving average, a median, an overextension
-band, a stop), declare that level as a line so the user can SEE the trigger:
-  lines: [ { key: "median", label: "Median (250d)" }, { key: "upper", label: "Median +55%" } ]
-- "key" names a numeric field you add to every log row once the value exists (median: 405.2 — the raw
-  number, same units you compare against). Rows before the warm-up simply omit the key; the line
-  starts where the data does.
+Every level a rule trades against goes on the chart: each entry line, each exit line, each switch or
+hedge level, and the center they are measured from. The user must see at a glance where the next
+trade fires, without working it out from the rule text. Before you finish, go through your rules one
+by one and name the line each one's trades cross: a level on a price is a line in that price's
+group; a rule on anything else (an index such as data.nfci, a percent, a close against the prior
+close) gets a group of its own with that reading as its first line and its threshold as a line; a
+stop or target that exists only while a position is open is a line that logs null while flat. Only
+timing has no line (checked at month end, N days held, N closes in a row), and its trade note says
+which timing fired. A rule with no line is a bug. Declare them as lines:
+  lines: [ { key: "assetPrice", label: "TQQQ price" }, { key: "median", label: "Median (250d)" },
+           { key: "upper", label: "Sell above (+55%)" }, { key: "lower", label: "Buy back below (−28%)" } ]
+- "key" names a numeric field you add to EVERY log row once the value exists (median: 405.2 — the raw
+  number, same units you compare against), so the line runs unbroken through the whole run. A level
+  logged only on trade days, or only while the price is near it, is invisible most of the time. Rows
+  before the warm-up simply omit the key; the line starts where the data does. A level that only
+  applies while a condition holds (a buy-back line behind a slope gate, say) keeps its always-on line
+  AND adds a second one that logs null on the other days: that one breaks where the gate fails and
+  the hover leaves it out, so the user sees both the level and when the rule was live.
+- A rule written as a percentage ("sell 5% under the median") still gets its own line, at the price
+  it resolves to (median × 0.95): the user compares prices, not percentages.
 - Declared lines draw together in a small "Signal chart" inside the strategy's side panel, on their
   own scale — never on the main portfolio chart — each with an eye-toggle (all shown by default).
-  Max 6; declare only levels a rule actually uses, in raw units, no rescaling.
-- Also declare the price being compared (the traded fund's own close) as the FIRST line, so the user
-  can watch it cross your levels: { key: "assetPrice", label: "TQQQ price" }.
+  Declare only levels a rule actually uses, in raw units, no rescaling.
+- The price being compared (the fund your rule reads, which may differ from the fund you trade) is
+  the FIRST line, so the user can watch it cross your levels: { key: "assetPrice", label: "TQQQ price" }.
+- Colours are the chart's: a line whose label starts with a fund's ticker ("TQQQ price", "SPY 430-day
+  return", "TQQQ ahead of QQQ") draws in that fund's colour, the same colour the fund has on every
+  chart; every other line takes the chart's level palette in the order declared.
+- A rule on a percent that is no price (a volatility, a share of the account) draws in percent: give
+  its lines unit: "%" and log the percent itself (40 for 40%). An index reading that is neither (a
+  stress index such as data.nfci) takes unit: "num". Do not mix units inside one group.
+- Rules on different things go in separate groups, one panel each, stacked on one date axis: give
+  each line group: "<short name>" (lines without one form the first panel). Panels stack in the
+  order their groups first appear in lines: declare first the group whose rules trade most, last
+  the one that trades least (a credit veto that rarely fires). Two funds' prices are
+  different things, and so are a price, a percent and an index. A group needs a level of its own:
+  a fund your rule only trades, with no level on it, gets no line. Each group's FIRST line is what its
+  levels are compared with. On each trade row, firedBy: "<group name>" names the group whose rule
+  fired the trade: its mark goes in that panel only (a sale on the median line shows nothing on a
+  stress index). A trade row without firedBy is marked in the first panel. Example, a rule on
+  TQQQ's median and on TQQQ's lead over QQQ:
+    { key: "assetPrice", label: "TQQQ price", group: "TQQQ price" }, { key: "median", label: "Median (250d)", group: "TQQQ price" },
+    { key: "leadPct", label: "TQQQ ahead of QQQ", unit: "%", group: "TQQQ vs QQQ" }, { key: "ceiling", label: "Ceiling", unit: "%", group: "TQQQ vs QQQ" }
+  A later group draws at a quarter of the first panel's height with up to three lines, taller with
+  more; tall: true on one of its lines draws it at full height (a second fund's price over its
+  relative pricing, say). Max 6 lines per group, 8 groups.
+  priceKey: "floorPx" on a line names the price its level sits at, logged under that key: the chart
+  writes it in brackets after the line's name, "Floor ($50.22)", so an order can be set at it. For a
+  level relative to another fund (TQQQ's lead over QQQ) log the close the two reach together, QQQ
+  moving a third of TQQQ's move from the prior close: that price holds through the day, where the
+  close that reads the level at QQQ's price right now moves with QQQ. Log null when there is none.
+
+=== OWN MONEY: a rule that decides how much goes in (only when the rule says so) ===
+Most strategies trade the money the app hands them (p.initial, p.contributions). Some rules decide the
+deposits themselves: "buy 1 share every week, 2 when the price is under its 50-day average". For those,
+put money: "own" at the top level of your object, next to params, and then:
+- Ignore p.initial and p.contributions. Start with cash = 0.
+- On each deposit add the amount to cash, make the trade your rule calls for, and log that row with
+  contributed = the amount (negative takes money out) and invested = the running total. Every deposit
+  gets its own row, the first one included.
+- Everything else is as above: value is cash plus what you hold, and the action words, rows and lines
+  are the same.
+While such a strategy is shown, the app runs every line on the chart on your deposits and measures your
+CAGR on them; the user's own Initial Investment and Monthly Contribution are off meanwhile.
 
 === SIGNALS: the live dashboard (do this — it is what users check first) ===
 Return a "signals" object alongside your log describing WHERE EVERY RULE STANDS ON THE FINAL DAY of
@@ -900,6 +858,21 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
   The decision must AGREE with the rules you coded — derive it from the same variables, don't restate
   the description.
 
+=== SERIES and EXPLAIN: extra lines on the main chart, and your rules in words ===
+- series: [{ key, label, dash }] declares dollar lines that belong on the main portfolio chart beside
+  your strategy's line (what the fund side holds, a target it steers to, the cash side). Log the value
+  under its key on every row; dash is "dot", "dash" or "dashdot". Each gets an eye chip in the side
+  panel and starts hidden. Prices, percents and indexes go in lines (the signal chart), never here.
+- explain: a string you return from run() that walks through your rules with the current settings,
+  shown under the log. Blank lines split blocks; "## " starts a heading, "- " a list item; **bold**
+  marks the numbers that matter. Plain text only.
+
+=== HOLDINGS: a strategy that can hold several funds at once ===
+If your strategy can hold more than one fund on the same day (easing from one fund into another,
+a slice in a second fund), also return holdings: one entry per trading day of the run, after that
+day's trades: { date, h: { tqqq: shares, qqq: shares }, cash }. The max drawdown is then revalued
+from them at every daily close. Leave it out when each log row holds one fund (held + shares + cash).
+
 === HOW THE CHART USES THE LOG ===
 - Every "buy" / "sell" / "switch" / "rebalance" row is drawn as a symbol on your strategy's line at
   that date, and hovering it shows that row's detail. Rows tagged "contribution", "ease-in", "hold",
@@ -910,7 +883,7 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
 
 === HOW THE SIMULATION WORKS ===
 - You manage cash and holdings yourself in local variables — nothing is auto-invested.
-- Trade at that day's close, data[<id>][i]. tqqq, qld, sso, spxl and sqqq are ALREADY leveraged products;
+- Trade at that day's close, data[<id>][i]. tqqq, qld, sso, spxl, soxl and sqqq are ALREADY leveraged products;
   do not invent additional borrowing or leverage. sqqq is INVERSE (-3x): it gains when the Nasdaq falls and
   bleeds badly in any rising or sideways market, so it only makes sense as a short-lived hedge leg.
 - Add p.monthly of new cash at each new month (grown by p.annualRaise per calendar year).
@@ -929,27 +902,27 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
   // ticker is a param ONLY because the description measures QQQ but trades TQQQ, and the buffer
   // is a param ONLY because the description asks for one. Nothing else was invented.
   params: [
-    { id: "asset", label: "Fund traded", default: "tqqq", options: [
+    { id: "asset", label: "Fund traded", text: "Hold {} while the trend is up.", default: "tqqq", options: [
       { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" },
       { value: "spxl", label: "SPXL" }, { value: "sso", label: "SSO" },
       { value: "qqq",  label: "QQQ" },  { value: "spy", label: "SPY" } ] },
-    { id: "park", label: "Held when out", default: "cash", options: [
+    { id: "park", label: "Held when out", text: "Hold {} while it is down.", default: "cash", options: [
       { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
       { value: "spy",  label: "SPY" },  { value: "sso", label: "SSO" } ] },
-    { id: "signal", label: "Signal read from", default: "qqq", options: [
+    { id: "signal", label: "Signal read from", text: "The trend is up while {} closes above its line.", default: "qqq", options: [
       { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" }, { value: "tqqq", label: "TQQQ" } ] },
-    { id: "window", label: "Window (days)", default: 200, options: [
+    { id: "window", label: "Window (days)", text: "The line covers the last {} days.", default: 200, options: [
       20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,
       210,220,230,240,250,260,270,280,300,320,350,400] },
     // The one always-wanted extra knob (see PARAMS): median and moving average
     // are interchangeable center lines, defaulting to what the description names.
-    { id: "stat", label: "Center line", options: [
+    { id: "stat", label: "Center line", text: "Use the {} of those closes as the line.", options: [
       { value: "sma", label: "Moving average" }, { value: "median", label: "Median" } ], default: "sma" },
-    { id: "band", label: "Cross buffer (%)", default: 1, options: [
+    { id: "band", label: "Cross buffer (%)", text: "A cross counts once the close is {} past the line.", unit: "%", default: 1, options: [
       0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.5,3,3.5,4,4.5,5,6,7,8,10] },
-    { id: "cashRate", label: "Cash interest (%/yr)", default: 4, options: [
+    { id: "cashRate", label: "Cash interest (%/yr)", text: "Cash earns {} a year.", unit: "%", fit: false, default: 4, options: [
       0,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5,5.5,6,7,8] },
-    { id: "tradeCost", label: "Trading cost (%)", default: 0.02, options: [
+    { id: "tradeCost", label: "Trading cost (%)", text: "Each buy and sell costs {} of the amount traded.", unit: "%", fit: false, default: 0.02, options: [
       0,0.01,0.02,0.03,0.05,0.1,0.15,0.2,0.25,0.3,0.5,0.75,1] }
   ],
   columns: [
@@ -958,7 +931,10 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
     { key: "abovePct", label: "Above line", tip: "How far the signal sits above (+) or below (−) its center line. The trade fires once this passes your cross buffer." }
   ],
   lines: [
-    { key: "signalSma", label: "Center line" }  // the level the trend rule compares against — see LINES
+    { key: "signalPrice", label: "Signal price" },    // the close the rule reads — first, so crossings show
+    { key: "signalSma", label: "Center line" },       // the level the trend rule compares against — see LINES
+    { key: "enterLine", label: "Enter above (+band)" },
+    { key: "exitLine", label: "Exit below (−band)" }
   ],
   run(data, p) {
     const log = [];
@@ -969,8 +945,7 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
     const priceOf = (id, i) => (id === "cash" || !data[id]) ? 0 : data[id][i];
     let cash = p.initial, shares = 0, held = "cash";
     let sma = 0, above = 0;                                   // last bar's readings, for the signals block
-    let invested = p.initial, prevMonth = null;
-    const y0 = parseInt(data.dates[p.startIdx].slice(0, 4), 10);
+    let invested = p.initial;
     // Rolling center line: seed once from the warm-up window, then add/drop one
     // day at a time. The window lives as a running sum (the average) AND a
     // sorted array (the median) so the Center line param is free either way.
@@ -990,11 +965,11 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
       const month = data.dates[i].slice(0, 7);
       let contributed = 0, action = "hold", note = "", fee = 0;
       cash *= 1 + dayRate;                                    // idle cash earns interest
-      if (prevMonth !== null && month !== prevMonth && p.monthly > 0) {
-        const amt = p.monthly * Math.pow(1 + (p.annualRaise || 0), parseInt(month.slice(0, 4), 10) - y0);
+      const amt = p.contributions[data.dates[i]] || 0;        // a deposit, or a withdrawal when negative
+      if (amt !== 0) {
         cash += amt; contributed = amt; invested += amt; action = "contribution";
+<<withdrawal rule>>
       }
-      prevMonth = month;
       sma = n > 0 ? (useMed ? (n % 2 ? win[(n - 1) >> 1] : (win[n / 2 - 1] + win[n / 2]) / 2) : sum / n) : 0; // hoisted: the signals block below reads the last bar's values
       above = sma > 0 ? sig[i] / sma - 1 : 0;
       let want = held;
@@ -1024,13 +999,14 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
       const stockVal = shares * px;
       const monthEnd = i === p.endIdx || data.dates[i + 1].slice(0, 7) !== month;
       if (i === p.startIdx) action = "start";
-      if (i === p.endIdx) action = "end";
-      if (contributed > 0 || monthEnd || action !== "hold") {
+      if (i === p.endIdx && action === "hold") action = "end";
+      if (contributed !== 0 || monthEnd || p.dailyDisplay || action !== "hold") {
         log.push({
           date: data.dates[i], value: stockVal + cash, action: action, note: note,
           held: held.toUpperCase(), price: px, shares: shares, holdingsValue: stockVal,
           cash: cash, contributed: contributed, invested: invested, fee: fee,
-          signalPrice: sig[i], signalSma: sma, abovePct: above * 100
+          signalPrice: sig[i], signalSma: sma, abovePct: above * 100,
+          enterLine: sma * (1 + band), exitLine: sma * (1 - band)   // the two levels the rule fires on
         });
       }
     }
@@ -1068,16 +1044,21 @@ decision: what a lump sum would do TODAY — { action, note, tone, reasons: [...
 === MY STRATEGY (write code that implements THIS) ===
 <<describe your strategy here>>`;
 
-// Inject the user's plain-English description into the structured prompt.
+// Inject the user's plain-English description into the structured prompt, and
+// the library's own withdrawal block (js/strategy-library-code.js) into the
+// worked example. The example and the library strategies then share one source
+// text for that rule, so what the prompt teaches is what the library runs.
 function buildCustomPrompt(desc) {
   const d = (desc || '').trim();
-  return CUSTOM_PROMPT.replace('<<describe your strategy here>>', d || '<<describe your strategy here>>');
+  return CUSTOM_PROMPT
+    .replace('<<withdrawal rule>>', () => SELL_HELD_TO_COVER)
+    .replace('<<describe your strategy here>>', d || '<<describe your strategy here>>');
 }
 
 let _customDataCache = null;
 function buildCustomData() {
   if (_customDataCache) return _customDataCache;
-  if (typeof daily === 'undefined' || !daily) return { dates: [], tqqq: [], qqq: [], spy: [], qld: [], sso: [], spxl: [], sqqq: [] };
+  if (typeof daily === 'undefined' || !daily) return { dates: [], tqqq: [], qqq: [], spy: [], qld: [], sso: [], spxl: [], sqqq: [], gld: [], soxl: [], soxx: [] };
   _customDataCache = {
     dates: daily.map(d => d.date),
     tqqq:  daily.map(d => d.tqqq),
@@ -1087,13 +1068,37 @@ function buildCustomData() {
     sso:   daily.map(d => d.sso),
     spxl:  daily.map(d => d.spxl),
     sqqq:  daily.map(d => d.sqqq || 0),
+    gld:   daily.map(d => d.gld || 0),
+    soxl:  daily.map(d => d.soxl || 0),
+    soxx:  daily.map(d => d.soxx || 0),
     // Chicago Fed NFCI (weekly, aligned to daily with a 7-day publication
     // lag in js/data.js). NaN before 1971 or if the fetch failed — strategy
     // code must treat non-finite as "no signal".
     nfci:  (typeof nfciDaily !== 'undefined' && nfciDaily) ? nfciDaily : daily.map(() => NaN),
+    // Daily highs and lows of TQQQ, QQQ and SPY (js/data.js's
+    // buildHighLowDaily): tqqqHigh, tqqqLow, qqqHigh, ... NaN before each
+    // fund's first real bar. A page that did not load them leaves the keys out,
+    // and code that needs them (Turnaround Monday) stops with an error.
+    ...((typeof highLowDaily !== 'undefined' && highLowDaily) ? highLowDaily : {}),
   };
   return _customDataCache;
 }
+// After the daily rows change (a live price from the quotes proxy): the next
+// custom run rebuilds the data and the worker receives it again, and the runs
+// that read the latest row run again (customDataStamp in their signature).
+let _customDataVersion = 0;
+function invalidateCustomData() { _customDataCache = null; _customDataSent = false; _customDataVersion++; }
+// The data a run's result stands on, for its signature (customSig): the
+// data's version while the run's window reaches the latest row, which a live
+// price moves between the files' refreshes, so the result follows the price
+// (the user, 2026-11-06: the signal chart kept the file's close). Nothing for
+// a run that ends earlier, whose result holds: the day-change badge's run to
+// yesterday's close, and the panel chart's history run, of which the chart
+// draws only the rows before the main run's range.
+function customDataStamp(ctx) { return ctx.isLatestDaySelected ? 'data' + _customDataVersion : ''; }
+// A signature without its data stamp, its last field: two that agree on it
+// differ only in the live price.
+const _sigSansStamp = sig => sig.slice(0, sig.lastIndexOf('|'));
 
 // === Sandboxed execution ================================================
 // Custom strategy code is NEVER evaluated on the main thread. It runs inside a
@@ -1111,7 +1116,7 @@ function customWorkerMain() {
    'Notification', 'SharedWorker', 'Worker', 'BroadcastChannel'].forEach(function (k) {
     try { self[k] = undefined; } catch (e) {}
   });
-  var DATA = null;
+  var DATA = null, DATA_ROWS = null;   // DATA_ROWS: DATA as daily row objects, built on first need
   function sanitize(raw) {
     var s = String(raw || '').trim();
     var f = s.match(/```[a-zA-Z0-9]*\s*([\s\S]*?)```/);
@@ -1122,7 +1127,7 @@ function customWorkerMain() {
   }
   function asMod(m) {
     if (typeof m === 'function') return { name: null, run: m, params: undefined };
-    if (m && typeof m.run === 'function') return { name: m.name || null, run: m.run, params: m.params, columns: m.columns, lines: m.lines };
+    if (m && typeof m.run === 'function') return { name: m.name || null, run: m.run, params: m.params, columns: m.columns, lines: m.lines, series: m.series, money: m.money };
     return null;
   }
   // Column metadata ({ key, label, tip }) the strategy declares for its log —
@@ -1148,16 +1153,47 @@ function customWorkerMain() {
   // names a numeric field its log rows carry (e.g. a signal line like a
   // median and its overextension threshold). Toggled from the strategy's
   // panel like 9sig's Holding/Target/Cash. Same sanitize-to-primitives rule
-  // as readColumns; capped so a runaway declaration can't flood the chart.
-  function readLines(raw) {
+  // as readColumns; capped so a runaway declaration can't flood the chart:
+  // 6 lines a group, 8 groups (a group is a panel of its own, see LINES).
+  // Dollar lines for the main chart, beside the strategy's own line (series in the
+  // prompt): { key, label, dash: "dot" | "dash" | "dashdot" }, at most 6.
+  function readSeries(raw) {
     if (!Array.isArray(raw)) return null;
     var out = [];
     for (var i = 0; i < raw.length && out.length < 6; i++) {
+      var s = raw[i];
+      if (!s || s.key == null) continue;
+      out.push({ key: String(s.key), label: s.label != null ? String(s.label).slice(0, 60) : String(s.key),
+        dash: ['dot', 'dash', 'dashdot'].indexOf(s.dash) >= 0 ? s.dash : 'dash' });
+    }
+    return out.length ? out : null;
+  }
+  // The strategy's own explanation with its current settings (explain in the
+  // prompt): plain text, kept as text; the page renders its light markup.
+  function readExplain(raw) {
+    return typeof raw === 'string' && raw.trim() ? raw.slice(0, 8000) : null;
+  }
+  function readLines(raw) {
+    if (!Array.isArray(raw)) return null;
+    var out = [], perGroup = {}, groups = 0;
+    for (var i = 0; i < raw.length; i++) {
       var l = raw[i];
       if (!l) continue;
-      if (typeof l === 'string') { out.push({ key: l, label: l }); continue; }
-      if (l.key == null) continue;
-      out.push({ key: String(l.key), label: l.label != null ? String(l.label) : String(l.key) });
+      var line;
+      if (typeof l === 'string') line = { key: l, label: l };
+      else {
+        if (l.key == null) continue;
+        line = { key: String(l.key), label: l.label != null ? String(l.label) : String(l.key) };
+        if (l.unit === '%' || l.unit === 'num') line.unit = l.unit;   // a percent or plain-number line (see LINES in the prompt)
+        if (l.group != null && String(l.group).trim()) line.group = String(l.group).trim().slice(0, 40);
+        if (l.tall === true) line.tall = true;   // its panel at full height (see LINES in the prompt)
+        if (typeof l.priceKey === 'string' && l.priceKey.trim()) line.priceKey = l.priceKey.trim().slice(0, 40);   // the log key with the level's price, shown in brackets (see LINES in the prompt)
+      }
+      var g = line.group || '';
+      if (!(g in perGroup)) { if (groups >= 8) continue; perGroup[g] = 0; groups++; }   // 8 panels: the 1983 fit draws price, lead, Monday, SOXL price, SOXL lead, Big days, Month-end dip and NFCI
+      if (perGroup[g] >= 6) continue;
+      perGroup[g]++;
+      out.push(line);
     }
     return out.length ? out : null;
   }
@@ -1228,7 +1264,7 @@ function customWorkerMain() {
   }
   self.onmessage = function (e) {
     var msg = e.data || {};
-    if (msg.type === 'data') { DATA = msg.data; return; }
+    if (msg.type === 'data') { DATA = msg.data; DATA_ROWS = null; return; }
     if (msg.type !== 'run') return;
     var out;
     try {
@@ -1245,6 +1281,24 @@ function customWorkerMain() {
       var res = mod.run(DATA, p);
       var rawLog = Array.isArray(res) ? res : (res && Array.isArray(res.log) ? res.log : null);
       if (!rawLog) throw new Error('Your function must return an array of { date, value } (or { log: [...] }).');
+      // A caller that reads only each row's value asks for that alone
+      // (answer: 'values' — the analytics windows' pooled runs). A full-history
+      // answer is megabytes of rows, holdings and lines, and the main thread
+      // unpacks answers one at a time, so the whole answer made a pool of
+      // workers little faster than one. The rows kept are the ones the full
+      // answer's log keeps: a primitive date, a numeric value.
+      if (msg.answer === 'values') {
+        var values = [];
+        for (var vi = 0; vi < rawLog.length; vi++) {
+          var vr = rawLog[vi]; if (!vr || vr.date == null) continue;
+          var vd = typeof vr.date;
+          if ((vd === 'number' || vd === 'string' || vd === 'boolean') && typeof vr.value === 'number') values.push({ date: vr.date, value: vr.value });
+        }
+        // Whether the strategy brings its own money rides along: the caller
+        // must know those values answer to deposits of the strategy's own.
+        self.postMessage({ reqId: msg.reqId, log: values, money: mod.money === 'own' ? 'own' : null });
+        return;
+      }
       var log = [];
       for (var li = 0; li < rawLog.length; li++) {
         var row = rawLog[li]; if (!row || row.date == null) continue;
@@ -1252,10 +1306,65 @@ function customWorkerMain() {
         for (rk in row) { var rv = row[rk]; if (typeof rv === 'number' || typeof rv === 'string' || typeof rv === 'boolean') o[rk] = rv; }
         log.push(o);
       }
-      out = { reqId: msg.reqId, schema: schema, name: mod.name || null, log: log,
+      // A strategy that can hold several funds at once returns its holdings
+      // after each day (holdings: [{ date, h: { fund: shares }, cash }]); its
+      // drawdown is revalued from them at every daily close, as the chart's
+      // built-in lines are, and only that result goes back.
+      var holdingsDD = null;
+      if (res && Array.isArray(res.holdings) && res.holdings.length && typeof computeDailyMaxDrawdownMulti === 'function') {
+        if (!DATA_ROWS) DATA_ROWS = DATA.dates.map(function (d, i) {
+          return { date: d, tqqq: DATA.tqqq[i], qqq: DATA.qqq[i], spy: DATA.spy[i], qld: DATA.qld[i], sso: DATA.sso[i], spxl: DATA.spxl[i], sqqq: DATA.sqqq[i], gld: DATA.gld[i], soxl: DATA.soxl[i], soxx: DATA.soxx[i] };
+        });
+        holdingsDD = computeDailyMaxDrawdownMulti(res.holdings, DATA_ROWS);
+      }
+      // The run's end state, which the main thread marks at extended-hours
+      // prints for the badge (extendedMoveOf, js/utils.js): a multi-fund
+      // strategy's last holdings entry; else the last row's held fund and
+      // shares with its cash; else, for a row that only names what the whole
+      // value sits in ("TQQQ", "CASH", or "TQQQ + CASH" with `share`, the
+      // fund's percent of the value), that value at the fund's close. Null
+      // when the log says none of this.
+      var endHoldings = null;
+      if (res && Array.isArray(res.holdings) && res.holdings.length) {
+        var lastHeld = res.holdings[res.holdings.length - 1], endH = {}, hk;
+        for (hk in lastHeld.h) if (typeof lastHeld.h[hk] === 'number') endH[hk] = lastHeld.h[hk];
+        endHoldings = { h: endH, cash: typeof lastHeld.cash === 'number' ? lastHeld.cash : 0 };
+      } else if (log.length && typeof log[log.length - 1].held === 'string') {
+        var lastRow = log[log.length - 1], rowH = {};
+        if (typeof lastRow.cash === 'number') {
+          var heldKey = lastRow.held.toLowerCase();
+          if (heldKey !== 'cash' && lastRow.shares > 0) rowH[heldKey] = lastRow.shares;
+          endHoldings = { h: rowH, cash: lastRow.cash };
+        } else if (typeof lastRow.value === 'number') {
+          var names = lastRow.held.toLowerCase().split('+').map(function (s) { return s.trim(); });
+          var fund = names.filter(function (s) { return s !== 'cash'; });
+          var part = names.length === 1 ? (fund.length ? 1 : 0) : lastRow.share / 100;
+          var di = DATA.dates.lastIndexOf(lastRow.date);
+          if (fund.length < 2 && part >= 0 && part <= 1 && (!fund.length || (DATA[fund[0]] && DATA[fund[0]][di] > 0))) {
+            if (fund.length && part > 0) rowH[fund[0]] = lastRow.value * part / DATA[fund[0]][di];
+            endHoldings = { h: rowH, cash: lastRow.value * (1 - part) };
+          }
+        }
+      }
+      // The per-day holdings themselves, for the signal chart's tooltip
+      // (what is held at a date): each entry's date, cash and numeric shares.
+      var holdings = null;
+      if (res && Array.isArray(res.holdings) && res.holdings.length) {
+        holdings = [];
+        for (var hi = 0; hi < res.holdings.length; hi++) {
+          var he = res.holdings[hi]; if (!he || he.date == null) continue;
+          var hh = {}, hf; for (hf in (he.h || {})) if (typeof he.h[hf] === 'number' && he.h[hf] > 0) hh[hf] = he.h[hf];
+          holdings.push({ date: he.date, cash: typeof he.cash === 'number' ? he.cash : 0, h: hh });
+        }
+      }
+      out = { reqId: msg.reqId, schema: schema, name: mod.name || null, log: log, holdingsDD: holdingsDD, endHoldings: endHoldings, holdings: holdings,
               columns: readColumns(res && res.columns) || readColumns(mod.columns),
               signals: readSignals(res && res.signals),
               lines: readLines(res && res.lines) || readLines(mod.lines),
+              series: readSeries(res && res.series) || readSeries(mod.series),
+              explain: readExplain(res && res.explain),
+              // "own": the strategy brings its own money (see ownMoneyCtx).
+              money: mod.money === 'own' ? 'own' : null,
               totalContributed: (res && typeof res.totalContributed === 'number') ? res.totalContributed : null };
     } catch (err) {
       out = { reqId: msg.reqId, error: (err && err.message) ? err.message : String(err) };
@@ -1270,20 +1379,30 @@ window._customErrors = window._customErrors || {};
 window._customSchemas = window._customSchemas || {};
 window._customColumns = window._customColumns || {}; // cfgId -> [{ key, label, tip }] the strategy declared
 window._customLines = window._customLines || {};     // cfgId -> [{ key, label }] auxiliary chart lines the strategy declared
+window._customSeries = window._customSeries || {};   // cfgId -> [{ key, label, dash }] its dollar lines for the main chart (readSeries)
+window._customExplain = window._customExplain || {}; // cfgId -> its explanation text (readExplain)
 window._customSignals = window._customSignals || {}; // cfgId -> { cards, decision } live signal dashboard
-window._customResults = window._customResults || {}; // cfgId -> { sig, log, schema, name, error, totalContributed }
+window._customResults = window._customResults || {}; // cfgId -> { sig, log, schema, name, error, totalContributed, endHoldings }
 window._customYesterdayResults = window._customYesterdayResults || {}; // cfgId -> { sig, value, error } — day-over-day change badge, see scheduleCustomYesterdayRun
 const CUSTOM_TIMEOUT_MS = 4000;
 let _customWorker = null, _customWorkerSeq = 0, _customDataSent = false;
 const _customPending = {};   // reqId -> { cfgId, sig, timer }
 const _customRunTimers = {}; // cfgId -> { sig, t }
 
+// A fresh sandbox worker running customWorkerMain: the live line's worker and
+// each of the Fit search's pool (fitPool).
+function newCustomWorker() {
+  // computeDailyMaxDrawdownMulti (js/metrics.js) goes in as its source, so a
+  // strategy's returned holdings are measured as the chart's own lines are.
+  // The widget page loads no metrics.js and shows no drawdown.
+  const dd = typeof computeDailyMaxDrawdownMulti === 'function' ? computeDailyMaxDrawdownMulti.toString() + '\n' : '';
+  const src = dd + '(' + customWorkerMain.toString() + ')()';
+  return new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+}
 function ensureCustomWorker() {
   if (_customWorker) return _customWorker;
   try {
-    const src = '(' + customWorkerMain.toString() + ')()';
-    const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
-    const w = new Worker(url);
+    const w = newCustomWorker();
     w.onmessage = onCustomWorkerMessage;
     w.onerror = function () { try { w.terminate(); } catch (e) {} _customWorker = null; _customDataSent = false; };
     _customWorker = w;
@@ -1310,8 +1429,47 @@ function customSig(cfg, ctx) {
   // staleness risk as the fields above if left out (a window crossing the
   // 10y threshold without any of the other fields changing would keep
   // serving a cached result computed at the old log density).
-  return [cfg.code || '', JSON.stringify(cfg.params || {}), ctx.initial, ctx.monthly, ctx.annualRaise,
-    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', schedKey, ctx.displayGrain || ''].join('|');
+  // A strategy that brings its own money ignores the chart's (ownMoneyCtx), so
+  // the chart switching to its deposits must not re-run it.
+  const ownMoney = ((window._customResults || {})[cfg.id] || {}).money === 'own';
+  const money = ownMoney ? [] : [ctx.initial, ctx.monthly, ctx.annualRaise];
+  return [cfg.code || '', JSON.stringify(cfg.params || {}), ...money,
+    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', ownMoney ? '' : schedKey, ctx.displayGrain || '', customDataStamp(ctx)].join('|');
+}
+// --- strategies that bring their own money --------------------------------
+// A custom strategy whose code declares money: "own" decides its own deposits
+// (CUSTOM_PROMPT's OWN MONEY section): it ignores p.initial and
+// p.contributions and logs every deposit as `contributed` on its row. It is
+// measured on those deposits, and while one is shown the chart runs every
+// line on them, the way it runs them on a transaction history (js/chart.js's
+// render), with the money controls off (js/transactions.js's
+// renderOwnMoneyState).
+function ownMoneyDeposits(log) {
+  return (log || []).filter(r => r && r.date != null && Number.isFinite(+r.contributed) && +r.contributed !== 0)
+    .map(r => ({ date: String(r.date), amount: +r.contributed }));
+}
+// The money a run is measured on when it brings its own: its deposits as a
+// transaction history entered on `entryDate` (js/transactions.js's
+// _txStateFromRows, txEffectiveForEntry). No deposits is an empty schedule,
+// so nothing falls back to the monthly slider.
+function ownMoneyCtx(ctx, log, entryDate) {
+  const deposits = ownMoneyDeposits(log);
+  const eff = deposits.length
+    ? txEffectiveForEntry(_txStateFromRows(deposits, 'strategy'), entryDate, ctx.rate)
+    : { initial: 0, schedule: { byDate: new Map(), byMonth: new Map(), list: [], priceDateByMonth: new Map() } };
+  return { ...ctx, initial: eff.initial, monthly: 0, annualRaise: 0, contribSchedule: eff.schedule,
+    totalContributed: deposits.reduce((sum, d) => sum + d.amount, 0) };
+}
+// The shown custom strategy that brings its own money, with its latest run's
+// log: the first such in the saved list when several are shown. null when none
+// is, or before its first run reports back.
+function ownMoneyStrategy() {
+  for (const c of savedConfigs) {
+    if (c.type !== 'custom' || c.hidden) continue;
+    const res = (window._customResults || {})[c.id];
+    if (res && !res.error && res.money === 'own') return { cfg: c, log: res.log || [] };
+  }
+  return null;
 }
 function computeCustomGlobals(cfg, ctx) {
   let entryDate = null, exitDate = null, startIdx = 0, endIdx = 0;
@@ -1347,7 +1505,15 @@ function computeCustomGlobals(cfg, ctx) {
   // smooth weekly sampling once ctx.displayGrain (js/chart.js) floors at
   // weekly for a <10y window.
   const weeklyDisplay = ctx.displayGrain === 'weekly';
-  return { initial: ctx.initial, monthly: ctx.monthly, annualRaise: ctx.annualRaise, startIdx, endIdx, entryDate, exitDate, contributions, weeklyDisplay };
+  // What the app's own engines needed to know beyond the dates and deposits,
+  // so the code versions of the SMA and 9sig strategies run them exactly as
+  // the built-in panels did: whether the window is exact days (else quarter
+  // ends), whether the deposits come from a real transaction history (else
+  // the monthly formula), and the chart's display grain.
+  const exactWindow = !!(ctx.entryDateOverride || ctx.exitDateOverride);
+  const depositsFromHistory = !!ctx.contribSchedule;
+  return { initial: ctx.initial, monthly: ctx.monthly, annualRaise: ctx.annualRaise, startIdx, endIdx, entryDate, exitDate, contributions, weeklyDisplay,
+    exactWindow, depositsFromHistory, displayGrain: ctx.displayGrain || null };
 }
 // Day-over-day change badge for a custom/library-derived config (see
 // js/chart.js's isLatestDaySelected/prevTradingDayDate on ctx, and
@@ -1361,7 +1527,8 @@ function computeCustomGlobals(cfg, ctx) {
 function scheduleCustomYesterdayRun(cfg, ctx) {
   if (!ctx.isLatestDaySelected || !ctx.prevTradingDayDate) return;
   if (!cfg.code || !String(cfg.code).trim()) return;
-  const yesterdayCtx = Object.assign({}, ctx, { exitDateOverride: ctx.prevTradingDayDate });
+  // Its window ends on yesterday's close, which no live price moves (customDataStamp).
+  const yesterdayCtx = Object.assign({}, ctx, { exitDateOverride: ctx.prevTradingDayDate, isLatestDaySelected: false });
   const sig = customSig(cfg, yesterdayCtx);
   const cached = window._customYesterdayResults[cfg.id];
   if (cached && cached.sig === sig) return; // already have this one
@@ -1443,17 +1610,25 @@ function pumpCustomPreviewQueue() {
   }
 }
 function startCustomPreview(job) {
+  _customPreviewInFlight++;
+  postCustomJob(job.cfg, Object.assign({}, job.cfg.params || {}, job.overrides), job.globals, (msg, err) => {
+    _customPreviewInFlight--;
+    try { job.cb(msg, err); } finally { pumpCustomPreviewQueue(); }
+  });
+}
+// Post one sandbox run whose result goes to `cb(msg, err)` and nowhere else —
+// bar previews and the signal chart's detail run (customDetailLog) use it.
+// Called at most once; a timeout takes the worker down, as for any job.
+function postCustomJob(cfg, rawParams, globals, cb) {
   const w = ensureCustomWorker();
-  if (!w) { job.cb(null, 'no-sandbox'); return; }
+  if (!w) { cb(null, 'no-sandbox'); return; }
   sendCustomData();
   const reqId = ++_customWorkerSeq;
-  _customPreviewInFlight++;
   let settled = false;
   const finish = (msg, err) => {
     if (settled) return;
     settled = true;
-    _customPreviewInFlight--;
-    try { job.cb(msg, err); } finally { pumpCustomPreviewQueue(); }
+    cb(msg, err);
   };
   const timer = setTimeout(function () {
     delete _customPending[reqId];
@@ -1462,7 +1637,7 @@ function startCustomPreview(job) {
     finish(null, 'timeout');
   }, CUSTOM_TIMEOUT_MS);
   _customPending[reqId] = { cb: finish, timer };
-  w.postMessage({ type: 'run', reqId: reqId, code: job.cfg.code, globals: job.globals, rawParams: Object.assign({}, job.cfg.params || {}, job.overrides) });
+  w.postMessage({ type: 'run', reqId: reqId, code: cfg.code, globals: globals, rawParams: rawParams });
 }
 function onCustomWorkerMessage(e) {
   const msg = e.data || {};
@@ -1488,15 +1663,17 @@ function onCustomWorkerMessage(e) {
     return;
   }
   window._customResults[pend.cfgId] = {
-    sig: pend.sig, log: msg.log || [], schema: msg.schema || [],
-    columns: msg.columns || null, signals: msg.signals || null, lines: msg.lines || null,
-    name: msg.name || null, error: msg.error || null,
+    sig: pend.sig, log: msg.log || [], schema: msg.schema || [], holdingsDD: msg.holdingsDD || null, endHoldings: msg.endHoldings || null, holdings: msg.holdings || null,
+    columns: msg.columns || null, signals: msg.signals || null, lines: msg.lines || null, series: msg.series || null, explain: msg.explain || null,
+    name: msg.name || null, error: msg.error || null, money: msg.money || null,
     totalContributed: (typeof msg.totalContributed === 'number') ? msg.totalContributed : null,
   };
   window._customSchemas[pend.cfgId] = msg.schema || [];
   window._customColumns[pend.cfgId] = msg.columns || null;
   window._customSignals[pend.cfgId] = msg.signals || null;
   window._customLines[pend.cfgId] = msg.lines || null;
+  window._customSeries[pend.cfgId] = msg.series || null;
+  window._customExplain[pend.cfgId] = msg.explain || null;
   // Adopt the name the strategy's own code declares (`name: "…"`) — but only
   // while the config still wears its auto-generated "Custom strategy" placeholder,
   // so a name the user typed themselves is never overwritten.
@@ -1552,8 +1729,17 @@ function cfgMoneyWeightedCAGR(ctx, finalV) {
     ? (Math.pow(finalV / ctx.totalContributed, 1 / ctx.years) - 1) * 100 : 0;
 }
 
+// A custom log's max drawdown revalued at every daily close, or null when its
+// rows don't all carry held/shares/cash (buildCustomDDControls). The panel's
+// Max DD and the Fit search both read it, so a fit minimises the number shown.
+function customDailyDrawdown(log) {
+  const ddCtrl = (typeof buildCustomDDControls === 'function') ? buildCustomDDControls(log) : null;
+  const dailyRows = (typeof daily !== 'undefined' && daily) ? daily : null;
+  return (ddCtrl && dailyRows && typeof computeDailyMaxDrawdownMulti === 'function')
+    ? computeDailyMaxDrawdownMulti(ddCtrl, dailyRows) : null;
+}
 // Turn a (worker-computed) log into a label-aligned series + stats. No code eval.
-function customSeriesResult(log, ctx, error, tcOverride, stale) {
+function customSeriesResult(log, ctx, error, tcOverride, stale, holdingsDD) {
   const labels = ctx.labels;
   if (error) return { data: labels.map(() => null), cagr: 0, maxDD: 0, start: 0, end: 0, ddPeak: null, ddTrough: null };
   const points = (log || [])
@@ -1574,12 +1760,7 @@ function customSeriesResult(log, ctx, error, tcOverride, stale) {
   // strategy doesn't emit held/shares/cash. CAGR is money-weighted, unaffected.
   const cagr = cfgMoneyWeightedCAGR(ctx, finalV);
   const ddVals = points.map(p => p.value), ddDates = points.map(p => p.date);
-  const ddCtrl = (typeof buildCustomDDControls === 'function') ? buildCustomDDControls(log) : null;
-  const dailyRows = (typeof daily !== 'undefined' && daily) ? daily : null;
-  let dd = null;
-  if (ddCtrl && dailyRows && typeof computeDailyMaxDrawdownMulti === 'function') {
-    dd = computeDailyMaxDrawdownMulti(ddCtrl, dailyRows);
-  }
+  let dd = holdingsDD || customDailyDrawdown(log);
   if (!dd && typeof computeMaxDrawdown === 'function') {
     dd = computeMaxDrawdown(ddVals.length ? ddVals : series, ddVals.length ? ddDates : labels);
   }
@@ -1608,15 +1789,18 @@ function computeCustomSeries(cfg, ctx) {
     window._customColumns[cfg.id] = cached.columns || null;
     window._customSignals[cfg.id] = cached.signals || null;
     window._customLines[cfg.id] = cached.lines || null;
+    window._customSeries[cfg.id] = cached.series || null;
+    window._customExplain[cfg.id] = cached.explain || null;
     // Today's line is settled — safe to also fetch yesterday's for the
     // day-over-day change badge (endLabelPlugin), sequenced behind it.
     scheduleCustomYesterdayRun(cfg, ctx);
-    return customSeriesResult(cached.log, ctx, cached.error, cached.totalContributed);
+    return customSeriesResult(cached.log, cached.money === 'own' ? ownMoneyCtx(ctx, cached.log, ctx.entryDateForSim) : ctx, cached.error, cached.totalContributed, false, cached.holdingsDD);
   }
   scheduleCustomRun(cfg, sig, computeCustomGlobals(cfg, ctx));
   window._customErrors[cfg.id] = null; // computing…
   window._customLogs[cfg.id] = (cached && cached.log) || [];
-  return customSeriesResult(cached ? cached.log : [], ctx, null, cached ? cached.totalContributed : null, true);
+  const staleCtx = cached && cached.money === 'own' ? ownMoneyCtx(ctx, cached.log, ctx.entryDateForSim) : ctx;
+  return customSeriesResult(cached ? cached.log : [], staleCtx, null, cached ? cached.totalContributed : null, true, cached ? cached.holdingsDD : null);
 }
 
 // Run the right engine for a config and return its label-aligned series + stats.
@@ -1656,8 +1840,11 @@ function computeConfigSeries(cfg, ctx) {
   // Returns a RAW yesterday value (deflated to real $ when the inflation
   // toggle is on) — endLabelPlugin diffs it against whichever TODAY value is
   // current at draw time, same as the async custom-strategy path in
-  // computeCustomSeries. Invested Compounded gets no badge (a
-  // monthly-stepped synthetic baseline has no meaningful daily change).
+  // computeCustomSeries. The holdings themselves are cached too
+  // (window._configEndHoldings): outside the session the badge marks them at
+  // the funds' extended-hours prints instead (extendedMoveOf). Invested
+  // Compounded gets no badge (a monthly-stepped synthetic baseline has no
+  // meaningful daily change).
   const ydayFromHoldings = (holdings, cash) => {
     if (!isLatestDaySelected || !prevTradingDayDate || typeof repriceAtPrevTradingDay !== 'function') return null;
     const v = repriceAtPrevTradingDay(holdings, cash);
@@ -1667,11 +1854,13 @@ function computeConfigSeries(cfg, ctx) {
     return v * defl;
   };
   window._configDayChange = window._configDayChange || {};
-  let ydayVal = null; // set per-branch below, written to the cache once after
+  window._configEndHoldings = window._configEndHoldings || {};
+  let endState = null; // { h, cash }: the run's end-state holdings, set per-branch below, both caches written once after
 
   const p = cfg.params || {};
   let points = null;
   let subPoints = null; // 9sig Holding/Target/Cash breakdown (for its sub-series)
+  let contributed = null; // what the run put in: its initial plus contributions
   // #3 Daily-drawdown control points (date/shares/cash) + the daily price field
   // to revalue against. Filled per strategy below; null → fall back to the
   // rebalance-grain series drawdown (e.g. Invested Compounded, custom).
@@ -1679,7 +1868,7 @@ function computeConfigSeries(cfg, ctx) {
   // Multi-asset drawdown control points (SMA can hold leveraged + out-asset +
   // cash at once). When set, takes precedence over the single-asset path.
   let ddMulti = null;
-  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq' };
+  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'gld', 9: 'soxl', 10: 'soxx' };
 
   if (cfg.type === '9sig') {
     const cd = +pget(p, 'select-9sig-crashdrop', 30);
@@ -1733,6 +1922,7 @@ function computeConfigSeries(cfg, ctx) {
     opts.sampleWeekly = displayGrain === 'weekly' && opts.rebalancePeriod !== 'weekly';
     const cashRate = (+pget(p, 'select-9sig-cashrate', 4) || 0) / 100;
     const r = simulate(initial, monthly, cashRate, simEntryIdx, exitIdx, annualRaise, opts);
+    contributed = r.totalContributed;
     // Driven by the same sampleQuarterly/sampleWeekly flags set above, not by
     // whether samplePoints happens to be non-empty — see the 'bh'/'invested'
     // branches below for why a duck-typed check is the wrong call here.
@@ -1745,18 +1935,18 @@ function computeConfigSeries(cfg, ctx) {
     };
     ddControls = (r.log || []).map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash }));
     ddKey = UL_KEY[opts.underlyingCol] || 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints };
     const _sigLast = (r.log && r.log.length) ? r.log[r.log.length - 1] : null;
     if (_sigLast && typeof daily !== 'undefined' && daily && daily.length) {
       const _sigShares = _sigLast.price > 0 ? _sigLast.tqqqVal / _sigLast.price : 0;
       const _parkKey = (opts.parkAsset || 'cash').toLowerCase();
       const _todayRow = daily[daily.length - 1];
       if (_parkKey === 'cash') {
-        ydayVal = ydayFromHoldings({ [ddKey]: _sigShares }, _sigLast.cash);
+        endState = { h: { [ddKey]: _sigShares }, cash: _sigLast.cash };
       } else if (_todayRow[_parkKey] > 0) {
         const _h = { [ddKey]: _sigShares };
         _h[_parkKey] = (_h[_parkKey] || 0) + _sigLast.cash / _todayRow[_parkKey];
-        ydayVal = ydayFromHoldings(_h, 0);
+        endState = { h: _h, cash: 0 };
       }
     }
   } else if (cfg.type === 'sma') {
@@ -1791,12 +1981,13 @@ function computeConfigSeries(cfg, ctx) {
     };
     const cashRate = (+pget(p, 'select-sma-cashrate', 4) || 0) / 100;
     const r = simulateSMA(initial, monthly, cashRate, simEntryIdx, exitIdx, annualRaise, opts);
+    contributed = r.totalContributed;
     points = (r.smaPoints || []).map(pt => ({ date: pt.date, value: pt.value }));
     // Full multi-asset holdings per step → honest daily-revalued max drawdown.
     ddMulti = r.ddControls || null;
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'sma', smaLog: r.smaLog, smaPoints: r.smaPoints };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'sma', smaLog: r.smaLog, smaPoints: r.smaPoints, ddControls: r.ddControls };
     const _smaCtlLast = (ddMulti && ddMulti.length) ? ddMulti[ddMulti.length - 1] : null;
-    if (_smaCtlLast) ydayVal = ydayFromHoldings(_smaCtlLast.h, _smaCtlLast.cash);
+    if (_smaCtlLast) endState = { h: _smaCtlLast.h, cash: _smaCtlLast.cash };
   } else if (cfg.type === 'bh') {
     // Same in-between snapshotting the main Buy & Hold line gets (js/chart.js's
     // sigOpts) — without it this config's line falls back to bhPoints' native
@@ -1808,8 +1999,12 @@ function computeConfigSeries(cfg, ctx) {
       sampleWeekly: displayGrain === 'weekly',
     };
     const r = simulate(initial, monthly, 0, simEntryIdx, exitIdx, annualRaise, bhOpts);
+    contributed = r.totalContributed;
     const key = pget(p, 'select-bh-underlying', 'tqqq');
     const rawArr = key === 'sqqq' ? (r.sqqqPoints || [])
+              : key === 'gld' ? (r.gldPoints || [])
+              : key === 'soxl' ? (r.soxlPoints || [])
+              : key === 'soxx' ? (r.soxxPoints || [])
               : key === 'qqq' ? r.qqqPoints
               : key === 'spy' ? r.spyPoints
               : key === 'qld' ? (r.qldPoints || [])
@@ -1817,6 +2012,9 @@ function computeConfigSeries(cfg, ctx) {
               : key === 'spxl' ? (r.spxlPoints || [])
               : r.bhPoints;
     const sampleArr = key === 'sqqq' ? r.sqqqSample
+              : key === 'gld' ? r.gldSample
+              : key === 'soxl' ? r.soxlSample
+              : key === 'soxx' ? r.soxxSample
               : key === 'qqq' ? r.qqqSample
               : key === 'spy' ? r.spySample
               : key === 'qld' ? r.qldSample
@@ -1835,10 +2033,10 @@ function computeConfigSeries(cfg, ctx) {
     // Drawdown control needs real per-step share counts, which only the raw
     // (quarterly) points carry — the dense sample rows are value-only.
     ddControls = (rawArr || []).map(pt => ({ date: pt.date, shares: pt.shares, cash: 0 }));
-    ddKey = key === 'qqq' ? 'qqq' : key === 'spy' ? 'spy' : key === 'qld' ? 'qld' : key === 'sso' ? 'sso' : key === 'spxl' ? 'spxl' : key === 'sqqq' ? 'sqqq' : 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints };
+    ddKey = key === 'qqq' ? 'qqq' : key === 'spy' ? 'spy' : key === 'qld' ? 'qld' : key === 'sso' ? 'sso' : key === 'spxl' ? 'spxl' : key === 'sqqq' ? 'sqqq' : key === 'gld' ? 'gld' : key === 'soxl' ? 'soxl' : key === 'soxx' ? 'soxx' : 'tqqq';
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints };
     const _bhLast = (rawArr && rawArr.length) ? rawArr[rawArr.length - 1] : null;
-    if (_bhLast && _bhLast.shares > 0) ydayVal = ydayFromHoldings({ [ddKey]: _bhLast.shares }, 0);
+    if (_bhLast && _bhLast.shares > 0) endState = { h: { [ddKey]: _bhLast.shares }, cash: 0 };
   } else if (cfg.type === 'invested') {
     const rate = (typeof sliderToRate === 'function' ? sliderToRate(+pget(p, 'slider-rate', 0)) : 0) / 100;
     const investedOpts = {
@@ -1847,13 +2045,15 @@ function computeConfigSeries(cfg, ctx) {
       sampleWeekly: displayGrain === 'weekly',
     };
     const r = simulate(initial, monthly, 0, simEntryIdx, exitIdx, annualRaise, investedOpts);
+    contributed = r.totalContributed;
     const seriesRows = (displayGrain === 'quarterly' || displayGrain === 'weekly') ? r.samplePoints : (r.log || []);
     points = seriesRows.map(l => ({ date: l.date, value: l.investedCompounded }));
     if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'invested', log: r.log };
     // No day-change badge for Invested Compounded — see ydayFromHoldings'
     // comment above.
   }
-  window._configDayChange[cfg.id] = ydayVal;
+  window._configDayChange[cfg.id] = endState ? ydayFromHoldings(endState.h, endState.cash) : null;
+  window._configEndHoldings[cfg.id] = endState;
 
   const data = resampleByDate(points, labels);
   const finalV = data.length ? data[data.length - 1] : 0;
@@ -1869,7 +2069,7 @@ function computeConfigSeries(cfg, ctx) {
     : (ddControls && ddControls.length && dailyRows && typeof computeDailyMaxDrawdown === 'function')
     ? computeDailyMaxDrawdown(ddControls, dailyRows, ddKey)
     : ((typeof computeMaxDrawdown === 'function') ? computeMaxDrawdown(data, labels) : { pct: 0, peakDate: null, troughDate: null });
-  return { data, cagr, maxDD: dd.pct * 100, start: startV, end: finalV, subPoints, ddPeak: dd.peakDate, ddTrough: dd.troughDate };
+  return { data, cagr, maxDD: dd.pct * 100, start: startV, end: finalV, subPoints, ddPeak: dd.peakDate, ddTrough: dd.troughDate, contributed };
 }
 
 function fadeColor(hex, a) {
@@ -1929,72 +2129,150 @@ function appendConfigDatasets(chart, ctx) {
       }
     }
 
+    // A code strategy's dollar lines for the main chart (its `series`), shown
+    // per cfg.subShown["main:" + key] like a saved 9sig's breakdown above: the
+    // user, 2026-11-04, "widen features in the main chart ... for custom
+    // strategies". The key is prefixed so a series and a signal-chart line of
+    // the same name toggle apart.
+    const series = cfg.type === 'custom' ? (window._customSeries || {})[cfg.id] : null;
+    if (series && cfg.subShown) {
+      const logRows = (window._customLogs || {})[cfg.id] || [];
+      for (const sd of series) {
+        if (!cfg.subShown['main:' + sd.key]) continue;
+        const pts = logRows.filter(r => typeof r[sd.key] === 'number' && isFinite(r[sd.key])).map(r => ({ date: r.date, value: r[sd.key] }));
+        chart.data.datasets.push({
+          label: cfg.name + ' · ' + sd.label,
+          data: resampleByDate(pts, ctx.labels),
+          borderColor: cfg.color, borderDash: SERIES_DASH[sd.dash], borderWidth: 1.5,
+          backgroundColor: 'transparent', fill: false, tension: 0.3,
+          pointRadius: 0, pointHitRadius: 10, hidden: !!cfg.hidden,
+          _configLine: true, _configId: cfg.id, _configSub: 'main:' + sd.key,
+        });
+        chart.setDatasetVisibility(chart.data.datasets.length - 1, !cfg.hidden);
+      }
+    }
+
     // A custom strategy's declared signal lines (`lines: [{key,label}]`)
     // deliberately do NOT join the main chart: they're price-scale values
     // ($50–$80) squashed unreadably under six-figure portfolio lines. They
     // render as a mini chart inside the strategy's own panel instead — see
     // buildCustomLinesChartHtml.
   }
-  appendActualPortfolioDataset(chart, ctx);
+  appendActualPortfolioDatasets(chart, ctx);
 }
 
-// The "My portfolio" line — the ACTUAL account value readings carried in the
-// user's transaction file (the optional third column, js/transactions.js's
-// state.actualPoints). What IS, drawn next to what was contributed (Invested
-// Compounded) and what could have been (every strategy). Flagged _configLine
-// so removeConfigDatasets strips it each render and the index-keyed
-// hidden-list persistence skips it, exactly like saved-config lines; the
-// endLabelPlugin / tooltip / range-select all pick it up generically.
-const TX_ACTUAL_COLOR = '#0d9488'; // mirrored by styles.css's .tx-actual-dot
-function appendActualPortfolioDataset(chart, ctx) {
-  window._actualMetrics = null;
+// The real account's lines from the user's transaction file (js/transactions.js's
+// TX_LINES): "My portfolio", the ACTUAL account value readings (the optional
+// third column, state.actualPoints); Invested, the money put in by each day;
+// and Profit, the difference. What IS, drawn next to what could have been
+// (every strategy). Flagged _configLine so removeConfigDatasets strips them
+// each render and the index-keyed hidden-list persistence skips them, exactly
+// like saved-config lines; the endLabelPlugin / tooltip / range-select all pick
+// them up generically. Colours, shared with the desktop widget's top chart
+// (js/widget-page.js): teal, a neutral slate for the money in, and the signal
+// chart's magenta (js/signal-chart.js CUSTOM_MINI_COLORS) for Profit. By colorSeparation
+// the slate sits at least 20 apart as seen and 11 in the worst colour-blind
+// view from every line this chart draws; the widget's earlier orange sat 4
+// from 9sig's Cash and 3 (colour-blind) from Buy & Hold TQQQ.
+const TX_ACTUAL_COLOR = '#0d9488';
+const TX_INVESTED_COLOR = '#334155';
+const TX_PROFIT_COLOR = '#a21caf';
+// The running total of `flows` at each of `dates`, both in date order.
+function cumulativeFlowsAt(flows, dates) {
+  let next = 0, sum = 0;
+  return dates.map(d => {
+    while (next < flows.length && flows[next].date <= d) sum += flows[next++].amount;
+    return sum;
+  });
+}
+function appendActualPortfolioDatasets(chart, ctx) {
+  // The sidebar's day-change dropdown lists the saved strategies, which any
+  // render may have added or removed.
+  if (typeof renderTxSummary === 'function') renderTxSummary();
+  window._txDay = null;
+  // The real account cannot run on a strategy's own deposits, so it steps
+  // aside while one funds the chart (js/chart.js's render).
+  if (window._ownMoneyCfgId) return;
   const s = window._txSchedule;
   // The ENTRY-AWARE view (js/chart.js stashes window._txEffective each
-  // render): a mid-history entry re-anchors the line at the cutoff lump and
+  // render): a mid-history entry re-anchors the lines at the cutoff lump and
   // drops earlier readings/flows. Falls back to the raw state when absent.
   const eff = window._txEffective || s;
-  if (!s || !eff || !eff.actualPoints || !eff.actualPoints.length || s.showActual === false) return;
-  const pts = eff.actualPoints;
-  // Forward-fill via resampleByDate, but null out labels BEFORE the first
-  // real reading — back-filling would draw a flat line through history the
-  // account didn't exist in. After the last reading the forward-fill stands:
-  // the latest known value carries to the right edge, so the end label and
-  // the "what is, today" comparison exist.
-  const series = resampleByDate(pts, ctx.labels);
-  const firstDate = pts[0].date;
-  for (let i = 0; i < ctx.labels.length && ctx.labels[i] < firstDate; i++) series[i] = null;
-  const finalV = pts[pts.length - 1].value;
-  // FLOW-ADJUSTED drawdown (js/utils.js computeFlowAdjustedDrawdown) — a
-  // naive peak-to-trough on raw balances counted a big withdrawal as a
-  // "drawdown" (the initial version showed -70% where the real market DD was
-  // far less). Flows = the (entry-aware) initial lump + every later flow.
+  if (!s || !eff) return;
+  const labels = ctx.labels;
+  // Null before the account existed — back-filling would draw a flat line
+  // through history it wasn't in. After the last reading the forward-fill
+  // stands: the latest known value carries to the right edge, so the end
+  // labels and the "what is, today" comparison exist.
+  const nullBefore = (values, from) => values.map((v, i) => (labels[i] < from ? null : v));
+  // Money in: the (entry-aware) initial lump at the entry, then every later flow.
   const flows = [{ date: eff.entryDate || s.entryDate, amount: eff.initial }, ...eff.schedule.list];
-  const dd = (typeof computeFlowAdjustedDrawdown === 'function')
-    ? computeFlowAdjustedDrawdown(pts, flows)
-    : { pct: 0, peakDate: null, troughDate: null };
-  window._actualMetrics = {
-    cagr: cfgMoneyWeightedCAGR(ctx, finalV),
-    maxDD: dd.pct * 100, ddPeak: dd.peakDate, ddTrough: dd.troughDate,
-    start: pts[0].value, end: finalV,
+  const firstMoney = flows.find(f => f.amount !== 0);
+  const series = { invested: firstMoney ? nullBefore(cumulativeFlowsAt(flows, labels), firstMoney.date) : null };
+  const pts = eff.actualPoints || [];
+  if (pts.length) {
+    series.actual = nullBefore(resampleByDate(pts, labels), pts[0].date);
+    // Profit at each reading is its value minus the money in by that day,
+    // carried forward like the value, so a deposit after the latest reading
+    // doesn't show as a loss.
+    const investedAtReading = cumulativeFlowsAt(flows, pts.map(p => p.date));
+    const profitPts = pts.map((p, i) => ({ date: p.date, value: p.value - investedAtReading[i] }));
+    series.profit = nullBefore(resampleByDate(profitPts, labels), pts[0].date);
+    // The day-change badges' inputs (js/chart.js's txLineDayChange), when the
+    // latest reading is on the chart's last day and that day is the latest
+    // session: an older reading is not today's value, so it gets no badge.
+    const today = labels[labels.length - 1];
+    if (ctx.isLatestDaySelected && pts[pts.length - 1].date === today) {
+      window._txDay = {
+        portfolio: pts[pts.length - 1].value,
+        invested: investedAtReading[investedAtReading.length - 1],
+        flowToday: flows.filter(f => f.date === today).reduce((sum, f) => sum + f.amount, 0),
+        move: txFollowMove(txFollowKey(s), ctx),
+      };
+    }
+  }
+  const styles = {
+    actual:   { borderColor: TX_ACTUAL_COLOR, borderWidth: 2.5, tension: 0.3 }, // the user's REAL line — visually primary
+    invested: { borderColor: TX_INVESTED_COLOR, borderWidth: 2, tension: 0 }, // a step per deposit
+    profit:   { borderColor: TX_PROFIT_COLOR, borderWidth: 2, tension: 0.3, _signed: true }, // a loss plots below zero (js/chart.js's clampChartMin)
   };
-  chart.data.datasets.push({
-    label: 'My portfolio',
-    data: series,
-    borderColor: TX_ACTUAL_COLOR,
-    backgroundColor: 'transparent',
-    fill: false,
-    tension: 0.3,
-    pointRadius: 0,
-    pointHitRadius: 10,
-    borderWidth: 2.5, // the user's REAL line — visually primary
-    _configLine: true,
-    _actualLine: true,
-  });
-  chart.setDatasetVisibility(chart.data.datasets.length - 1, true);
-  // The sidebar summary shows these metrics — but its usual triggers
-  // (toggleContribMode etc.) run BEFORE render() gets here, when
-  // _actualMetrics was still null. Refresh it now that they exist.
-  if (typeof renderTxSummary === 'function') renderTxSummary();
+  for (const line of TX_LINES) {
+    if (!series[line.key] || s[line.flag] === false) continue;
+    chart.data.datasets.push({
+      label: line.label,
+      data: series[line.key],
+      ...styles[line.key],
+      backgroundColor: 'transparent',
+      fill: false,
+      pointRadius: 0,
+      pointHitRadius: 10,
+      _configLine: true,
+      _actualLine: true,
+      _txDay: line.dayChange ? line.key : null,
+    });
+    chart.setDatasetVisibility(chart.data.datasets.length - 1, true);
+  }
+}
+// The day's move of the strategy the account follows (js/transactions.js's
+// txFollowKey), as js/chart.js's txFollowPct reads it at draw time: a Buy &
+// Hold's is its ticker's close-to-close move (with its one share, for the
+// move to an extended-hours print); a line on the chart (the 9sig or SMA
+// panel, a saved strategy) is read off its own badge; a library strategy
+// runs here as a temporary strategy, which fills the same day-change caches a
+// saved one does, and keeps its latest value in the chart's units.
+function txFollowMove(key, ctx) {
+  if (key.startsWith('bh-')) {
+    const ticker = key.slice(3);
+    const yday = repriceAtPrevTradingDay({ [ticker]: 1 }, 0), today = daily[daily.length - 1][ticker];
+    return { pct: yday > 0 && today > 0 ? (today / yday - 1) * 100 : null, holdings: { [ticker]: 1 } };
+  }
+  if (key in STRATEGY_KEY_TO_DATASET_IDX) return { idx: STRATEGY_KEY_TO_DATASET_IDX[key] };
+  if (key.startsWith('cfg:')) return { cfgId: key.slice(4) };
+  const n = +key.slice(4);
+  const cfg = { ...libraryEntryConfig(STRATEGY_LIBRARY.find(s => s.n === n)), id: 'tx-follow-lib-' + n };
+  const labels = ctx.labels;
+  const defl = inflationOn() ? inflFactor(labels[labels.length - 1], labels[0]) : 1;
+  return { cfgId: cfg.id, today: computeConfigSeries(cfg, ctx).end * defl };
 }
 
 // --- naming -------------------------------------------------------------
@@ -2136,13 +2414,52 @@ function restoreBaseAfterEditing() {
 // "open sig tqqq" always starts from a clean canonical copy.
 function resetBaseControlsToCanonical(type) {
   if (!CONFIG_PARAM_IDS[type]) return;
-  applyParams(type, captureDefaultParams(type));
+  applyControlParams(type, captureDefaultParams(type));
+}
+// Set a panel's knob controls to `params` and bring the readouts that depend
+// on them up to date.
+function applyControlParams(type, params) {
+  applyParams(type, params);
   if (typeof refresh9sigDisplayLabels === 'function') refresh9sigDisplayLabels();
   if (typeof update9sigCashSpans === 'function') update9sigCashSpans();
   if (typeof updateSmaCashRateVisibility === 'function') updateSmaCashRateVisibility();
   if (typeof syncBgSmaWindowLabel === "function") syncBgSmaWindowLabel();
   if (typeof updateDeployAvailability === 'function') updateDeployAvailability();
   if (typeof window.refreshPreviewTriggers === 'function') window.refreshPreviewTriggers();
+}
+// What "Reset to default" returns a 9sig, SMA, Buy & Hold or Invested panel
+// to: a copy of a library preset goes back to the preset (found by its
+// library stamp, or by its name for a copy saved before presets were
+// stamped), anything else to the canonical defaults.
+function strategyDefaultParams(type, cfg) {
+  const defaults = captureDefaultParams(type);
+  if (!cfg || typeof STRATEGY_LIBRARY === 'undefined') return defaults;
+  const name = String(cfg.name || '').replace(/ \(\d+\)$/, '');
+  const entry = STRATEGY_LIBRARY.find(e => e.preset && e.preset.type === type
+    && (cfg.libraryN != null ? e.n === +cfg.libraryN : e.name === name));
+  return entry ? { ...defaults, ...entry.preset.params } : defaults;
+}
+// The saved strategy of this type open in the panel, or null for the base line.
+function savedConfigInPanel(type) {
+  return (window._editingConfigId && savedConfigs.find(c => c.id === window._editingConfigId && c.type === type)) || null;
+}
+// "Reset to default" on a 9sig, SMA, Buy & Hold or Invested panel. The render
+// that follows saves a saved strategy's new values (syncEditingConfig).
+function resetPanelToDefaults(type) {
+  delete _fitNotes['panel:' + type];
+  applyControlParams(type, strategyDefaultParams(type, savedConfigInPanel(type)));
+  if (typeof saveSliders === 'function') saveSliders();
+  if (typeof render === 'function') render();
+}
+// "Reset to default" on a code strategy: cfg.params holds only the settings
+// the user changed, so emptying it puts each back to its declared default.
+function resetCustomToDefaults(cfgId) {
+  const cfg = savedConfigs.find(c => c.id === cfgId);
+  if (!cfg) return;
+  cfg.params = {};
+  delete _fitNotes[cfg.id];
+  persistSavedConfigs();
+  if (typeof render === 'function') render();
 }
 // Create a new (empty) custom strategy and open the build modal. The describe →
 // prompt → paste flow happens in the modal; the sidebar only shows the result.
@@ -2204,7 +2521,7 @@ function renderCustomBuilder() {
       <div class="builder-modal">
         <div class="sc-modal-title">Describe your strategy</div>
         <div class="wip-note">⚠ Custom strategies are a work in progress — their results may still change.</div>
-        <div class="builder-help">In plain English, describe your strategy in as much detail as you can. You can base it on any of these tickers — <b>TQQQ</b>, <b>QLD</b>, <b>QQQ</b>, <b>SPY</b>, <b>SSO</b>, <b>SPXL</b>, <b>SQQQ</b> (inverse −3×) — plus entry/exit rules, thresholds, and how monthly contributions are handled.</div>
+        <div class="builder-help">In plain English, describe your strategy in as much detail as you can. You can base it on any of these tickers — <b>TQQQ</b>, <b>QLD</b>, <b>QQQ</b>, <b>SPY</b>, <b>SSO</b>, <b>SPXL</b>, <b>SQQQ</b> (inverse −3×), <b>GLD</b> (gold), <b>SOXL</b> (3× semiconductors), <b>SOXX</b> (1× semiconductors) — plus entry/exit rules, thresholds, and how monthly contributions are handled.</div>
         <textarea id="builder-desc" class="builder-textarea" placeholder="e.g. Hold TQQQ. At each month-end, if QQQ closed below its 200-day moving average, move everything to cash; when it closes back above, buy TQQQ again. Add the monthly contribution to whatever I'm holding.">${_escHtml(cfg.desc || '')}</textarea>
         <div class="builder-actions">
           <button type="button" class="sc-modal-btn" data-builder-cancel>Cancel</button>
@@ -2304,6 +2621,166 @@ function initCodeEditor(ta) {
   sync();
 }
 
+// A saved strategy and a share link both carry a custom strategy's code as it
+// was on the day they were made. These two bring that code up to date:
+// a copy of a library strategy takes the library's current code for that entry
+// (refreshLibraryCopies) and, if the entry was renamed, its current name
+// (refreshedLibraryName), and any custom code gets the library's current
+// withdrawal handling and daily-detail logging (js/strategy-library-code.js's
+// upgradeSavedCode). upgradeSavedCustomCode handles what is already in
+// savedConfigs, withCurrentCustomCode a share link's entries.
+//
+// They go together. Share-link entries are matched against saved strategies by
+// their code text (importSharedConfigs' duplicate check, which compares names
+// too, and resolveSharedConfigId), so upgrading one side alone would import a
+// user's own older link as a duplicate of the strategy they already have. Both
+// are called from js/init.js, which loads after the library code; this file
+// loads before it.
+//
+// A library copy is recognised by its entry number, stamped when it was added
+// (addStrategyFromLibrary), or for copies made before the stamp existed by the
+// name line of its code (libraryEntryOf). A copy whose code no longer matches
+// the fingerprint taken when it was made was edited by the user and is left
+// alone. The code a refresh replaces is kept on the config as codeBefore.
+const libraryEntryNumber = cfg => (cfg.libraryN != null ? +cfg.libraryN : libraryEntryOf(cfg.code));
+function refreshedLibraryCopy(cfg) {
+  if (typeof STRATEGY_CODE === 'undefined' || !cfg || cfg.type !== 'custom' || !cfg.code) return null;
+  const n = libraryEntryNumber(cfg);
+  if (n == null || !STRATEGY_CODE[n]) return null;
+  const edited = cfg.libraryN != null && cfg.libraryFingerprint && cfg.libraryFingerprint !== codeFingerprint(cfg.code);
+  if (edited) return null;
+  const code = STRATEGY_CODE[n];
+  const entry = (typeof STRATEGY_LIBRARY !== 'undefined') ? STRATEGY_LIBRARY.find(e => e.n === n) : null;
+  // The description refreshes on its own too, unless it was edited in the
+  // builder (its fingerprint no longer matches the stamp). Copies made before
+  // the stamp existed count as unedited, as they did for the code.
+  const descEdited = cfg.libraryDescFingerprint && cfg.libraryDescFingerprint !== codeFingerprint(cfg.desc || '');
+  const desc = entry && !descEdited ? entry.rules : cfg.desc;
+  return { n, code, desc, changed: code !== cfg.code || cfg.libraryN == null || desc !== cfg.desc };
+}
+// The name a copy should wear after its library entry was renamed, or null to
+// keep its own: a copy still named after one of the entry's formerNames
+// (js/strategy-library.js) takes the current name, with any " (2)" suffix
+// uniqueName gave a second copy kept. Separate from refreshedLibraryCopy
+// because it also applies to copies whose code the user edited: the name
+// still came from the library.
+function refreshedLibraryName(cfg) {
+  if (typeof STRATEGY_LIBRARY === 'undefined' || !cfg || cfg.type !== 'custom' || !cfg.code) return null;
+  const n = libraryEntryNumber(cfg);
+  const entry = STRATEGY_LIBRARY.find(e => e.n === n);
+  const [, base, suffix] = /^(.*?)( \(\d+\))?$/.exec(cfg.name || '');
+  return entry && entry.formerNames && entry.formerNames.includes(base) ? entry.name + (suffix || '') : null;
+}
+// The stamp a library copy carries (addStrategyFromLibrary, applyLibraryRefresh):
+// the entry it came from, and fingerprints of its code and description as they
+// were then. Share links carry it (shareConfig in js/controls.js) and imports
+// keep it (importSharedConfigs), so the receiving page can tell an edited copy,
+// kept as sent, from an unedited one, brought up to the current library code.
+// Without it every shared copy counted as unedited and arrived with the
+// library's code, the sender's edits gone. {} for a config without a stamp.
+const LIBRARY_STAMP_KEYS = ['libraryN', 'libraryFingerprint', 'libraryDescFingerprint'];
+function libraryStampOf(cfg) {
+  return Object.fromEntries(LIBRARY_STAMP_KEYS.filter(key => cfg[key] != null).map(key => [key, cfg[key]]));
+}
+// A saved strategy as a share link carries it (shareConfig in
+// js/controls.js). A copy of a library code strategy whose code is still the
+// library's goes by its library number, `lib`, with its description only when
+// the sender changed it: the code is the bulk of a link, and the recipient's
+// page has it. Changed code goes in full, with the library stamp. Settings
+// (params) always ride along; they hold only what the sender changed.
+function sharedConfigOf(c) {
+  const o = { type: c.type, name: c.name, params: c.params || {}, color: c.color };
+  if (c.type !== 'custom') return o;
+  const n = libraryEntryNumber(c);
+  const entry = n != null && typeof STRATEGY_LIBRARY !== 'undefined' ? STRATEGY_LIBRARY.find(e => e.n === n) : null;
+  if (entry && STRATEGY_CODE[n] && c.code === STRATEGY_CODE[n]) {
+    o.lib = n;
+    if ((c.desc || '') !== (entry.rules || '')) o.desc = c.desc || '';
+    return o;
+  }
+  return { ...o, code: c.code || '', desc: c.desc || '', ...libraryStampOf(c) };
+}
+// The SMA and 9sig strategies are code strategies since 2026-11-04
+// (js/strategy-library-code.js smaStrategyCode / nineSigStrategyCode, the user:
+// "converted into code ... the result should stay exactly the same"). A saved or
+// shared one of the old built-in kind (type "sma" / "9sig", its settings keyed by
+// the panel's dropdown ids) becomes that code with the same settings: a copy of a
+// library entry, found by its library number or, for copies older than the stamp,
+// its name, keeps that entry; any other takes the app's own entry's code (SMA 200,
+// 9sig), every setting given explicitly. A 9sig's shown breakdown lines stay shown
+// as the code's main-chart series.
+const BUILT_IN_AS_CODE = {
+  sma: { numbers: () => SMA_LIBRARY_NUMBERS, paramOf: () => SMA_PARAM_OF_SELECT, fallback: 43, sub: {} },
+  '9sig': { numbers: () => NINESIG_LIBRARY_NUMBERS, paramOf: () => NINESIG_PARAM_OF_SELECT, fallback: 42,
+    sub: { holding: 'main:holding', target: 'main:target', cash: 'main:cashValue' } },
+};
+function builtInAsCodeConfig(c) {
+  const kind = c && BUILT_IN_AS_CODE[c.type];
+  if (!kind) return c;
+  const numbers = kind.numbers(), paramOf = kind.paramOf();
+  const baseName = String(c.name || '').replace(/ \(\d+\)$/, '');
+  const entry = STRATEGY_LIBRARY.find(e => numbers.includes(e.n) && (c.libraryN != null ? e.n === +c.libraryN : e.name === baseName))
+    || STRATEGY_LIBRARY.find(e => e.n === kind.fallback);
+  const code = STRATEGY_CODE[entry.n], params = {}, subShown = {};
+  for (const [select, value] of Object.entries(c.params || {})) if (paramOf[select]) params[paramOf[select]] = value;
+  for (const [key, on] of Object.entries(c.subShown || {})) if (kind.sub[key]) subShown[kind.sub[key]] = on;
+  return { ...c, type: 'custom', code, desc: entry.rules || '', params, subShown, libraryN: entry.n,
+    libraryFingerprint: codeFingerprint(code), libraryDescFingerprint: codeFingerprint(entry.rules || '') };
+}
+// The reverse, on arrival: a `lib` entry takes this page's library code and,
+// unless the link brought its own, the library description, stamped as an
+// unedited copy. A number this library lacks is skipped with a console
+// warning, and stays as a null so the link's indices (spc, cfg:<n>) still line up.
+function expandLibraryShares(arr) {
+  return arr.map(builtInAsCodeConfig).map(c => {
+    if (!c || c.type !== 'custom' || c.lib == null) return c;
+    const n = +c.lib, code = STRATEGY_CODE[n], entry = STRATEGY_LIBRARY.find(e => e.n === n);
+    if (!code || !entry) { console.warn(`Share link: library strategy ${n} is not in this library, skipped.`); return null; }
+    const { lib, ...rest } = c;
+    return { ...rest, code, desc: c.desc != null ? c.desc : entry.rules, libraryN: n,
+      libraryFingerprint: codeFingerprint(code), libraryDescFingerprint: codeFingerprint(entry.rules || '') };
+  });
+}
+function applyLibraryRefresh(cfg, up) {
+  if (up.code !== cfg.code) { cfg.codeBefore = cfg.code; cfg.code = up.code; }
+  cfg.desc = up.desc;
+  cfg.libraryN = up.n;
+  cfg.libraryFingerprint = codeFingerprint(up.code);
+  cfg.libraryDescFingerprint = codeFingerprint(cfg.desc || '');
+}
+function upgradeSavedCustomCode() {
+  let changed = false;
+  savedConfigs = savedConfigs.map(c => {
+    if (!BUILT_IN_AS_CODE[c.type]) return c;
+    if (!c._transient) changed = true;
+    return builtInAsCodeConfig(c);
+  });
+  for (const c of savedConfigs) {
+    const up = refreshedLibraryCopy(c);
+    if (up && up.changed) { applyLibraryRefresh(c, up); if (!c._transient) changed = true; }
+    const name = refreshedLibraryName(c);
+    if (name) { c.name = name; if (!c._transient) changed = true; }
+  }
+  const outdated = savedConfigs
+    .filter(c => c.type === 'custom' && c.code)
+    .map(c => ({ cfg: c, code: upgradeSavedCode(c.code) }))
+    .filter(u => u.code !== u.cfg.code);
+  outdated.forEach(u => { u.cfg.code = u.code; });
+  if (changed || outdated.some(u => !u.cfg._transient)) persistSavedConfigs();
+}
+function withCurrentCustomCode(entries) {
+  return entries.map(c => {
+    if (!(c && c.type === 'custom' && c.code)) return c;
+    const copy = { ...c };
+    const up = refreshedLibraryCopy(copy);
+    if (up && up.changed) applyLibraryRefresh(copy, up);
+    const name = refreshedLibraryName(copy);
+    if (name) copy.name = name;
+    copy.code = upgradeSavedCode(copy.code);
+    return copy;
+  });
+}
+
 // Merge saved strategies carried in a share link. Custom code is safe to run
 // because it executes in the sandboxed worker. Deduped by content signature so
 // reloading the same link doesn't pile up copies.
@@ -2326,7 +2803,7 @@ function importSharedConfigs(arr) {
       // The recipient clicks "Save" on the banner to keep them locally.
       _transient: true,
     };
-    if (c.type === 'custom') { cfg.code = c.code || ''; cfg.desc = c.desc || ''; } // safe to run: sandboxed
+    if (c.type === 'custom') { cfg.code = c.code || ''; cfg.desc = c.desc || ''; Object.assign(cfg, libraryStampOf(c)); } // safe to run: sandboxed
     savedConfigs.push(cfg);
     existing.add(sig(c));
   }
@@ -2501,15 +2978,32 @@ function buildPanelSaveBarHtml(type) {
   if (!CONFIG_PARAM_IDS[type]) return '';
   // Editing a SAVED strategy auto-saves live (see syncEditingConfig) and can't be
   // forked — so it shows no save button. Only the main/base strategy offers
-  // "Save as strategy", which spins off a new saved strategy.
-  const editingSaved = window._editingConfigId
-    && savedConfigs.find(c => c.id === window._editingConfigId && c.type === type);
-  if (editingSaved) return '';
+  // "Save as strategy", which spins off a new saved strategy. "Reset to
+  // default" sits in the Settings header (buildNativeSettingsHeaderHtml).
+  if (savedConfigInPanel(type)) return '';
   return `
     <div class="config-savebar">
       <button type="button" class="config-savebar-btn primary" data-sc-savenew="${type}" title="Save the current settings as a new saved strategy">Save as strategy</button>
     </div>`;
 }
+// A built-in panel's Settings header, above its controls (js/chart.js
+// renderStrategyPanelBody), as code strategies have one: Fit where the panel
+// can be searched (FIT_PANELS), then "Reset to default", greyed out while
+// every setting is at its default or a fit is running; the last fit's result under it.
+function buildNativeSettingsHeaderHtml(type) {
+  if (!CONFIG_PARAM_IDS[type]) return '';
+  const key = 'panel:' + type;
+  const atDefaults = paramsEqual(captureParams(type), strategyDefaultParams(type, savedConfigInPanel(type)), type);
+  const note = _fitNotes[key] ? buildFitNoteHtml(_fitNotes[key]) : '';
+  return `<div class="strategy-panel-section-label settings-head"><span>Settings</span><span class="settings-actions">`
+    + `${FIT_PANELS[type] ? buildFitButtonHtml(key) : ''}`
+    + `<button type="button" class="settings-reset-btn" data-sc-reset="${type}"${atDefaults || (_fit && _fit.key === key) ? ' disabled' : ''}>Reset to default</button>`
+    + `</span></div>${note}`;
+}
+// A setting changed by hand replaces the panel's last fit result.
+document.addEventListener('change', (e) => {
+  for (const type of Object.keys(FIT_PANELS)) if ((CONFIG_PARAM_IDS[type] || []).includes(e.target.id)) delete _fitNotes['panel:' + type];
+}, true);
 
 // --- Parameters-panel pill list ----------------------------------------
 function buildConfigPillHtml(cfg) {
@@ -2675,29 +3169,97 @@ function customParamOptions(sp) {
   }
   return [{ value: sp.default, label: String(sp.default) }];
 }
+// How an option reads on the sidebar dropdown and in its popup: its label,
+// with the param's `unit` ("%", " days") after each plain number, so a
+// percent setting shows "125%" the way the 9sig dropdowns show "40%". An
+// option with a label of its own ("Off", "No limit") keeps it as it is.
+function customOptionText(sp, o) {
+  const plainNumber = String(o.label) === String(o.value) && o.value !== '' && Number.isFinite(Number(o.value));
+  return sp.unit != null && plainNumber ? String(o.label) + String(sp.unit) : String(o.label);
+}
 function customOptionLabel(sp, val) {
   const m = customParamOptions(sp).find(o => String(o.value) === String(val));
-  return m ? String(m.label) : String(val);
+  return customOptionText(sp, m || { value: val, label: String(val) });
 }
-// Each param is a bar-preview dropdown (same look as the 9sig selectors): the
-// popup runs the strategy once per option (in the sandbox) and shows each
-// option's resulting final value as a proportional bar.
+// The dropdown's options, plus the current value in its place when it lies
+// between them (Fit can set such a value), so the popup shows it selected.
+function customParamOptionsWithCurrent(sp, cur) {
+  const opts = customParamOptions(sp);
+  const x = Number(cur);
+  if (opts.some(o => String(o.value) === String(cur)) || !Number.isFinite(x) || !opts.every(o => typeof o.value === 'number')) return opts;
+  const plain = opts.map((o, i) => ({ o, i })).filter(({ o }) => String(o.label) === String(o.value));
+  if (!plain.length) return opts;
+  const descending = plain.length > 1 && plain[1].o.value < plain[0].o.value;
+  const after = plain.find(({ o }) => descending ? o.value < x : o.value > x);
+  const at = after ? after.i : plain[plain.length - 1].i + 1;
+  return opts.slice(0, at).concat([{ value: x, label: x }], opts.slice(at));
+}
+// The sentence a param reads as, with {} where its dropdown sits: its `text`,
+// or else its label, with a unit in brackets moved after the dropdown
+// ("Lookback (trading days)" reads "Lookback {} trading days").
+function customParamSentence(sp) {
+  if (sp.text != null && String(sp.text).includes('{}')) return String(sp.text);
+  const label = String(sp.label || sp.id);
+  const m = label.match(/^(.*\S)\s*\(([^()]+)\)\s*$/);
+  if (m && /^(%|(trading )?(days|weeks|months|years)\b)/.test(m[2])) return m[1] + ' {}' + (m[2][0] === '%' ? '' : ' ') + m[2];
+  return label + ' {}';
+}
+// A code strategy's explanation (`explain`), rendered from its light markup:
+// blocks split by blank lines; "## " starts a heading (the first one titles the
+// section), "- " lines make a list, anything else a paragraph; **bold** inline.
+// Everything is escaped first, so the text can carry no HTML of its own.
+function buildExplainHtml(text) {
+  const inline = (s) => _escHtml(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  const blocks = String(text).split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
+  let title = 'How it works';
+  if (blocks.length && blocks[0].startsWith('## ')) title = blocks.shift().slice(3).trim();
+  const out = [];
+  let items = [];
+  const flush = () => { if (items.length) { out.push(`<ul class="explain-list">${items.map(i => `<li>${inline(i)}</li>`).join('')}</ul>`); items = []; } };
+  for (const b of blocks) {
+    const lines = b.split('\n');
+    if (lines.every(l => l.trim().startsWith('- '))) { items.push(...lines.map(l => l.trim().slice(2))); continue; }
+    flush();
+    out.push(b.startsWith('## ') ? `<div class="explain-heading">${inline(b.slice(3).trim())}</div>` : `<div class="explain-text">${inline(b)}</div>`);
+  }
+  flush();
+  return `<div class="strategy-rules-wrap" style="margin-top:24px"><div class="strategy-panel-section-label">${inline(title)}</div><div class="strategy-rules">${out.join('')}</div></div>`;
+}
+// A setting with when: { otherId: value or [values] } shows only while those
+// settings hold one of the values (the user, 2026-11-04: the SMA panel's cash
+// interest shows only when the money sits in cash).
+function customParamShown(cfg, schema, sp) {
+  if (!sp.when) return true;
+  return Object.entries(sp.when).every(([id, want]) => {
+    const other = schema.find(s => s && s.id === id);
+    return !!other && [].concat(want).map(String).includes(String(customParamValue(cfg, other)));
+  });
+}
+// Each param reads as a sentence with its bar-preview dropdown inline, like
+// the 9sig panel, and a section's sentences run on as one paragraph; the popup runs the strategy once per option (in the
+// sandbox) and shows each option's final value as a proportional bar.
 function buildCustomControlsHtml(cfg, schema) {
   if (!schema || !schema.length) return '';
   const rows = schema.map(sp => {
     if (!sp) return '';
     // { section: "Label" } entries (no id) group the params under sub-headers
     // so a long settings list reads in blocks instead of one flat scan.
-    if (sp.id == null) return sp.section ? `<div class="custom-param-group">${_escHtml(sp.section)}</div>` : '';
-    const label = _escHtml(sp.label || sp.id);
+    // An optional `tip` becomes the shared ⓘ hover tooltip at the end of the line.
+    const tip = sp.tip != null && String(sp.tip).trim() ? `<span class="info-icon" tabindex="0" data-tip="${_escHtml(String(sp.tip))}">ⓘ</span>` : '';
+    if (sp.id == null) return sp.section ? `<div class="custom-param-group">${_escHtml(sp.section)}${tip ? ' ' + tip : ''}</div>` : '';
+    if (!customParamShown(cfg, schema, sp)) return '';
+    const sentence = customParamSentence(sp), at = sentence.indexOf('{}');
+    const before = sentence.slice(0, at), after = sentence.slice(at + 2);
     const curLabel = _escHtml(customOptionLabel(sp, customParamValue(cfg, sp)));
-    return `<div class="custom-param-row">
-      <label>${label}</label>
-      <button type="button" class="pdrop-trigger inline-select cp-trigger" data-cp-cfg="${_escHtml(cfg.id)}" data-cp-id="${_escHtml(sp.id)}">
-        <span class="pdrop-trigger-label">${curLabel}</span><span class="pdrop-caret">▾</span>
-      </button>
-    </div>`;
-  }).join('');
+    const dropdown = `<button type="button" class="pdrop-trigger inline-select cp-trigger" data-cp-cfg="${_escHtml(cfg.id)}" data-cp-id="${_escHtml(sp.id)}" aria-label="${_escHtml(sp.label || sp.id)}">`
+      + `<span class="pdrop-trigger-label">${curLabel}</span><span class="pdrop-caret">▾</span></button>`;
+    if (!tip) return `<span class="custom-param-line">${_escHtml(before)}${dropdown}${_escHtml(after)}</span>`;
+    // The ⓘ stays on the line of the sentence's last word (or of the dropdown,
+    // when only punctuation follows it) instead of wrapping onto a line alone.
+    const cut = after.lastIndexOf(' ');
+    const tail = (cut >= 0 ? _escHtml(after.slice(cut + 1)) : dropdown + _escHtml(after)) + ' ' + tip;
+    return `<span class="custom-param-line">${_escHtml(before)}${cut >= 0 ? dropdown + _escHtml(after.slice(0, cut + 1)) : ''}<span class="cp-tail">${tail}</span></span>`;
+  }).join(' ');
   return `<div class="custom-params">${rows}</div>`;
 }
 
@@ -2740,13 +3302,13 @@ function _cpDocDown(e) {
 function openCustomParamPopup(trigger, cfg, sp) {
   if (_cpOpen && _cpOpen.trigger === trigger) { closeCustomParamPopup(); return; }
   closeCustomParamPopup();
-  const opts = customParamOptions(sp);
   const cur = customParamValue(cfg, sp);
+  const opts = customParamOptionsWithCurrent(sp, cur);
   const popup = document.createElement('div');
   popup.className = 'pdrop-popup';
   popup.innerHTML = `<div class="pdrop-head">final value if chosen</div>` + opts.map((o, i) =>
     `<div class="pdrop-row${String(o.value) === String(cur) ? ' selected' : ''}" data-cp-i="${i}">
-       <span class="pdrop-rlabel">${_escHtml(o.label)}</span>
+       <span class="pdrop-rlabel">${_escHtml(customOptionText(sp, o))}</span>
        <span class="pdrop-track"><span class="pdrop-fill"></span></span>
        <span class="pdrop-rval">…</span>
      </div>`).join('');
@@ -2761,7 +3323,7 @@ function openCustomParamPopup(trigger, cfg, sp) {
     const i = +row.getAttribute('data-cp-i');
     const o = opts[i]; if (!o) return;
     const c = savedConfigs.find(x => x.id === cfg.id);
-    if (c) { c.params = c.params || {}; c.params[sp.id] = (typeof o.value === 'boolean') ? o.value : String(o.value); persistSavedConfigs(); if (typeof render === 'function') render(); }
+    if (c) { c.params = c.params || {}; c.params[sp.id] = (typeof o.value === 'boolean') ? o.value : String(o.value); delete _fitNotes[c.id]; persistSavedConfigs(); if (typeof render === 'function') render(); }
     closeCustomParamPopup();
   });
   const sel = popup.querySelector('.pdrop-row.selected');
@@ -2792,7 +3354,7 @@ function computeCustomParamBars(cfg, sp, opts, popup) {
     // startIdx/endIdx/initial/monthly/annualRaise left old bars on screen.
     const contribKey = globals.contributions ? JSON.stringify(globals.contributions) : '';
     const key = [cfg.code, JSON.stringify(merged), globals.startIdx, globals.endIdx, globals.initial, globals.monthly, globals.annualRaise,
-      globals.entryDate || '', globals.exitDate || '', contribKey, globals.weeklyDisplay ? 1 : 0].join('|');
+      globals.entryDate || '', globals.exitDate || '', contribKey, globals.displayGrain || '', globals.exactWindow ? 1 : 0, globals.depositsFromHistory ? 1 : 0, customDataStamp(ctx)].join('|');
     const cached = window._customPreviewCache[key];
     if (cached != null) { finals[i] = cached; draw(); return; }
     runCustomPreview(cfg, overrides, globals, (msg) => {
@@ -2823,6 +3385,433 @@ function cpFillBars(popup, finals) {
     row.classList.toggle('best', complete && i === bestIdx && maxT > 0);
   });
 }
+
+// ---- Fit: search a strategy's settings for the best CAGR or lowest drawdown ----
+// The user (2026-11-04): a Fit dropdown in the sidebar, "Best CAGR" and
+// "Lowest drawdown", that finds the best settings and sets them. "Lowest
+// drawdown" counts only settings whose final value beats buy & hold of the
+// fund the strategy holds most (the user's pick: the plain lowest drawdown
+// ends in cash). Settings marked fit: false (trading cost, cash interest, how
+// a switch is executed) stay as they are.
+//
+// The search runs on the chart's current period and money, like the bar
+// previews. Each setting in turn tries every option with the others held and
+// keeps the best; passes repeat until one changes nothing. Then each numeric
+// setting tries the values between its pick and the options next to it (whole
+// numbers for whole-number lists, fifths of the gap otherwise), so the result
+// can land between the dropdown's options. The runs go to a pool of sandbox
+// workers, one per spare core. "Lowest drawdown" then runs the whole search
+// again with the drawdown held where it landed (to FIT_DD_TOL) for the
+// highest CAGR within it (the user, 2026-11-05: "highest cagr for lowest
+// drawdown that beats buy hold"); before that, CAGR broke only exact ties.
+const FIT_MAX_PASSES = 4;
+const FIT_JOB_TIMEOUT_MS = 15000;
+const FIT_BETWEEN_MAX = 20;   // values tried on each side of a pick, between the options
+const FIT_DD_TOL = 0.001;     // the second stage's room over the drawdown found: 0.1 of a point, what the note shows
+const FIT_GOALS = {
+  cagr: { label: 'Best CAGR', tip: "The settings with the highest CAGR on the chart's period." },
+  dd:   { label: 'Lowest drawdown', tip: 'The smallest max drawdown among settings that still beat buy & hold, then the highest CAGR at that drawdown.' },
+};
+let _fit = null;          // the running search: { key, goal, phase, round, done, total, stopped, close }
+let _fitMenu = null;      // { menu, btn, key } while the goal menu is open
+// key (a code strategy's cfg id, or "panel:9sig" / "panel:sma") -> the last
+// fit's result { text, changes: [{ label, from, to }] }, until a setting is changed by hand
+const _fitNotes = {};
+
+// Sandbox workers sharing a job queue; run() resolves with the worker's
+// message, or null when the run failed, timed out or the pool was closed.
+// run(code, globals, rawParams, answer): answer 'values' asks the worker for
+// each row's date and value alone (see customWorkerMain).
+function fitPool() {
+  const size = Math.max(1, Math.min(6, (navigator.hardwareConcurrency || 4) - 1));
+  const data = buildCustomData();
+  const spawn = () => { const w = newCustomWorker(); w.postMessage({ type: 'data', data }); return w; };
+  const slots = Array.from({ length: size }, () => ({ w: spawn(), finish: null }));
+  const queue = [];
+  let seq = 0, closed = false;
+  const pump = () => {
+    for (const slot of slots) {
+      if (closed || slot.finish || !queue.length) continue;
+      const job = queue.shift(), reqId = ++seq;
+      const timer = setTimeout(() => { slot.w.terminate(); slot.w = spawn(); slot.finish(null); }, FIT_JOB_TIMEOUT_MS);
+      slot.finish = (msg) => { clearTimeout(timer); slot.finish = null; job.resolve(msg); pump(); };
+      slot.w.onmessage = (e) => { if (e.data && e.data.reqId === reqId && slot.finish) slot.finish(e.data.error ? null : e.data); };
+      slot.w.postMessage({ type: 'run', reqId, code: job.code, globals: job.globals, rawParams: job.rawParams, answer: job.answer });
+    }
+  };
+  return {
+    run: (code, globals, rawParams, answer) => new Promise(resolve => {
+      if (closed) { resolve(null); return; }
+      queue.push({ code, globals, rawParams, answer, resolve });
+      pump();
+    }),
+    close: () => {
+      if (closed) return;
+      closed = true;
+      queue.splice(0).forEach(job => job.resolve(null));
+      slots.forEach(s => { s.w.terminate(); if (s.finish) s.finish(null); });
+    },
+  };
+}
+
+// The final value and max drawdown (the panel's own measure) of one run.
+function fitScore(msg) {
+  const log = msg && msg.log;
+  if (!log || !log.length) return null;
+  let final = null;
+  for (let k = log.length - 1; k >= 0 && final == null; k--) { const v = log[k].value; if (typeof v === 'number' && isFinite(v)) final = v; }
+  if (final == null) return null;
+  const dd = msg.holdingsDD || customDailyDrawdown(log) || computeMaxDrawdown(log.map(r => r.value), log.map(r => r.date));
+  return { final, dd: dd.pct };
+}
+
+// Is a better than b for the goal? A failed run is never better. With the
+// drawdown goal a setting over the hurdle beats one under it; under it the
+// higher final value wins, so a search that starts under the hurdle climbs.
+// The drawdown goal's second stage ('cagrAt') keeps the drawdown found, up to
+// ddCap, and takes the higher final value within it.
+function fitBetter(goal, a, b, hurdle, ddCap) {
+  if (!a) return false;
+  if (!b) return true;
+  const more = a.final > b.final * (1 + 1e-9), sameFinal = Math.abs(a.final - b.final) <= b.final * 1e-9;
+  if (goal === 'cagr') return more || (sameFinal && a.dd < b.dd - 1e-9);
+  const aOver = a.final > hurdle, bOver = b.final > hurdle;
+  if (aOver !== bOver) return aOver;
+  if (!aOver) return more;
+  if (goal === 'cagrAt') {
+    const aIn = a.dd <= ddCap, bIn = b.dd <= ddCap;
+    if (aIn !== bIn) return aIn;
+    return aIn ? more || (sameFinal && a.dd < b.dd - 1e-9) : a.dd < b.dd - 1e-9;
+  }
+  return a.dd < b.dd - 1e-9 || (Math.abs(a.dd - b.dd) <= 1e-9 && more);
+}
+
+// A value as the dropdown stores it (strings, booleans as they are).
+const fitStored = (v) => typeof v === 'boolean' ? v : String(v);
+const fitDecimals = (v) => (String(v).split('.')[1] || '').length;
+
+// Values between a numeric pick and the plain options on either side of it.
+function fitBetween(sp, picked) {
+  const opts = customParamOptions(sp);
+  if (!opts.every(o => typeof o.value === 'number')) return [];
+  const plain = opts.filter(o => String(o.label) === String(o.value)).map(o => o.value).sort((a, b) => a - b);
+  const x = Number(picked), k = plain.indexOf(x);
+  if (k < 0) return [];
+  const whole = plain.every(v => Number.isInteger(v)), out = new Set();
+  for (const nb of [plain[k - 1], plain[k + 1]]) {
+    if (nb == null) continue;
+    const gap = nb - x;
+    if (whole) {
+      const n = Math.min(Math.abs(gap) - 1, FIT_BETWEEN_MAX);
+      for (let i = 1; i <= n; i++) out.add(Math.round(x + gap * i / (n + 1)));
+    } else {
+      const d = Math.max(fitDecimals(x), fitDecimals(nb)) + 1;
+      for (let i = 1; i < 5; i++) out.add(+(x + gap * i / 5).toFixed(d));
+    }
+  }
+  out.delete(x);
+  return [...out].map(fitStored);
+}
+
+// ---- Round fit ----
+// The user (2026-11-21): "add option for fit, but in rounded numbers". Each
+// goal has a second menu entry that runs the same search over round values
+// only, by the rule the library's defaults were rounded with (2026-11-04):
+// from 10 up a multiple of 5; under 10 a whole number, or a half where the
+// setting's list has decimals; under 1 only 0 or 0.5. A value is judged by the
+// number it stands for (space[].number); a named choice ("Off", a fund,
+// Yes/No) has none and stays in the search.
+const FIT_ROUND = { label: 'round numbers', tip: 'The same search on round values only: multiples of 5 from 10 up, whole or half numbers below.' };
+const fitGoalLabel = (goal, round) => FIT_GOALS[goal].label + (round ? ', ' + FIT_ROUND.label : '');
+function fitIsRound(x, halves) {
+  const a = Math.abs(x);
+  if (a >= 10) return a % 5 === 0;
+  if (a >= 1) return Number.isInteger(a) || (halves && a % 0.5 === 0);
+  return a === 0 || a === 0.5;
+}
+// The first number in an option's text ("26%", "above 10", "1 quarter"), or null for one that reads as a word.
+const fitShownNumber = (text) => { const m = /-?\d+(?:\.\d+)?/.exec(String(text).replace('−', '-')); return m ? +m[0] : null; };
+// One setting of a round fit: its round values and named choices, the round
+// values between its options, and snap(v), the round value nearest to one that
+// is not round. The search starts from the snapped values, so every setting
+// ends on a round one. A setting with no round value keeps the value it has.
+function fitRoundSetting(s) {
+  const halves = s.values.some(v => { const x = s.number(v); return x != null && !Number.isInteger(x); });
+  const keeps = (v) => { const x = s.number(v); return x == null || fitIsRound(x, halves); };
+  const values = s.values.filter(keeps);
+  const numbers = values.filter(v => s.number(v) != null);
+  const snap = (v) => (keeps(v) || !numbers.length) ? v : d3.least(numbers, c => Math.abs(s.number(c) - s.number(v)));
+  return Object.assign({}, s, { values, between: v => s.between(v).filter(keeps), snap });
+}
+
+// The drawdown goal's hurdle: buy & hold of the fund the strategy holds most
+// in its current run, with the chart's money (the bar previews' B&H finals).
+function fitHurdle(cfg) {
+  const rows = {};
+  ((window._customLogs || {})[cfg.id] || []).forEach(r => {
+    const h = typeof r.held === 'string' ? r.held.toLowerCase() : '';
+    if (h && h !== 'cash') rows[h] = (rows[h] || 0) + 1;
+  });
+  const fund = Object.keys(rows).sort((a, b) => rows[b] - rows[a])[0];
+  const finals = fund && typeof window.previewBhFinals === 'function' ? window.previewBhFinals() : null;
+  return finals && finals[fund] > 0 ? { fund, final: finals[fund] } : { fund: fund || null, final: null };
+}
+
+// One percentage for the whole search (the user: "can we have a clear
+// progress"): the rounds share the first 90%, a quarter of it each, and a
+// round that changes nothing jumps to 90%; the values between the options
+// take the last 10%.
+const FIT_ROUNDS_SHARE = 0.9;
+function fitPercent(f) {
+  const part = f.total ? f.done / f.total : 0;
+  const share = f.phase === 'between'
+    ? FIT_ROUNDS_SHARE + (1 - FIT_ROUNDS_SHARE) * part
+    : FIT_ROUNDS_SHARE * (f.round - 1 + part) / FIT_MAX_PASSES;
+  // The drawdown goal's two stages split the percentage in half.
+  const stages = f.stages || 1, stage = f.stage || 1;
+  return Math.min(99, Math.floor(100 * (stage - 1 + share) / stages));
+}
+function fitProgressText(f) { return `Fitting ${fitPercent(f)}% · Stop`; }
+// What the search is doing now, on hover.
+function fitStepText(f) {
+  const stage = (f.stages || 1) > 1 ? (f.stage === 2 ? 'Second stage, the highest CAGR at the drawdown found. ' : 'First stage, the lowest drawdown. ') : '';
+  return stage + (f.phase === 'between'
+    ? 'Last step: trying values between the options next to each pick.'
+    : `Round ${f.round} of up to ${FIT_MAX_PASSES}: each setting tries every option while the others stay put. A round that changes nothing ends the rounds early.`);
+}
+function fitShowProgress() {
+  if (!_fit) return;
+  document.querySelectorAll(`[data-fit-key="${CSS.escape(_fit.key)}"]`).forEach(b => {
+    b.textContent = fitProgressText(_fit);
+    b.title = fitStepText(_fit);
+    b.style.setProperty('--fit-pct', fitPercent(_fit) + '%');
+  });
+}
+
+// The search, shared by code strategies and the built-in panels. space lists
+// the settings it may change: { id, values, between(v) } with each setting's
+// candidate values and the values between the options next to a pick (none
+// for a built-in <select>, which can only hold its options). measure(values)
+// resolves to { final, dd } or null. cur holds every setting, is where the
+// search starts, and ends on the search's picks. Resolves to the best result.
+async function fitSearch(state, space, cur, measure, goal, hurdleFinal) {
+  let best = await measure(Object.assign({}, cur)), stage = goal, ddCap = Infinity;
+  // One setting tries its values with the others held; the best stays.
+  const sweep = async (s, values) => {
+    const tries = values.filter(v => String(v) !== String(cur[s.id]));
+    const results = await Promise.all(tries.map(v => measure(Object.assign({}, cur, { [s.id]: v }))
+      .then(r => { state.done++; fitShowProgress(); return r; })));
+    if (state.stopped) return false;
+    let pick = -1;
+    results.forEach((r, i) => { if (fitBetter(stage, r, pick < 0 ? best : results[pick], hurdleFinal, ddCap)) pick = i; });
+    if (pick < 0) return false;
+    cur[s.id] = tries[pick];
+    best = results[pick];
+    return true;
+  };
+  // The rounds over the options, then the values between the options next to each pick.
+  const search = async () => {
+    for (let round = 1; round <= FIT_MAX_PASSES && !state.stopped; round++) {
+      Object.assign(state, { round, done: 0, total: space.reduce((n, s) => n + s.values.length, 0) });
+      let changed = false;
+      for (const s of space) { if (state.stopped) break; if (await sweep(s, s.values)) changed = true; }
+      if (!changed) break;
+    }
+    if (!state.stopped) {
+      const between = space.map(s => ({ s, values: s.between(cur[s.id]) }));
+      Object.assign(state, { phase: 'between', done: 0, total: between.reduce((n, b) => n + b.values.length, 0) });
+      fitShowProgress();
+      for (const b of between) { if (state.stopped) break; await sweep(b.s, b.values); }
+    }
+  };
+  await search();
+  // The drawdown goal's second stage (the user, 2026-11-05: "highest cagr for
+  // lowest drawdown that beats buy hold"): the drawdown found is held, to
+  // FIT_DD_TOL, and the search runs again for the highest CAGR within it.
+  if (goal === 'dd' && !state.stopped && best && best.final > hurdleFinal) {
+    stage = 'cagrAt'; ddCap = best.dd + FIT_DD_TOL;
+    Object.assign(state, { stage: 2, phase: 'rounds', round: 1, done: 0, total: 0 });
+    await search();
+  }
+  return best;
+}
+// One fit from start to the result note: runs the search, sets what it found
+// (job.apply), and writes the change list. job.round makes it a round fit.
+async function fitRun(job) {
+  const state = _fit = { key: job.key, goal: job.goal, stage: 1, stages: job.goal === 'dd' ? 2 : 1, phase: 'rounds', round: 1, done: 0, total: 0, stopped: false, close: job.close };
+  delete _fitNotes[job.key];
+  render();
+  const before = Object.assign({}, job.cur);
+  const start = await job.measure(Object.assign({}, before));
+  const space = job.round ? job.space.map(fitRoundSetting) : job.space;
+  if (job.round) space.forEach(s => { job.cur[s.id] = s.snap(job.cur[s.id]); });
+  const best = await fitSearch(state, space, job.cur, job.measure, job.goal, job.hurdle && job.hurdle.final);
+  job.close();
+  _fit = null;
+  if (state.stopped) { render(); return; }
+  // The drawdown goal with nothing over the hurdle: the climb toward it is not
+  // a result, so the settings stay as they were (the note says nothing changed).
+  if (job.goal === 'dd' && !(best && job.hurdle && best.final > job.hurdle.final)) Object.assign(job.cur, before);
+  const changed = job.space.filter(s => String(job.cur[s.id]) !== String(before[s.id]));
+  // Each changed setting, old → new, as its dropdown reads (the user: "a quick summary of what changed").
+  const changes = changed.map(s => ({ label: s.label, from: s.text(before[s.id]), to: s.text(job.cur[s.id]) }));
+  if (changed.length) job.apply(job.cur, changed);
+  _fitNotes[job.key] = { text: fitNoteText(job.goal, !!job.round, job.cagrOf, start, best, job.hurdle, changed.length), changes };
+  render();
+}
+// Runs each distinct setting combination once per fit.
+const fitMemo = (memo, run) => (values) => {
+  const k = JSON.stringify(values);
+  if (!memo.has(k)) memo.set(k, run(values));
+  return memo.get(k);
+};
+// The drawdown goal with no buy & hold line to beat: say so, change nothing.
+function fitNoHurdle(key, fund) {
+  _fitNotes[key] = { text: fund ? `No buy & hold line for ${fund.toUpperCase()} to compare with, so nothing changed.` : 'The strategy holds no fund on this period, so nothing changed.', changes: [] };
+  render();
+}
+// Fit for a code strategy (runs in the sandbox worker pool).
+async function runCustomFit(cfgId, goal, round) {
+  const cfg = savedConfigs.find(c => c.id === cfgId), ctx = window._customCtx;
+  if (_fit || !cfg || !cfg.code || !ctx) return;
+  const schema = getCustomSchema(cfg);
+  const params = schema.filter(sp => sp && sp.id != null && sp.fit !== false && customParamOptions(sp).length > 1);
+  if (!params.length) return;
+  let hurdle = null;
+  if (goal === 'dd') {
+    const h = fitHurdle(cfg);
+    if (!h.final) { fitNoHurdle(cfgId, h.fund); return; }
+    hurdle = h;
+  }
+  const globals = computeCustomGlobals(cfg, ctx), pool = fitPool();
+  const cur = {};
+  schema.forEach(sp => { if (sp && sp.id != null) cur[sp.id] = fitStored(customParamValue(cfg, sp)); });
+  // The number a value stands for: a plain numeric option's own value, a number between the options, or null for a named choice.
+  const numberOf = (sp) => {
+    const options = new Map(customParamOptions(sp).map(o => [String(o.value), typeof o.value === 'number' && String(o.label) === String(o.value) ? o.value : null]));
+    const between = (v) => typeof v === 'string' && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null;
+    return v => options.has(String(v)) ? options.get(String(v)) : between(v);
+  };
+  await fitRun({
+    key: cfgId, goal, round, hurdle, cur, close: pool.close,
+    space: params.map(sp => ({ id: sp.id, label: fitLabel(schema, sp), values: customParamOptions(sp).map(o => fitStored(o.value)),
+      between: v => fitBetween(sp, v), text: v => customOptionLabel(sp, v), number: numberOf(sp) })),
+    measure: fitMemo(new Map(), p => pool.run(cfg.code, globals, p).then(fitScore)),
+    cagrOf: f => cfgMoneyWeightedCAGR(ctx, f),
+    apply: (values, changed) => {
+      cfg.params = cfg.params || {};
+      changed.forEach(s => { cfg.params[s.id] = values[s.id]; });
+      persistSavedConfigs();
+    },
+  });
+}
+// The built-in panels Fit can search, and the select naming the fund each buys
+// (the drawdown goal's buy & hold hurdle).
+const FIT_PANELS = { '9sig': { fund: 'select-9sig-underlying' }, sma: { fund: 'select-sma-underlying' } };
+const FIT_YIELD_MS = 25;
+// Fit for a built-in 9sig or SMA panel. Their engines run on the page, so the
+// runs go one at a time with a pause every FIT_YIELD_MS for the progress and
+// Stop. Which selects it may change, their names and one run's result come
+// from js/preview-dropdown.js (window.previewFit), which owns those engines'
+// option previews.
+async function runNativeFit(type, goal, round) {
+  const pf = window.previewFit, key = 'panel:' + type;
+  if (_fit || !FIT_PANELS[type] || !pf) return;
+  const selects = pf.selects(type).map(id => document.getElementById(id)).filter(el => el && !el.disabled && el.options.length > 1);
+  if (!selects.length) return;
+  let hurdle = null;
+  if (goal === 'dd') {
+    const fund = document.getElementById(FIT_PANELS[type].fund).value, finals = window.previewBhFinals();
+    if (!(finals[fund] > 0)) { fitNoHurdle(key, fund); return; }
+    hurdle = { fund, final: finals[fund] };
+  }
+  const base = pf.base(type), cur = {};
+  selects.forEach(el => { cur[el.id] = el.value; });
+  let chain = Promise.resolve(), lastYield = performance.now();
+  const runOne = (values) => (chain = chain.then(async () => {
+    if (performance.now() - lastYield > FIT_YIELD_MS) { await new Promise(r => setTimeout(r, 0)); lastYield = performance.now(); }
+    if (!_fit || _fit.stopped) return null;
+    try { return pf.measure(type, base, values); } catch (e) { console.error('Fit: a run failed', e); return null; }
+  }));
+  const optionText = (el, v) => { const o = Array.from(el.options).find(x => x.value === String(v)); return o ? o.textContent.trim() : String(v); };
+  await fitRun({
+    key, goal, round, hurdle, cur, close: () => {},
+    // A select's value can be in another unit than its text ("1 quarter" is 3 months), so a round fit goes by the text.
+    space: selects.map(el => ({ id: el.id, label: pf.name(el.id), values: Array.from(el.options).filter(o => !o.disabled).map(o => o.value),
+      between: () => [], text: v => optionText(el, v), number: v => fitShownNumber(optionText(el, v)) })),
+    measure: fitMemo(new Map(), runOne),
+    cagrOf: f => window._mwCagrOfFinal(f),
+    apply: (values) => {
+      applyControlParams(type, Object.assign(captureParams(type), values));
+      if (typeof saveSliders === 'function') saveSliders();
+    },
+  });
+}
+function runFit(key, goal, round) { return key.startsWith('panel:') ? runNativeFit(key.slice(6), goal, round) : runCustomFit(key, goal, round); }
+
+// A setting's name for the change list: its section's head ("Ceiling" of
+// "Ceiling — step aside") and its label without the unit in brackets, so two
+// settings with similar labels in different sections read apart.
+function fitLabel(schema, sp) {
+  let section = '';
+  for (const s of schema) {
+    if (s === sp) break;
+    if (s && s.id == null && s.section) section = String(s.section).split(' — ')[0];
+  }
+  const name = String(sp.label || sp.id).replace(/\s*\([^()]*\)\s*$/, '');
+  return section ? `${section} · ${name}` : name;
+}
+// The result under Settings: what moved, then each changed setting.
+function buildFitNoteHtml(note) {
+  const list = note.changes.length
+    ? `<ul class="fit-changes">${note.changes.map(c => `<li>${_escHtml(c.label)}: ${_escHtml(c.from)} → <b>${_escHtml(c.to)}</b></li>`).join('')}</ul>` : '';
+  return `<div class="fit-note">${_escHtml(note.text)}${list}</div>`;
+}
+// The result line under Settings: what moved, on the chart's period.
+function fitNoteText(goal, round, cagrOf, start, best, hurdle, nChanged) {
+  if (!best) return 'The runs failed, so nothing changed.';
+  const cagr = (r) => cagrOf(r.final).toFixed(1) + '%';
+  const dd = (r) => (r.dd * 100).toFixed(1) + '%';
+  const inRound = round ? ` in ${FIT_ROUND.label}` : '';
+  if (goal === 'dd' && !(best.final > hurdle.final)) return `No setting${inRound} beat buy & hold ${hurdle.fund.toUpperCase()} (${cagr(hurdle)} a year) here, so nothing changed.`;
+  if (!nChanged) return `${fitGoalLabel(goal, round)}: the current settings are already the best found.`;
+  const moved = `CAGR ${start ? cagr(start) + ' → ' : ''}${cagr(best)}, max drawdown ${start ? dd(start) + ' → ' : ''}${dd(best)}`;
+  const changed = `${nChanged} setting${nChanged > 1 ? 's' : ''} changed`;
+  if (goal === 'cagr') return `${fitGoalLabel(goal, round)}: ${changed}. ${moved}.`;
+  const bh = `buy & hold ${hurdle.fund.toUpperCase()} (${cagr(hurdle)} a year)`;
+  // Settings under the hurdle climb to it first, so the drawdown can grow.
+  return start && !(start.final > hurdle.final)
+    ? `The current settings don't beat ${bh}. The lowest drawdown${inRound} that does, and the highest CAGR at it, ${changed}: ${moved}.`
+    : `${FIT_GOALS.dd.label}${inRound} that still beats ${bh}, and the highest CAGR at it, ${changed}: ${moved}.`;
+}
+
+// The Fit button beside "Reset to default"; a running search shows its progress and stops on click.
+function buildFitButtonHtml(key) {
+  const running = _fit && _fit.key === key;
+  const tip = "Searches the settings for the best result on the chart's current period and money, and sets them. Costs, cash interest and how trades execute stay as they are.";
+  return `<span class="settings-fit-wrap"><button type="button" class="settings-reset-btn settings-fit-btn${running ? ' running' : ''}" data-fit-key="${_escHtml(key)}"${_fit && !running ? ' disabled' : ''}${running ? ` title="${_escHtml(fitStepText(_fit))}" style="--fit-pct:${fitPercent(_fit)}%"` : ''}>${running ? _escHtml(fitProgressText(_fit)) : 'Fit ▾'}</button>`
+    + `<span class="info-icon" tabindex="0" data-tip="${_escHtml(tip)}">ⓘ</span></span>`;
+}
+function openFitMenu(btn, key) {
+  closeFitMenu();
+  const menu = document.createElement('div');
+  menu.className = 'pdrop-popup fit-menu';
+  // Each goal, then the same goal on round values.
+  menu.innerHTML = Object.keys(FIT_GOALS).flatMap(k => [false, true].map(round =>
+    `<div class="fit-menu-item" data-fit-goal="${k}"${round ? ' data-fit-round' : ''}><b>${_escHtml(fitGoalLabel(k, round))}</b><span>${_escHtml(round ? FIT_ROUND.tip : FIT_GOALS[k].tip)}</span></div>`)).join('');
+  document.body.appendChild(menu);
+  positionCpPopup(menu, btn);
+  menu.style.maxHeight = '';
+  _fitMenu = { menu, btn, key };
+  document.addEventListener('keydown', _fitMenuKey, true);
+}
+function closeFitMenu() {
+  if (!_fitMenu) return;
+  _fitMenu.menu.remove();
+  _fitMenu = null;
+  document.removeEventListener('keydown', _fitMenuKey, true);
+}
+function _fitMenuKey(e) { if (e.key === 'Escape') closeFitMenu(); }
 
 // Built-in header labels + tooltips for the log keys the build prompt asks a
 // strategy to write. Following the contract therefore buys an SMA-quality
@@ -2863,21 +3852,28 @@ function toggleCustomLogEase(hide) {
   if (body) body.querySelectorAll('.custom-log-wrap').forEach(w => w.classList.toggle('hide-dca', _customLogHideEase));
 }
 
-// Format one cell by key name: "price" → a price, "share"/"unit"/"qty" → a share
-// count, "pct"/"percent" → a percentage, anything else numeric → dollars. The
-// build prompt spells this rule out, so strategies name their keys for it.
-function fmtCustomLogCell(k, v) {
+const fmtLogSignedPercent = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + '%';
+
+// Format one cell. A key the strategy also draws as a chart line in percent or
+// as a plain reading (`unit`: "%" or "num", e.g. a lead, an RSI, the NFCI)
+// prints in that unit. Otherwise by key name: "price" → a price,
+// "share"/"unit"/"qty" → a share count, "pct"/"percent" → a percentage,
+// anything else numeric → dollars. The build prompt spells this rule out, so
+// strategies name their keys for it.
+function fmtCustomLogCell(k, v, unit) {
   if (v == null || v === '') return '';
   const lk = String(k).toLowerCase();
-  if (lk === 'date') return (typeof fmtLogDate === 'function') ? fmtLogDate(String(v)) : _escHtml(v);
+  if (lk === 'date') return _escHtml(typeof fmtLogDate === 'function' ? fmtLogDate(String(v)) : v);
   if (typeof v === 'boolean') return v ? 'yes' : 'no';
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) return '—';
+    if (unit === '%') return fmtLogSignedPercent(v);
+    if (unit === 'num') return (v < 0 ? '−' : '') + String(+Math.abs(v).toFixed(2));
     // Price-like keys keep per-share precision — that covers the indicator
     // levels a strategy logs alongside the price it compared them against.
     if (/price|sma|ema|median|avg|mean/.test(lk)) return v > 0 ? ((typeof fmtLogPrice === 'function') ? fmtLogPrice(v) : '$' + v.toFixed(2)) : '—';
     if (lk.includes('share') || lk.includes('unit') || lk.includes('qty')) return (typeof fmtLogShares === 'function') ? fmtLogShares(v) : String(+v.toFixed(2));
-    if (lk.includes('pct') || lk.includes('percent')) return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + '%';
+    if (lk.includes('pct') || lk.includes('percent')) return fmtLogSignedPercent(v);
     if ((lk.includes('contrib') || lk.includes('deposit') || lk === 'fee') && v === 0) return '';
     return (typeof fmtFull === 'function') ? fmtFull(Math.round(v)) : String(Math.round(v));
   }
@@ -2888,8 +3884,11 @@ function fmtCustomLogCell(k, v) {
 // rows, a tooltip on every column header, colour-coded actions with the gain
 // since the previous row, checkboxes to collapse contribution / ease-in rows,
 // and trade rows wired to their chart marker (data-mkey, handled in chart.js).
-function buildCustomLogTableHtml(log, columns) {
+// `lines` are the chart lines the strategy declared: a key drawn in percent or
+// as a plain reading prints that way in the table too.
+function buildCustomLogTableHtml(log, columns, lines) {
   if (!log || !log.length) return '';
+  const lineUnit = Object.fromEntries((lines || []).filter(ln => ln && (ln.unit === '%' || ln.unit === 'num')).map(ln => [ln.key, ln.unit]));
   // Column metadata: built-ins, overridden by whatever the strategy declared.
   const meta = {};
   for (const k in CUSTOM_LOG_COLS) meta[k] = CUSTOM_LOG_COLS[k];
@@ -2932,16 +3931,22 @@ function buildCustomLogTableHtml(log, columns) {
   const kindOf = (r) => (typeof customActionKind === 'function') ? customActionKind(r && r.action) : 'hold';
   const ACT_CLASS = { buy: 'action-buy', sell: 'action-sell', switch: 'action-switch', rebalance: 'action-rebal',
                       ease: 'action-buy', contribution: 'action-hold', start: 'action-hold', end: 'action-hold', hold: 'action-hold' };
-  let contribCount = 0, easeCount = 0;
+  // A trade of the strategy's own ("Strategy trades only" keeps it): the kinds the chart marks, the
+  // slices of an eased buy, and an opening row that holds a fund. A contribution, a snapshot and the
+  // closing row are none of these.
+  const traded = (row, kind) => kind in CUSTOM_EVENT_STYLE || kind === 'ease' || (kind === 'start' && logHoldsFund(row && row.held));
+  let contribCount = 0, easeCount = 0, tradeCount = 0;
   const body = log.map((row, i) => {
     const kind = kindOf(row);
     if (kind === 'contribution') contribCount++;
     if (kind === 'ease') easeCount++;
+    const isTrade = traded(row, kind);
+    if (isTrade) tradeCount++;
     const hasMarker = !!(typeof CUSTOM_EVENT_STYLE !== 'undefined' && CUSTOM_EVENT_STYLE[kind] && +((row || {}).value) > 0);
     const cls = hasMarker ? 'log-row-mk' : kind === 'contribution' ? 'log-row-contrib' : kind === 'ease' ? 'log-row-dca' : '';
-    const trAttr = (cls ? ` class="${cls}"` : '') + (hasMarker ? ` data-mkey="${i}"` : '');
+    const trAttr = logRowClassAttr(cls, isTrade ? LOG_TRADE_ROW : '') + (hasMarker ? ` data-mkey="${i}"` : '');
     const cells = keys.map(k => {
-      if (k !== 'action') return `<td>${fmtCustomLogCell(k, row ? row[k] : null)}</td>`;
+      if (k !== 'action') return `<td>${fmtCustomLogCell(k, row ? row[k] : null, lineUnit[k])}</td>`;
       // Action cell: the strategy's own label, coloured by kind, with the gain
       // since the previous row — the same treatment the SMA log gives it.
       const label = (typeof customActionLabel === 'function') ? customActionLabel(row && row.action) : _escHtml((row && row.action) || '');
@@ -2968,7 +3973,7 @@ function buildCustomLogTableHtml(log, columns) {
       const yrs = ms / 31557600000; // 365.25 d
       return `<span style="margin-right:16px;white-space:nowrap"><b style="color:var(--text)">${_escHtml(a)}</b> ${(ms / holdTot * 100).toFixed(1)}% <span style="opacity:.55">(${yrs >= 1 ? yrs.toFixed(1) + 'y' : Math.round(yrs * 12) + 'mo'})</span></span>`;
     }).join('') : '';
-    if (chips) holdSummary = `<div style="font-size:12px;color:var(--text-muted);margin-top:10px"><span style="font-weight:600;color:var(--text);margin-right:8px">Time in each holding:</span>${chips}</div>`;
+    if (chips) holdSummary = `<div style="font-size:calc(12px * var(--ui-scale));color:var(--text-muted);margin-top:10px"><span style="font-weight:600;color:var(--text);margin-right:8px">Time in each holding:</span>${chips}</div>`;
   }
 
   const contribToggle = contribCount > 0 ? `
@@ -2983,9 +3988,9 @@ function buildCustomLogTableHtml(log, columns) {
     </label>` : '';
   const wrapCls = 'custom-log-wrap' + (_customLogHideContrib ? ' hide-contrib' : '') + (_customLogHideEase ? ' hide-dca' : '');
   return `
-    <div class="log-section">
+    <div class="${logSectionClass(tradeCount)}">
     ${logSectionHeaderHtml(`Transaction Log (${log.length} rows)`, 18)}
-    <div style="display:flex;gap:16px;flex-wrap:wrap">${contribToggle}${easeToggle}</div>
+    ${logTogglesRowHtml(logTradesToggleHtml(tradeCount), contribToggle, easeToggle)}
     <div class="${wrapCls}"><table class="custom-log"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
     ${holdSummary}
     </div>`;
@@ -3085,9 +4090,10 @@ function renderCustomPanelBody(cfgId) {
   // needs nothing beyond rendering the control here, and its choice persists to
   // cfg.color like any saved strategy's.
   if (typeof buildColorPickerHtml === 'function') html += buildColorPickerHtml(cfg.type);
-  html += `<div class="custom-tickers-note">Your strategy can read these tickers: <code>tqqq</code>, <code>qld</code>, <code>qqq</code>, <code>spy</code>, <code>sso</code>, <code>spxl</code>, <code>sqqq</code> (daily closes). Base your rules on any of them.</div>`;
+  html += `<div class="custom-tickers-note">Your strategy can read these tickers: <code>tqqq</code>, <code>qld</code>, <code>qqq</code>, <code>spy</code>, <code>sso</code>, <code>spxl</code>, <code>sqqq</code>, <code>gld</code>, <code>soxl</code>, <code>soxx</code> (daily closes). Base your rules on any of them.</div>`;
   html += `<button type="button" id="custom-edit-builder" class="custom-edit-btn">Edit strategy</button>`;
-  if (cfg.desc) html += `<div class="custom-desc-readout">${_escHtml(cfg.desc)}</div>`;
+  // The description stays in the Edit strategy dialog only: the settings read
+  // as sentences and library entries show their rules (the user, 2026-11-04).
   if (err) html += `<div class="custom-error"><b>Couldn't run it:</b> ${_escHtml(err)} <span class="custom-error-hint">— click Edit strategy to fix the code.</span></div>`;
 
   // CAGR / Max DD / End (when the strategy ran successfully).
@@ -3105,19 +4111,31 @@ function renderCustomPanelBody(cfgId) {
       </div>`;
   }
 
+  // Its dollar lines for the main chart (`series`), each behind an eye chip.
+  const mainSeries = (window._customSeries || {})[cfgId];
+  if (!err && mainSeries && mainSeries.length) {
+    html += `<div class="strategy-panel-section-label" style="margin-top:14px">Lines on the main chart</div>
+      <div class="legend-chip-group">${mainSeries.map(sd => _configSubChipHtml(cfg, 'main:' + sd.key, sd.label, null, false)).join('')}</div>`;
+  }
+
   // Generated controls from the strategy's `params` (what it declared configurable).
   // Each change is passed back into run() as p.<id>.
-  const controls = buildCustomControlsHtml(cfg, getCustomSchema(cfg));
-  if (controls) html += `<div class="strategy-panel-section-label" style="margin-top:14px">Settings</div>${controls}`;
+  const schema = getCustomSchema(cfg), controls = buildCustomControlsHtml(cfg, schema);
+  if (controls) {
+    const atDefaults = schema.every(sp => sp.id == null || String(customParamValue(cfg, sp)) === String(coerceCustomVal(sp, sp.default)));
+    const fitNote = _fitNotes[cfg.id] ? buildFitNoteHtml(_fitNotes[cfg.id]) : '';
+    html += `<div class="strategy-panel-section-label settings-head" style="margin-top:14px"><span>Settings</span>`
+      + `<span class="settings-actions">${buildFitButtonHtml(cfg.id)}`
+      + `<button type="button" class="settings-reset-btn" data-custom-reset="${_escHtml(cfg.id)}"${atDefaults || (_fit && _fit.key === cfg.id) ? ' disabled' : ''}>Reset to default</button></span></div>${fitNote}${controls}`;
+  }
 
   // The signal mini chart: the lines the strategy declares (`lines:` in its
-  // code) drawn on their own scale in the panel, with per-line eye chips.
+  // code) drawn on their own scale in the panel; the eye on each of its end
+  // labels hides that line.
   const auxLines = (window._customLines || {})[cfgId] || null;
   if (auxLines && auxLines.length) {
-    const auxLog = (window._customLogs || {})[cfgId] || [];
     html += `<div class="strategy-panel-section-label" style="margin-top:14px">Signal chart</div>
-      <div class="legend-chip-group">${buildCustomLineChipsHtml(cfg, auxLines)}</div>
-      ${buildCustomLinesChartHtml(cfg, auxLines, auxLog, body.clientWidth)}`;
+      ${customSignalChartHtml(cfg, auxLines, body.clientWidth)}`;
   }
 
   // Live signal dashboard (whatever the strategy reported in `signals`), then
@@ -3125,7 +4143,10 @@ function renderCustomPanelBody(cfgId) {
   const _cLog = (window._customLogs || {})[cfgId] || [];
   html += buildCustomSignalMetricsHtml((window._customSignals || {})[cfgId] || null,
                                        _cLog.length ? _cLog[_cLog.length - 1].date : null);
-  html += buildCustomLogTableHtml(_cLog, (window._customColumns || {})[cfgId] || null);
+  html += buildCustomLogTableHtml(_cLog, (window._customColumns || {})[cfgId] || null, auxLines);
+  // Its explanation with the current settings (`explain`), after the log as the 9sig panel had it.
+  const explain = (window._customExplain || {})[cfgId];
+  if (!err && explain) html += buildExplainHtml(explain);
 
   body.innerHTML = html;
   body.scrollTop = _scrollTop;
@@ -3219,7 +4240,10 @@ document.addEventListener('click', (e) => {
   // Cash line (persisted on the config, so it never flips to the canonical base).
   const subChip = tgt.closest('.cfg-sub-chip');
   if (subChip) {
-    const cfg = savedConfigs.find(c => c.id === subChip.getAttribute('data-config-id'));
+    // A base line's signal chart chips name its stand-in (js/chart.js's
+    // nativeSignalCfg), kept in memory rather than with the saved strategies.
+    const chipId = subChip.getAttribute('data-config-id');
+    const cfg = savedConfigs.find(c => c.id === chipId) || (/^base-/.test(chipId) && _currentPanelIdx != null ? nativeSignalCfg(_currentPanelIdx) : null);
     const key = subChip.getAttribute('data-config-sub');
     if (cfg && key) {
       cfg.subShown = cfg.subShown || {};
@@ -3313,9 +4337,12 @@ document.addEventListener('click', (e) => {
     if (!cfg || !c) return;
     cfg.code = c.value;
     persistSavedConfigs();
-    const id = cfg.id;
+    const id = cfg.id, isNew = _builderIsNew;
     closeCustomBuilder(false);
     if (typeof render === 'function') render();                      // schedules the sandboxed run
+    // A new strategy's panel opens at the default quarter of the page, however
+    // wide an earlier panel was dragged (js/controls.js's resetPanelWidth).
+    if (isNew && typeof resetPanelWidth === 'function') resetPanelWidth();
     if (typeof openCustomPanel === 'function') openCustomPanel(id);  // sidebar shows the line/log (or an error) when it returns
     return;
   }
@@ -3323,6 +4350,20 @@ document.addEventListener('click', (e) => {
   // In-sidebar save bar.
   const savenew = e.target.closest('[data-sc-savenew]');
   if (savenew) { saveConfigFromType(savenew.getAttribute('data-sc-savenew')); return; }
+  const reset = e.target.closest('[data-sc-reset]');
+  if (reset) { resetPanelToDefaults(reset.getAttribute('data-sc-reset')); return; }
+  const resetCustom = e.target.closest('[data-custom-reset]');
+  if (resetCustom) { resetCustomToDefaults(resetCustom.getAttribute('data-custom-reset')); return; }
+  // Fit: the button opens the goal menu, or stops a running search; a menu item starts one.
+  const fitGoal = e.target.closest('[data-fit-goal]');
+  if (fitGoal && _fitMenu) { const key = _fitMenu.key; closeFitMenu(); runFit(key, fitGoal.getAttribute('data-fit-goal'), fitGoal.hasAttribute('data-fit-round')); return; }
+  const fitBtn = e.target.closest('[data-fit-key]');
+  if (fitBtn) {
+    if (_fit && _fit.key === fitBtn.getAttribute('data-fit-key')) { _fit.stopped = true; _fit.close(); return; }
+    if (_fitMenu) closeFitMenu(); else openFitMenu(fitBtn, fitBtn.getAttribute('data-fit-key'));
+    return;
+  }
+  if (_fitMenu && !e.target.closest('.fit-menu')) closeFitMenu();
 
   // Parameters-panel config pills.
   const pill = e.target.closest('.saved-config-pill');

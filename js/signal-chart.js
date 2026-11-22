@@ -1,0 +1,1467 @@
+// js/signal-chart.js — the signal chart: a strategy's declared lines on their
+// own scale, a panel per group of lines (MINI_PANEL), with its trades, plus
+// every interaction on it (hover readout,
+// trade-band hover, ⌘/Ctrl + scroll zoom, ⌘/Ctrl + drag pan, plain-drag range
+// readout, Reset and Latest). It draws whatever rows its host hands it and
+// redraws through the host (setMiniChartHost): the strategy panel in
+// js/saved-configs.js, and the desktop widget page (widget.html,
+// js/widget-page.js). Formatting, colour and trade-marker helpers come from
+// js/utils.js and js/chart.js; _escHtml from js/saved-configs.js.
+
+// Where the charts are drawn. The page showing them registers a function that
+// redraws one in place (by its cfg id) from its own rows, width and zoom, or
+// every one when called without an id. A page may show several charts: each
+// keeps its own hover data (window._miniCharts) and zoom (window._miniZooms).
+let _miniChartHost = null;
+function setMiniChartHost(redraw) { _miniChartHost = redraw; }
+function _miniChartRerender(cfgId) { if (_miniChartHost) _miniChartHost(cfgId); }
+window._miniCharts = window._miniCharts || {};   // cfg id → what the handlers need to read that chart
+// The chart an event happened on, by the id its svg carries.
+function _miniDataOf(svg) {
+  const id = svg && svg.getAttribute('data-mini-id');
+  return id != null ? (window._miniCharts[id] || null) : null;
+}
+
+// Whether a custom signal line is currently shown (unset = shown).
+function customLineShown(cfg, key) { return ((cfg.subShown || {})[key]) !== false; }
+
+// The signal mini chart: the strategy's declared lines drawn in the sidebar
+// panel on their own scale. These are price-scale values ($50–$80) that would
+// be squashed unreadably under six-figure portfolio lines on the main chart —
+// here they get a log y-axis of their own, so a constant-% trigger renders as
+// a constant vertical gap and the crossings the rules fire on are visible.
+// Fixed viewBox, shared with the hover handlers below so the crosshair math
+// matches the drawing exactly. The SVG scales with the panel (lines grow
+// proportionally); text sizes and the margins around the plot are divided by
+// the render scale, so labels keep their pixel size and the date axis stays
+// the same few pixels under the plot — up to MINI_TEXT_REF_W; on a wider
+// panel they grow with the square root of the extra width, since 9px labels
+// read as specks on a plot three times the size. The rows come from
+// the daily detail run (customDetailLog in js/saved-configs.js) and are decimated to the pixel
+// budget of the current window, so zooming in draws more of the days until
+// every one is on screen.
+// H is the single-panel height. The user doubled it on 2026-11-05 ("make the
+// chart 2x more in height"), then with six panels on #52 asked for "all charts
+// 50% lower in height", which is this again; the extra gridlines stayed.
+const MINI_CHART = { W: 320, H: 148, padL: 6 };
+// The day-change badge's colours on a price line's label: styles.css's
+// --green-text and --red-text, as js/chart.js's end labels draw them.
+const MINI_DAY_CHANGE = { up: '#067d21', down: '#c81e1f' };
+const MINI_MUTED_TEXT = 'rgba(122,122,166,0.95)';   // secondary text on the chart (the latest-date label, an extended-hours row)
+// Lines measured on different things (two funds' prices, a lead in percent, a
+// stress index) can name a group: each group draws as its own panel, with its
+// own scale, unit and gutter labels, stacked on the one time axis in the order
+// the groups first appear. Lines without a group form the first panel. A
+// panel's height follows its line count: the first panel is full height; a
+// later one with a reading and one or two levels (up to three lines, such as
+// NFCI and its veto, or Turnaround Monday's close against the prior day's high
+// and low) is minShare of a full panel, and one with more lines full (fullAt);
+// a line declaring tall: true makes its panel full whatever the count (a
+// second fund's price over its relative pricing, #52's SOXL pair).
+// The gap between two panels is in px, divided by the render scale, with a
+// divider `rule` px under the panel above; addH is the viewBox height a full
+// panel after the first adds to the side panel's chart, a smaller one its
+// share of it (a chart given an aspect keeps its height and shares it out).
+const MINI_PANEL = { gap: 16, rule: 3, addH: 67, fullAt: 4, minShare: 0.25 };
+// Drawn points per pixel of plot width before a window is decimated.
+const MINI_POINTS_PER_PX = 2;
+// Pixel sizes, divided by the render scale when used: the trade strip above
+// the plot (the event hover lives there, apart from the value hover on the
+// plot), the room under the plot for the date labels, and the baseline gap
+// between plot and labels.
+const MINI_PX = { strip: 12, axis: 14, labelGap: 10, edge: 4 };   // edge: above a plot with no strip; axis: the date band under the plot, and above the strip on a chart taller than wide
+// Chart width (px) up to which text keeps its px size; the panel's default
+// width. Beyond it text scales by sqrt(width / this): 1.6× at 1000px.
+const MINI_TEXT_REF_W = 400;
+// The eye on each end label (and on the chips that share it, saved-configs.js
+// _configSubChipHtml): a 24×24 stroke icon, open and struck through.
+const MINI_EYE = {
+  open: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+  off: '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-7-10-7a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>',
+};
+// Trade-event areas. On a window of marksWithinMs or longer the bands crowd
+// each other and each reaches halfW (viewBox units) past its trades. On a
+// shorter one, where single trades can be told apart, a trade's band is a line
+// minPx wide on screen, in a stronger tint while it is under thinPx (the user,
+// 2026-11-22, at a band 2.5 px wide in a 10% tint: "it did not show vertical
+// band"), and two bands keep gapPx of plot between them, so a sale and the
+// buy of the next day read as two lines (the user, the same day, at two
+// day-wide bands touching: "it should show two lines for two events"). The
+// rest in viewBox units:
+// the gap under which neighbouring trades merge into one band (two bands closer than this
+// would overlap and hide each other), the widest a merged band may grow
+// before the next trade starts a new one (on a long view, trades weeks apart
+// would otherwise chain into one band covering months), how far outside a
+// band the hover still counts as on it, how many trades a hover lists, and
+// the widest window (two years) that still shows a mark at each trade's
+// crossing — on a longer view the bands say enough and the marks would only
+// speckle the lines.
+const MINI_EVENT = { halfW: 1.2, minPx: 6, gapPx: 2, thinPx: 12, mergeX: 4, maxSpanX: 10, hoverPad: 1.5, maxListed: 8, marksWithinMs: 2 * 365.25 * 86400000 };
+// Marks at the trade crossings: the main chart's symbol and colour per action
+// (CUSTOM_EVENT_STYLE: buy circle, sell hexagon, switch diamond) inside a
+// light ring per asset — the asset sold on a sell, the one bought otherwise —
+// so "sell TQQQ" and "buy SQQQ" read apart without a dark stroke; SQQQ, the
+// one inverse fund, gets a dashed ring. Sizes in px, divided by k when drawn;
+// hitPad is how far outside a mark the hover still counts as on it.
+const MINI_MARK = { r: 2.6, ring: 1.2, hitPad: 4 };
+const MINI_ASSET_RING = { tqqq: '#9cc0ff', qqq: '#ffcf8a', spy: '#dcb3ff', qld: '#8fe1ef', sso: '#ffb0d9', spxl: '#dcc0a0', sqqq: '#c4c4d4', gld: '#e6dc8c', soxl: '#8cd1ca', soxx: '#c6c3ea', cash: '#e3e3ec' };
+const MINI_ASSET_DASHED = { sqqq: true };
+// 'TQQQ' / 'tqqq+cash' → the first known ticker, as assetStrokeFor does.
+function _miniAssetKey(held) {
+  return String(held || '').toLowerCase().split(/[+/,\s]+/).find(part => MINI_ASSET_RING[part]) || null;
+}
+// Zoom and pan both wait for the modifier key (⌘ on a Mac, Ctrl elsewhere), so
+// a plain wheel keeps scrolling the panel and a plain drag keeps measuring a
+// range. With the key held, a wheel notch scales the visible span by
+// 2^(-deltaY × 0.002) around the date under the cursor, d3-zoom style, never
+// under minSpanMs or past the data, and a drag moves the window; a double-click
+// or the Reset button restores the full range. The zoom is kept per strategy,
+// so a re-render (resize, fresh log) preserves it.
+const MINI_ZOOM = { minSpanMs: 30 * 86400000, wheelK: 0.002, rightAnchorPx: 200 };
+// A touch screen: the hints say pinch and drag instead of the modifier key.
+const MINI_TOUCH_UI = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+const MINI_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MINI_WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const _miniShortDate = t => { const d = new Date(t); return `${d.getUTCDate()} ${MINI_MON[d.getUTCMonth()]} ${d.getUTCFullYear()}`; };
+const _miniDayMonth = t => { const d = new Date(t); return `${d.getUTCDate()} ${MINI_MON[d.getUTCMonth()]}`; };
+// Minutes to the close as a person says them: "26 min", "2 h", "2 h 26 min".
+const _miniCloseGap = min => min < 60 ? `${min} min` : `${Math.floor(min / 60)} h` + (min % 60 ? ` ${min % 60} min` : '');
+// A trade's day for its tooltip: weekday, then the log's date ("Tue 21 Dec 21").
+const _miniTradeDay = dateStr => `${MINI_WEEKDAY[new Date(dateStr + 'T00:00:00Z').getUTCDay()]} ${fmtLogDate(dateStr)}`;
+window._miniZooms = window._miniZooms || {};   // cfg id → { t0, t1 }; absent = the full range
+// fmt() rounds sub-$1000 values to whole dollars, which turns the low end of
+// a log axis (TQQQ opened at $0.42) into a "$0" label — keep decimals on
+// small prices instead.
+// A name as the compact layout stacks it: a row per word, a hyphenated word
+// broken after its hyphen ("Buy-back" reads "Buy-" over "back").
+function _miniNameRows(name) {
+  return name.split(' ').flatMap(word => word.replace(/-/g, '-\n').split('\n')).filter(Boolean);
+}
+// A value as its panel reads it: dollars, percent on a panel whose lines all
+// declare unit: "%" (a volatility, a share of the account), or a plain number
+// on one whose lines declare unit: "num" (an index reading such as NFCI).
+function _miniFmtValue(unit, v) {
+  if (unit === '%') return (Math.abs(v) < 10 ? v.toFixed(1) : String(Math.round(v))) + '%';
+  if (unit === 'num') return String(+v.toFixed(Math.abs(v) < 10 ? 2 : 1));
+  return _miniFmtPrice(v);
+}
+// How far a line moved over a dragged range: percent for prices, percentage
+// points on a panel in percent (a share going 40% to 60% moved +20 pts), the
+// plain difference on a panel of numbers. The sign and the colour follow the
+// figure as printed, so a move that rounds to nothing reads +0.0.
+function _miniRangeMove(unit, v0, v1) {
+  const change = unit === '%' || unit === 'num' ? v1 - v0 : (v0 > 0 ? (v1 / v0 - 1) * 100 : 0);
+  const digits = unit === 'num' ? 2 : 1, shown = +change.toFixed(digits) || 0;   // || 0: never "-0.0"
+  return { up: shown >= 0, text: (shown >= 0 ? '+' : '') + shown.toFixed(digits) + (unit === 'num' ? '' : unit === '%' ? ' pts' : '%') };
+}
+function _miniFmtPrice(v) {
+  const a = Math.abs(v);
+  return (v < 0 ? '-' : '') + (a >= 1000 ? fmt(a) : a === 0 ? '$0' : '$' + (a < 10 ? a.toFixed(2) : String(Math.round(a))));
+}
+// Date labels for the span on screen: years when it covers more than three,
+// month starts down to two months, week starts below that; at most `max`.
+function _miniTimeTicks(t0, t1, max) {
+  const DAY = 86400000, days = (t1 - t0) / DAY, d0 = new Date(t0), d1 = new Date(t1), out = [];
+  const MON = MINI_MON;
+  if (days > 3 * 365) {
+    const y0 = d0.getUTCFullYear(), y1 = d1.getUTCFullYear(), step = Math.max(1, Math.ceil((y1 - y0) / max));
+    for (let y = y0 + 1; y <= y1; y += step) out.push({ t: Date.UTC(y, 0, 1), label: String(y) });
+  } else if (days > 60) {
+    const step = Math.max(1, Math.ceil(days / 30.4 / max));
+    for (let y = d0.getUTCFullYear(), m = d0.getUTCMonth() + 1; ; m += step) {
+      const t = Date.UTC(y, m, 1);
+      if (t >= t1) break;
+      if (t > t0) out.push({ t, label: MON[new Date(t).getUTCMonth()] + ' ' + new Date(t).getUTCFullYear() });
+    }
+  } else {
+    const step = Math.max(1, Math.ceil(days / 7 / max));
+    const first = t0 + ((8 - d0.getUTCDay()) % 7 || 7) * DAY;   // the first Monday after t0
+    for (let t = Date.UTC(new Date(first).getUTCFullYear(), new Date(first).getUTCMonth(), new Date(first).getUTCDate()); t < t1; t += step * 7 * DAY) {
+      out.push({ t, label: new Date(t).getUTCDate() + ' ' + MON[new Date(t).getUTCMonth()] });
+    }
+  }
+  return out;
+}
+// Points to draw for a window: all of them when they fit the budget, else the
+// lowest and highest of each bucket, in time order — the extremes are what a
+// price line is about, and a line through them is indistinguishable from the
+// full one at that width. The hover keeps every point. A gap anywhere in a
+// bucket breaks the line at the bucket's first drawn point.
+function _miniDecimate(pts, budget) {
+  if (pts.length <= budget) return pts;
+  const per = pts.length / budget, out = [];
+  for (let b = 0; b < budget; b++) {
+    const from = Math.floor(b * per), to = Math.min(pts.length, Math.floor((b + 1) * per));
+    if (to <= from) continue;
+    let lo = pts[from], hi = pts[from], gap = false;
+    for (let i = from; i < to; i++) { const p = pts[i]; if (p.v < lo.v) lo = p; if (p.v > hi.v) hi = p; gap = gap || p.gap; }
+    const first = lo.t <= hi.t ? lo : hi, second = first === lo ? hi : lo;
+    out.push(gap && !first.gap ? Object.assign({}, first, { gap: true }) : first);
+    if (second !== first) out.push(second);
+  }
+  return out;
+}
+// One trade symbol in SVG, the main chart's shapes (drawSmaMarker) at radius r.
+// The y transform: log10 by default, the value itself on a linear axis.
+function _miniScaleOf(linear) { return linear ? v => v : v => Math.log10(v); }
+// A value's y on its panel (buildCustomLinesChartHtml's panels), on that panel's axis.
+function _miniPanelY(P, v) {
+  return P.top + (P.yHi - (P.linear ? v : Math.log10(v))) / (P.yHi - P.yLo) * (P.bottom - P.top);
+}
+// A round step (1, 2, 2.5 or 5 times a power of ten) near span / count.
+function _miniNiceStep(span, count) {
+  // The nice step (1, 2, 2.5, 5, 10 times a power of ten) nearest span / count
+  // in ratio, so a 170-point span asked for six gets 25s (seven lines), not
+  // the 50s rounding up gives (three); the next coarser one when the nearest
+  // would overshoot count by more than a quarter, so the labels keep their room.
+  const raw = span / count, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const nice = [1, 2, 2.5, 5, 10, 20].map(f => f * p);
+  const i = nice.reduce((best, s, j) => Math.abs(Math.log(s / raw)) < Math.abs(Math.log(nice[best] / raw)) ? j : best, 0);
+  return span / nice[i] > count * 1.25 ? nice[i + 1] : nice[i];
+}
+function _miniMarkSvg(shape, x, y, r, attrs) {
+  const ring = n => Array.from({ length: n }, (_, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return (x + r * Math.cos(a)).toFixed(2) + ',' + (y + r * Math.sin(a)).toFixed(2); }).join(' ');
+  if (shape === 'circle') return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${r.toFixed(2)}" ${attrs}/>`;
+  if (shape === 'hexagon') return `<polygon points="${ring(6)}" ${attrs}/>`;
+  if (shape === 'diamond') return `<polygon points="${ring(4)}" ${attrs}/>`;
+  return `<rect x="${(x - r).toFixed(2)}" y="${(y - r).toFixed(2)}" width="${(2 * r).toFixed(2)}" height="${(2 * r).toFixed(2)}" ${attrs}/>`;
+}
+// The same share for the tooltip's dot: a clip to the wedge, drawn past the dot
+// so its ring (a box-shadow) is kept on that side only.
+function _miniWedgeClip(a, b) {
+  const pts = ['50% 50%'], steps = Math.max(2, Math.ceil((b - a) * 24));
+  for (let i = 0; i <= steps; i++) {
+    const ang = -Math.PI / 2 + (a + (b - a) * i / steps) * 2 * Math.PI;
+    pts.push(`${(50 + 110 * Math.cos(ang)).toFixed(1)}% ${(50 + 110 * Math.sin(ang)).toFixed(1)}%`);
+  }
+  return `polygon(${pts.join(', ')})`;
+}
+// The share of the account a buy moved, as [held before, held after] in
+// fractions of the account (a slice, or the rest after one), or null for a
+// buy of everything or a row without the fields to tell. The signal chart
+// and the desktop widget (widget/widget-data.cjs) draw it as a wedge.
+function customTradeShare(log, i) {
+  const r = log[i], prev = log[i - 1], val = +r.value, hv = +r.holdingsValue, to = String(r.held || '');
+  if (!(val > 0) || !Number.isFinite(hv)) return null;
+  const f1 = Math.max(0, Math.min(1, hv / val));
+  const f0 = prev && String(prev.held || '') === to && +prev.shares > 0 && +r.price > 0 ? Math.max(0, Math.min(f1, +prev.shares * +r.price / val)) : 0;
+  return f1 - f0 > 0.02 && f1 - f0 < 0.95 ? [f0, f1] : null;
+}
+// A pie wedge from fraction a to fraction b of a circle, clockwise from 12 o'clock.
+function _miniWedgePath(x, y, r, a, b) {
+  const pt = f => { const ang = -Math.PI / 2 + f * 2 * Math.PI; return (x + r * Math.cos(ang)).toFixed(2) + ',' + (y + r * Math.sin(ang)).toFixed(2); };
+  return `M${x.toFixed(2)},${y.toFixed(2)} L${pt(a)} A${r.toFixed(2)},${r.toFixed(2)} 0 ${b - a > 0.5 ? 1 : 0} 1 ${pt(b)} Z`;
+}
+// opts.aspect: the chart's height as a share of its width (default the
+// panel's MINI_CHART proportions). opts.textWidth: size the text as on a chart
+// that wide, so charts of different widths side by side read at one size.
+// opts.scale: 'linear' for an even y-axis, which also takes zero and
+// negative values; the default is log, where a constant-% gap between lines
+// draws as a constant distance. opts.compact: the desktop widget's layout:
+// no zoom hints (the Reset and Latest buttons sit in the corner under the
+// end labels), each end label's name running down a row per word beside its
+// value, and a strip above the plot only when the log has trades
+// to show there. opts.home: { t0, t1 }, the view the chart rests in (the
+// widget's portfolio period on a history reaching further back): shown until
+// the viewer zooms or pans, and where Reset and a double-click return.
+// Without it the chart rests at the full range. A line
+// may set its own color, a unit ('%' or 'num'), a group (the panel it draws
+// in, MINI_PANEL), tall: true (that panel at full height), and in the
+// keep: true (data that may stay flat, such as the money put in: never left
+// out of the hover readout as a fixed level), and in the
+// compact layout a badge: { text, color },
+// on the row above its name while the latest date is on screen.
+function buildCustomLinesChartHtml(cfg, lines, log, cw, opts) {
+  const compact = !!(opts && opts.compact);
+  // One panel per line group (MINI_PANEL), in the order the groups first
+  // appear. A panel has one unit: percent when all its lines are in percent,
+  // a plain number when all are ("num", an index reading such as NFCI),
+  // dollars otherwise. A percent panel whose lines go below zero (a lead that
+  // turns into a lag) and every number panel draw on an even axis: a log axis
+  // would drop the stretches at or below zero without a trace.
+  // A hidden line (the eye on its end label flips cfg.subShown[key]) is not
+  // drawn and sets no scale, but keeps its label, dimmed, so it can be shown
+  // again. The compact layout has no eyes and leaves hidden lines out.
+  const forcedLinear = !!(opts && opts.scale === 'linear');
+  const specs = [...new Set(lines.map(customLineGroup))].map(name => {
+    const own = lines.filter(ln => customLineGroup(ln) === name);
+    const unit = own.every(ln => ln.unit === '%') ? '%' : own.every(ln => ln.unit === 'num') ? 'num' : '$';
+    const negative = unit === '%' && own.some(ln => log.some(r => r && typeof r[ln.key] === 'number' && isFinite(r[ln.key]) && r[ln.key] < 0));
+    // Its size counts the lines the strategy declares in it, hidden ones too,
+    // so hiding a line never resizes the chart.
+    const count = lines.filter(ln => customLineGroup(ln) === name).length;
+    const tall = lines.some(ln => customLineGroup(ln) === name && ln.tall === true);   // a full-height panel whatever its count
+    return { name, unit, linear: forcedLinear || unit === 'num' || negative, count, tall };
+  });
+  const all = [], colors = customLineColors(lines);
+  lines.forEach((ln, i) => {
+    const hidden = !customLineShown(cfg, ln.key);
+    if (hidden && compact) return;
+    const spec = specs.find(sp => sp.name === customLineGroup(ln));
+    // A row without a value for this key breaks the line, and so does one a
+    // log axis cannot place (zero or below). A strategy can
+    // declare a line that only exists while a condition holds (a buy-back
+    // level behind a slope gate, say) by logging null on the other days.
+    // `gap` marks the first point after a break: the path restarts there and
+    // the hover shows nothing for the series inside the break.
+    const pts = [];
+    let broken = false;
+    for (const r of log) {
+      if (!r || r.date == null) continue;
+      const v = r[ln.key];
+      if (typeof v === 'number' && isFinite(v) && (spec.linear || v > 0)) {
+        // px: the price the line's level sits at that day (the line's priceKey), for the label's bracket.
+        pts.push({ t: Date.parse(r.date), v, d: String(r.date), gap: broken && pts.length > 0, px: ln.priceKey && r[ln.priceKey] > 0 ? r[ln.priceKey] : undefined });
+        broken = false;
+      } else broken = true;
+    }
+    // `fixed`: the same value on every day the line has one, a setting drawn
+    // as a line ("Sell for a day 10%"); the hover readout leaves such a level
+    // out. A line declared keep: true is data, never a setting, flat or not.
+    if (pts.length > 1) all.push({ key: ln.key, label: ln.label, color: colors[i], pts, fixed: ln.keep !== true && pts.every(p => p.v === pts[0].v), badge: ln.badge || null, unit: spec.unit, spec, hidden });
+  });
+  window._miniChartHover = null;
+  if (!all.length) return '';
+  // A group with no line that has points gets no panel; hidden lines count,
+  // so a panel whose lines are all hidden stays, with their labels. The rest
+  // keep their order and their place while zooming, even through a stretch
+  // one of them has no data.
+  const panelSpecs = specs.filter(sp => all.some(s => s.spec === sp));
+  const nPanels = panelSpecs.length;
+  for (const s of all) s.panel = panelSpecs.indexOf(s.spec);
+  // Each panel's height as a share of a full panel's (MINI_PANEL).
+  const shares = panelSpecs.map((sp, p) => p === 0 || sp.tall ? 1 : sp.count <= 3 ? MINI_PANEL.minShare : Math.min(1, sp.count / MINI_PANEL.fullAt));
+
+  const { W, padL } = MINI_CHART;
+  const H = opts && opts.aspect ? Math.max(60, Math.round(W * opts.aspect)) : MINI_CHART.H + shares.slice(1).reduce((sum, f) => sum + f * MINI_PANEL.addH, 0);
+  const kPx = Math.max(1, (cw || W) / W);   // render scale: screen px per viewBox unit
+  // Text, margins, ticks and buttons are sized in px and divided by k: the
+  // render scale up to MINI_TEXT_REF_W, eased past it so they grow with the
+  // square root of the extra width (see the module comment above).
+  const textW = opts && opts.textWidth ? opts.textWidth : (cw || W);
+  const k = kPx / Math.sqrt(Math.max(1, textW / MINI_TEXT_REF_W)) / uiScale();   // the touch type scale (js/utils.js)
+  // The trades, once: the strip above the plot holds their caps. The compact
+  // layout drops the strip when the log has none (the whole log, so zooming
+  // never moves the plot), unless the first of several panels needs its name there.
+  const markerEvents = customMarkerEvents(log);
+  // The latest day's trade: one the strategy makes on its log's last row when
+  // that row is the data's latest day, the action to take at that day's close.
+  // While that day still trades (the data was refreshed before its close,
+  // minutesBeforeClose), its price is the price so far: the trade stands only
+  // if the close stays on the same side. A row marked projected (a built-in
+  // engine's rebalance on a day that does not close its period) is not one.
+  const lastEv = markerEvents[markerEvents.length - 1];
+  const latestTrade = lastEv && lastEv.i === log.length - 1 && String(lastEv.row.date) === daily[daily.length - 1].date && !lastEv.row.projected ? lastEv : null;
+  const beforeClose = latestTrade ? minutesBeforeClose(String(latestTrade.row.date), window._dataFetchedAt) : null;
+  // A chart taller than it is wide gets the date axis at the top as well (the
+  // user, 2026-11-05: "if complete chart height is too much, show axis at the
+  // bottom and at the top too"): a band above the strip, the strip's own
+  // content (caps, the first panel's name, the zoom hint and buttons) below it.
+  const topAxis = !compact && H > W, axisTopH = topAxis ? MINI_PX.axis / k : 0;
+  const padT = axisTopH + (compact && !markerEvents.length && nPanels === 1 ? MINI_PX.edge : MINI_PX.strip) / k, padB = MINI_PX.axis / k;
+  // The full extent, then the zoom window inside it. A zoom saved from an
+  // older, longer run is clamped so it can never show an empty plot.
+  let T0 = Infinity, T1 = -Infinity;
+  for (const s of all) { T0 = Math.min(T0, s.pts[0].t); T1 = Math.max(T1, s.pts[s.pts.length - 1].t); }
+  if (!(T1 > T0)) return '';
+  const home = (opts && opts.home) || null;
+  const z = window._miniZooms[cfg.id] || home;
+  const minSpan = Math.min(MINI_ZOOM.minSpanMs, T1 - T0);
+  // The right end first, then the left: a window narrower than the least span
+  // widens to the left, so a resting view that ends on the main run's last
+  // day keeps that day at its right edge although the data runs on past it.
+  const t1 = z ? Math.min(T1, Math.max(z.t1, T0 + minSpan)) : T1;
+  const t0 = z ? Math.max(T0, Math.min(z.t0, t1 - minSpan)) : T0;
+  const zoomed = t0 > T0 || t1 < T1;
+  // Off the resting view: the zoom buttons show. Without a home that is any
+  // zoom; with one, any move away from it.
+  const offRest = home ? !!window._miniZooms[cfg.id] : zoomed;
+  const atEnd = t1 >= T1;   // the latest date is on screen
+  // Points on screen: those inside the window plus one neighbour either side,
+  // so each line reaches the plot's edges (the clip path trims the overhang).
+  // The y-scale and the end labels use the points inside the window.
+  // A line that stops before the window's end (a level that exists only while
+  // a condition holds) is `partial`: it is labelled where it ends, beside the
+  // line, instead of in the gutter. A line with no point on screen gets no label.
+  const endTol = Math.max(8 * 86400000, (t1 - t0) * 0.01);
+  const series = all.map(s => {
+    let from = 0; while (from + 1 < s.pts.length && s.pts[from + 1].t <= t0) from++;
+    let to = s.pts.length - 1; while (to > 0 && s.pts[to - 1].t >= t1) to--;
+    const pts = s.pts.slice(from, to + 1), inWindow = pts.filter(p => p.t >= t0 && p.t <= t1);
+    const endPt = inWindow.length ? inWindow[inWindow.length - 1] : pts[pts.length - 1];
+    return { key: s.key, label: s.label, color: s.color, pts, scalePts: inWindow.length ? inWindow : pts, endPt, shown: inWindow.length > 0, partial: endPt.t < t1 - endTol, badge: atEnd ? s.badge : null, unit: s.unit, panel: s.panel, hidden: s.hidden, fixed: s.fixed };
+  }).filter(s => s.pts.length > 1);
+  if (!series.length) return '';
+  // Right gutter: the value column, then the name column beside it (both
+  // descaled, JetBrains Mono advance ≈ 0.6em). A name is one row, or in the
+  // compact layout a row per word with any badge on the row above them. It is
+  // capped so a narrow panel keeps a usable plot area — when capped, long
+  // names clip at the right edge instead of covering lines.
+  const _valTxt = (unit, v) => unit === '$' ? (v < 0 ? '-' : '') + (Math.abs(v) >= 1000 ? fmt(Math.abs(v)) : '$' + Math.abs(v).toFixed(2)) : _miniFmtValue(unit, v);
+  // A level line declared with a priceKey names its price too, in brackets after
+  // its name ("Floor ($48.12)"): the user sets orders at prices, and the level
+  // in percent is the strategy's reading of it (2026-11-05).
+  const _pxTxt = px => '$' + px.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });   // the plain price, as an order is written
+  for (const s of series) s.tagLabel = s.label + (s.endPt.px > 0 ? ' (' + _pxTxt(s.endPt.px) + ')' : '');
+  // A price panel's first line is the price its levels are compared with
+  // (LINES in the prompt); on the latest day its label carries the day's
+  // change against the prior close, as the main chart's end labels do (the
+  // user, 2026-11-06): "+1.2%" after its name, on the row above it in the
+  // compact layout. Only from one trading day to the next: the display log's
+  // weekly rows (while the detail run is on its way) carry none.
+  const latestDate = daily[daily.length - 1].date, priorDate = daily.length > 1 ? daily[daily.length - 2].date : null;
+  for (const s of series) {
+    if (s.unit !== '$' || s.badge || series.find(o => o.panel === s.panel) !== s) continue;
+    const at = s.pts.indexOf(s.endPt), prev = at > 0 ? s.pts[at - 1] : null;
+    if (!prev || s.endPt.d !== latestDate || prev.d !== priorDate) continue;
+    const delta = computeDayChange(s.endPt.v, prev.v);
+    if (delta) s.badge = { text: fmtDayChangePct(delta), color: delta.pct >= 0 ? MINI_DAY_CHANGE.up : MINI_DAY_CHANGE.down };
+  }
+  // Outside the regular session the proxy carries each fund's latest pre-market
+  // or after-hours print (js/data.js's applyLiveQuotes, window._liveExtended):
+  // a price line standing at a fund's close names the print on a second row,
+  // "after hours $50.10 -0.7%", its change against that close (the user,
+  // 2026-11-06). The line itself keeps the close: the rules read closes.
+  const prints = (window._liveExtended && window._liveExtended.prints) || null;
+  for (const s of series) {
+    if (!prints || s.unit !== '$' || s.endPt.d !== latestDate) continue;
+    const fund = LIVE_FUNDS.find(f => prints[f] && daily[daily.length - 1][f] === s.endPt.v);
+    if (!fund) continue;
+    const x = prints[fund];
+    s.extended = { text: EXTENDED_SESSION_NAMES[x.session] + ' ' + _pxTxt(x.price), tail: { text: fmtDayChangePct({ pct: x.changePct }), color: x.changePct >= 0 ? MINI_DAY_CHANGE.up : MINI_DAY_CHANGE.down } };
+  }
+  const gutterSeries = series.filter(s => s.hidden || (s.shown && !s.partial));
+  // A label's name rows: the compact layout stacks a row per word under any
+  // badge; the full layout has one row with the badge after the name (tail).
+  // An extended-hours print is a row of its own under the name in both.
+  const nameRowsOf = (name, badge, color, extended) => (compact
+    ? (badge ? [{ text: badge.text, color: badge.color }] : []).concat(_miniNameRows(name).map(text => ({ text, color })))
+    : [{ text: name, color, tail: badge || null }])
+    .concat(extended ? [{ text: extended.text, color: MINI_MUTED_TEXT, tail: extended.tail }] : []);
+  const rowChars = row => row.text.length + (row.tail ? 1 + row.tail.text.length : 0);
+  const valColW = Math.max(0, ...gutterSeries.map(s => _valTxt(s.unit, s.endPt.v).length)) * (9 / k) * 0.6;
+  const nameColW = Math.max(0, ...gutterSeries.flatMap(s => nameRowsOf(s.tagLabel, s.badge, s.color, s.extended)).map(rowChars)) * (7 / k) * 0.62;
+  const eyeW = compact ? 0 : 11 / k;   // the eye before each label's value (the compact layout has none)
+  const padR = Math.min(4 / k + eyeW + valColW + 4 / k + nameColW + 5 / k, 0.45 * W);
+  // The panels split the plot's height by their shares, a gap apart, each
+  // scaled to its own points in the window. A panel with none there keeps its
+  // place, empty.
+  const plotW = W - padL - padR, plotBottom = H - padB, plotH = plotBottom - padT;
+  const gapY = nPanels > 1 ? MINI_PANEL.gap / k : 0;
+  const fullH = (plotH - (nPanels - 1) * gapY) / shares.reduce((sum, f) => sum + f, 0);
+  const panels = panelSpecs.map((sp, p) => {
+    const top = padT + shares.slice(0, p).reduce((y, f) => y + f * fullH + gapY, 0), bottom = top + shares[p] * fullH, tf = _miniScaleOf(sp.linear);
+    let lo = Infinity, hi = -Infinity;
+    for (const s of series) if (s.panel === p && !s.hidden) for (const pt of s.scalePts) { if (pt.v < lo) lo = pt.v; if (pt.v > hi) hi = pt.v; }
+    if (!(hi >= lo)) return { name: sp.name, unit: sp.unit, linear: sp.linear, top, bottom, yLo: 0, yHi: 1, empty: true };
+    const l0 = tf(lo), l1 = tf(hi);
+    const lPad = sp.linear ? Math.max((l1 - l0) * 0.06, Math.abs(l1) * 0.01, 1e-9) : Math.max((l1 - l0) * 0.05, 0.01);
+    // A linear axis of positive values bottoms out at zero; one with values
+    // below zero (a loss) reaches below it.
+    const yLo = sp.linear ? (lo >= 0 ? Math.max(0, l0 - lPad) : l0 - lPad) : l0 - lPad, yHi = l1 + lPad;
+    return { name: sp.name, unit: sp.unit, linear: sp.linear, top, bottom, yLo, yHi, empty: false };
+  });
+  const panelSeries = panels.map((P, p) => series.filter(s => s.panel === p && !s.hidden));   // drawn
+  const panelLabels = panels.map((P, p) => series.filter(s => s.panel === p && (s.hidden || (s.shown && !s.partial))));   // labelled in the gutter
+  const budget = Math.ceil(plotW * kPx * MINI_POINTS_PER_PX);
+  for (const s of series) if (!s.hidden) s.drawPts = _miniDecimate(s.pts, budget);
+  const xAt = t => padL + (t - t0) / (t1 - t0) * plotW;
+  const yAt = (p, v) => _miniPanelY(panels[p], v);
+  // Trade events: a band at each trade's date, a cap in the strip above the
+  // plot where the hover answers for them, and a mark at the trade's crossing,
+  // coloured by action (the main chart's marker vocabulary, via
+  // customMarkerEvents). The band runs down every panel, so a trade's date
+  // lines up across them. The mark goes only in the panel whose rule fired the
+  // trade, the group its row names in firedBy, and in the first panel when it
+  // names none: a trade the median line fired has nothing to show on a stress
+  // index. Trades a few days apart would stack unreadably, so events closer
+  // than MINI_EVENT.mergeX fold into one band whose hover lists them all.
+  // Logged in date order, so one pass groups them.
+  const eventGroups = [];
+  for (const ev of markerEvents) {
+    const t = Date.parse(ev.row.date);
+    if (!(t >= t0 && t <= t1)) continue;
+    const x = xAt(t);
+    // Rows log the state after the trade, so what it moved FROM is the nearest
+    // earlier row holding something else (markerAssetFor's rule); a sell is
+    // about that, a buy or switch about what it holds now.
+    const to = String(ev.row.held || '');
+    let from = '';
+    for (let j = ev.i - 1; j >= 0 && !from; j--) { const h = log[j] && log[j].held; if (h && String(h) !== to) from = String(h); }
+    const kind = customActionKind(ev.row.action);
+    const assetKey = _miniAssetKey(kind === 'sell' ? from : to);
+    const part = kind === 'buy' ? customTradeShare(log, ev.i) : null, firedAt = panelSpecs.findIndex(sp => sp.name === ev.row.firedBy);
+    const latest = ev === latestTrade;
+    const item = { x, t, date: String(ev.row.date), kind, label: ev.st.label, color: ev.st.color, shape: ev.st.shape, from, to, held: to, part, panel: firedAt >= 0 ? firedAt : 0,
+      ring: assetKey ? MINI_ASSET_RING[assetKey] : 'rgba(255,255,255,0.95)', dashed: !!(assetKey && MINI_ASSET_DASHED[assetKey]), note: String(ev.row.note || ''),
+      latest, beforeClose: latest ? beforeClose : null };
+    const last = eventGroups[eventGroups.length - 1];
+    if (last && x - last.x1 < MINI_EVENT.mergeX && x - last.x0 <= MINI_EVENT.maxSpanX) { last.items.push(item); last.x1 = x; }
+    else eventGroups.push({ x0: x, x1: x, items: [item] });
+  }
+  // How far a band reaches past its first and last trade (MINI_EVENT): on a window
+  // short enough for marks, half of minPx on screen; on a longer one halfW. Never
+  // further than halfway to the next band's trades, less half the gap two bands keep
+  // on a short window, so neighbours do not overlap and a sale and the next day's buy
+  // stand apart. A band under thinPx on a short window is drawn in a stronger tint.
+  const tradesApart = t1 - t0 < MINI_EVENT.marksWithinMs;
+  const bandHalfW = tradesApart ? MINI_EVENT.minPx / kPx / 2 : MINI_EVENT.halfW, bandGap = tradesApart ? MINI_EVENT.gapPx / kPx : 0;
+  const events = eventGroups.map((g, i) => {
+    const prev = eventGroups[i - 1], next = eventGroups[i + 1];
+    // Towards a neighbour the edge stops half the gap short of the midpoint, and never inside the
+    // band's own trades: a neighbour nearer than the gap (a run of trades cut by maxSpanX) gets less gap.
+    const x0 = Math.min(g.x0, Math.max(g.x0 - bandHalfW, prev ? (prev.x1 + g.x0 + bandGap) / 2 : -Infinity));
+    const x1 = Math.max(g.x1, Math.min(g.x1 + bandHalfW, next ? (g.x1 + next.x0 - bandGap) / 2 : Infinity));
+    return { x0, x1, items: g.items, thin: tradesApart && (x1 - x0) * kPx < MINI_EVENT.thinPx };
+  });
+  // The latest day's trade while that day is on screen.
+  const latestItem = atEnd ? events.flatMap(g => g.items).find(it => it.latest) || null : null;
+  // Everything the hover and zoom handlers need to resolve a cursor position
+  // back to dates, values and bands, under the chart's id (its svg carries
+  // it); window._miniChartHover is the most recently built one.
+  // The log and, when the run returned them, its per-day holdings: the
+  // tooltip reads what is held at a day from them (_miniHoldingAt).
+  const holdings = opts && Array.isArray(opts.holdings) && opts.holdings.length ? opts.holdings : null;
+  // The runs the log joins, for the strategy's own return over a dragged
+  // range (_miniRunReturn): one run, unless the host joined two (opts.runs).
+  const runs = opts && Array.isArray(opts.runs) && opts.runs.length ? opts.runs : [{ rows: log }];
+  // readings: each panel's reading by key, the first line the strategy declared in it; null while that line is hidden with its eye,
+  // or while the window holds no point of any of the panel's lines (credit stress before 1971).
+  const readings = panels.map((_, p) => { const first = series.find(s => s.panel === p); return first && !first.hidden ? first.key : null; });
+  const chartData = { series: series.filter(s => !s.hidden), readings, panels, t0, t1, T0, T1, W, H, padL, padT, padB, padR, k, events, cfgId: cfg.id, zoomed, home, log, holdings, runs };
+  window._miniCharts[cfg.id] = chartData;
+  window._miniChartHover = chartData;
+
+  // Horizontal gridlines per panel, labeled with fmt(): log-spaced levels, or
+  // on a linear axis the round values a step apart, zero among them once the
+  // axis reaches below it. As many as the panel's height fits with room for
+  // their labels, at most six: a full panel gets six, a quarter-height one
+  // three (the user, 2026-11-05: "show some additional axes").
+  const titled = nPanels > 1;
+  let grid = '';
+  panels.forEach(P => {
+    if (P.empty) return;
+    const fit = Math.max(1, Math.min(6, Math.floor((P.bottom - P.top) / (2.4 * 8 / k))));
+    const step = P.linear ? _miniNiceStep(P.yHi - P.yLo, fit) : 0;
+    const levels = P.linear
+      ? Array.from({ length: Math.floor(P.yHi / step) - Math.ceil(P.yLo / step) + 1 }, (_, i) => (Math.ceil(P.yLo / step) + i) * step).filter(v => v > 0 || P.yLo < 0)
+      : Array.from({ length: fit }, (_, i) => Math.pow(10, P.yLo + (P.yHi - P.yLo) * (i + 0.5) / fit));   // log: evenly down the panel, the gaps the same %
+    for (const lv of levels) {
+      const y = _miniPanelY(P, lv).toFixed(1);
+      // The label sits above its line, or under it when the line runs within a
+      // label's height of the panel's top, where the panel's name is.
+      const labelY = +y - P.top < 10 / k ? +y + 8 / k : +y - 2;
+      grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="rgba(122,122,166,0.14)" stroke-width="0.5"/>
+      <text x="${padL + 1}" y="${labelY.toFixed(1)}" font-family="JetBrains Mono" font-size="${(8 / k).toFixed(2)}" fill="rgba(122,122,166,0.75)" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_miniFmtValue(P.unit, lv)}</text>`;
+    }
+  });
+  // With more than one panel each is named just above its top left, outside
+  // the plot so no line runs through the name: the first in the strip, the
+  // others in the gap above them, under a divider across the chart. It runs
+  // through the gutter too, so each panel's end labels stay with it, except in
+  // the compact layout, whose labels of a row per word can outgrow a panel.
+  let panelTitles = '';
+  const ruleY = p => panels[p].top - gapY + MINI_PANEL.rule / k;   // the divider over panel p > 0
+  if (titled) panels.forEach((P, p) => {
+    if (P.name) panelTitles += `<text class="mini-panel-title" x="${(padL + 1).toFixed(1)}" y="${(P.top - 3 / k).toFixed(2)}" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600" fill="rgba(90,90,140,0.95)" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_escHtml(P.name)}</text>`;
+    if (p > 0) panelTitles += `<line class="mini-panel-rule" x1="0" y1="${ruleY(p).toFixed(2)}" x2="${(compact ? W - padR : W).toFixed(1)}" y2="${ruleY(p).toFixed(2)}" stroke="rgba(122,122,166,0.55)" stroke-width="${(1 / k).toFixed(2)}"/>`;
+  });
+  // The zoom buttons, while zoomed: Reset, and Latest beside it while panned
+  // away from the end (the click handler below; a double-click anywhere also
+  // resets). Latest stands alone at rest on a view that ends before the latest
+  // date. They sit at the strip's right end, inside the gutter so they
+  // never cover a trade cap, or in the compact layout in the corner under the
+  // end labels.
+  const btnW = 50 / k, btnH = 10 / k, chipW = 38 / k;
+  const btnX = W - 2 / k - btnW, chipX = btnX - 4 / k - chipW;
+  const restChipX = W - 2 / k - chipW;   // the Latest chip's place at rest, with no Reset beside it
+  const btnY = compact ? plotBottom + (padB - btnH) / 2 : axisTopH + 1 / k;
+  // The Latest chip: shown while the latest date is off screen to the right; a click brings the window to it at the same span.
+  const latestChip = x => `<g class="mini-latest" role="button"><title>The latest date is off screen to the right. Click to jump to it at this zoom.</title><rect x="${x.toFixed(1)}" y="${btnY.toFixed(2)}" width="${chipW.toFixed(1)}" height="${btnH.toFixed(2)}" rx="${(3 / k).toFixed(2)}"/><text x="${(x + chipW / 2).toFixed(1)}" y="${(btnY + 7.3 / k).toFixed(2)}" text-anchor="middle" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600">Latest →</text></g>`;
+  // Where the compact layout's date labels must stop: left of whichever button sits in that corner.
+  const axisEnd = !compact ? W : offRest ? (atEnd ? btnX : chipX) - 4 / k : atEnd ? W : restChipX - 4 / k;
+  // Date labels just under the plot, on a tall chart in the band above the
+  // strip too (topAxis), and in the gap above each later panel, to the right
+  // of its name, so a stacked chart has dates at every divider (the user,
+  // 2026-11-06: "show axes between signal charts too, on the right side of
+  // the names, we already got space there"). Centers are clamped inside the
+  // viewBox so the first and last never render half-cut at the edges, and a
+  // label that would touch the one before it, or the compact layout's zoom
+  // buttons, is dropped (JetBrains Mono advance ≈ 0.6em). A gap label that
+  // would touch the panel's name or reach into the gutter is left out; it
+  // wears the name's halo, since the trade bands and the latest-date line
+  // run through the gap.
+  const yLabel = (plotBottom + MINI_PX.labelGap / k).toFixed(1), yLabelTop = (axisTopH - 4 / k).toFixed(1);
+  const axisFs = 8 / k, axisCharW = 0.6 * axisFs, axisGap = 6 / k;
+  const gapRows = titled ? panels.slice(1).map(P => ({ y: (P.top - 3 / k).toFixed(2), left: padL + 1 + (P.name ? P.name.length * 0.6 * (7 / k) : 0) + axisGap })) : [];
+  const halo = `stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke"`;
+  let xAxis = '', lastRight = -Infinity;
+  for (const tk of _miniTimeTicks(t0, t1, 6)) {
+    const half = tk.label.length * axisCharW / 2;
+    const lx = Math.max(half, Math.min(W - half, xAt(tk.t)));
+    if (lx - half < lastRight + axisGap || lx + half > axisEnd) continue;
+    lastRight = lx + half;
+    const attrs = `x="${lx.toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono" font-size="${axisFs.toFixed(2)}" fill="rgba(122,122,166,0.75)"`;
+    xAxis += `<text ${attrs} y="${yLabel}">${tk.label}</text>` + (topAxis ? `<text class="mini-axis-top" ${attrs} y="${yLabelTop}">${tk.label}</text>` : '');
+    for (const row of gapRows) if (lx - half >= row.left && lx + half <= W - padR) xAxis += `<text class="mini-axis-gap" ${attrs} y="${row.y}" ${halo}>${tk.label}</text>`;
+  }
+  // Hints beside the buttons, outside the compact layout: how to zoom while
+  // at full range; the factor and the pan hint while zoomed. A hint that
+  // would not fit the gutter is shortened or dropped; the button's tooltip
+  // always carries the full instructions.
+  const hintAttrs = `y="${(axisTopH + 8.5 / k).toFixed(2)}" text-anchor="end" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke"`;
+  const hintW = txt => txt.length * 0.6 * (7 / k);   // JetBrains Mono advance
+  let zoomUi = '';
+  if (!offRest) {
+    // At rest. A resting view that ends before the latest date (the main
+    // chart's range, its Exit earlier) gets the Latest chip too, the hint
+    // to its left where both fit.
+    const hint = MINI_TOUCH_UI ? 'pinch to zoom' : `${MOD_KEY} + scroll to zoom`;
+    const hintRight = atEnd ? W - 2 / k : restChipX - 4 / k, room = padR - 4 / k - (atEnd ? 0 : chipW + 4 / k);
+    zoomUi = (!compact && hintW(hint) <= room ? `<text x="${hintRight.toFixed(1)}" ${hintAttrs} fill="rgba(122,122,166,0.6)">${hint}</text>` : '') + (atEnd ? '' : latestChip(restChipX));
+  } else {
+    const factor = ((T1 - T0) / (t1 - t0)).toFixed(1);
+    const resetBtn = `<g class="mini-zoom-reset" role="button"><title>Back to the full range. ${MINI_TOUCH_UI ? 'A pinch zooms, a drag pans.' : `${MOD_KEY} + scroll zooms, ${MOD_KEY} + drag pans.`}</title><rect x="${btnX.toFixed(1)}" y="${btnY.toFixed(2)}" width="${btnW.toFixed(1)}" height="${btnH.toFixed(2)}" rx="${(3 / k).toFixed(2)}"/><text x="${(btnX + btnW / 2).toFixed(1)}" y="${(btnY + 7.3 / k).toFixed(2)}" text-anchor="middle" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600">Reset zoom</text></g>`;
+    if (atEnd) {
+      const long = MINI_TOUCH_UI ? `×${factor} · drag to pan` : `×${factor} · ${MOD_KEY} + drag to pan`;
+      const hint = hintW(long) <= padR - btnW - 8 / k ? long : `×${factor}`;
+      zoomUi = (compact ? '' : `<text x="${(btnX - 4 / k).toFixed(1)}" ${hintAttrs} fill="rgba(122,122,166,0.9)">${hint}</text>`) + resetBtn;
+    } else {
+      // Panned away from the end: a Latest chip in place of the hint says so,
+      // and a click brings the window back to the latest date at the same zoom.
+      const short = `×${factor}`;
+      const hint = !compact && hintW(short) <= padR - btnW - chipW - 12 / k ? `<text x="${(chipX - 4 / k).toFixed(1)}" ${hintAttrs} fill="rgba(122,122,166,0.9)">${short}</text>` : '';
+      zoomUi = `${hint}${latestChip(chipX)}${resetBtn}`;
+    }
+  }
+  // The end of the data, when it is on screen: a dotted line at the latest
+  // date with its date above it, and a dot closing each line. Drawn outside
+  // the clip so the dots at the plot's edge render whole. Absent while panned
+  // away from the end, when the strip's Latest chip says so instead. On a
+  // latest-day trade the line wears the trade's colour and the strip's action
+  // chip stands in for the date.
+  let latestMark = '';
+  if (atEnd) {
+    const xEnd = (W - padR).toFixed(1);
+    const dots = series.filter(s => !s.hidden && Math.abs(s.endPt.t - T1) < 86400000).map(s =>
+      `<circle cx="${xEnd}" cy="${yAt(s.panel, s.endPt.v).toFixed(1)}" r="${(1.4 / k).toFixed(2)}" fill="${s.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(0.7 / k).toFixed(2)}"/>`).join('');
+    const lineStroke = latestItem ? `stroke="${latestItem.color}" stroke-width="${(1 / k).toFixed(2)}"` : `stroke="rgba(122,122,166,0.55)" stroke-width="${(0.6 / k).toFixed(2)}"`;
+    latestMark = `<line class="mini-latest-line" x1="${xEnd}" y1="${padT.toFixed(2)}" x2="${xEnd}" y2="${plotBottom.toFixed(2)}" ${lineStroke} stroke-dasharray="${(1.6 / k).toFixed(2)} ${(1.6 / k).toFixed(2)}"/>`
+      + (latestItem ? '' : `<text class="mini-latest-label" x="${(W - padR - 2 / k).toFixed(1)}" y="${(padT + 7.5 / k).toFixed(2)}" text-anchor="end" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600" fill="rgba(122,122,166,0.95)" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">latest · ${_miniShortDate(T1)}</text>`)
+      + dots;
+  }
+
+  // Polylines + right-edge end labels (pushed apart when endpoints collide).
+  // A panel's first line, the price or reading its levels are compared with,
+  // is drawn last so a level that hugs it (an RSI threshold resolved to a
+  // price) cannot hide it.
+  const pathOf = s => {
+    let d = '';
+    for (const p of s.drawPts) d += (!d || p.gap ? 'M' : 'L') + xAt(p.t).toFixed(1) + ',' + yAt(s.panel, p.v).toFixed(1);
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="0.45"/>`;
+  };
+  const panelPaths = panelSeries.map(own => own.length ? own.slice(1).map(pathOf).join('') + pathOf(own[0]) : '');
+  // Partial lines: name and last value beside the line's end, to its right when
+  // that fits inside the plot, else to its left.
+  let lineTags = '';
+  for (const s of series.filter(s => !s.hidden && s.shown && s.partial)) {
+    const P = panels[s.panel], x = xAt(s.endPt.t), txt = `${s.tagLabel} ${_valTxt(s.unit, s.endPt.v)}`;
+    const y = Math.max(P.top + 6 / k, Math.min(P.bottom - 1 / k, yAt(s.panel, s.endPt.v) + 2.5 / k));
+    const right = x + 3 / k + txt.length * 0.6 * (7 / k) <= W - padR;
+    lineTags += `<text class="mini-line-tag" x="${(right ? x + 3 / k : x - 3 / k).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${right ? 'start' : 'end'}" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600" fill="${s.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_escHtml(txt)}</text>`;
+  }
+  // One label per series in the gutter, never over the plot: the value at
+  // the line's end, and its name beside it on the same baseline. In the
+  // compact layout the name runs down a row per word with any badge on the
+  // row above it, the rows centred on the value; labels push apart by their
+  // own heights and stay inside the plot's height. Each panel lays out its
+  // own labels and keeps them beside it.
+  const rowLh = 8.5 / k;
+  const reach = e => (e.rows.length - 1) / 2 * rowLh + 5 / k;   // a stacked label's half height
+  // A label's rows are centred on its value when stacked: every compact label,
+  // and in the full layout one with an extended-hours row under its name.
+  const stacked = e => compact || e.rows.length > 1;
+  const room = (a, b) => (stacked(a) || stacked(b) ? reach(a) + reach(b) + 1 / k : 10 / k);
+  let endLabels = '';
+  panels.forEach((P, p) => {
+    // A hidden line's label sits where its value would be, kept inside the
+    // panel (its value set no scale); in a panel with nothing drawn, at the top.
+    const ends = panelLabels[p].map(s => {
+      const y = P.empty ? NaN : yAt(p, s.endPt.v);
+      return { y: y === y ? Math.max(P.top, Math.min(P.bottom, y)) : P.top, v: s.endPt.v, unit: s.unit, rows: nameRowsOf(s.tagLabel, s.badge, s.color, s.extended), color: s.color, key: s.key, hidden: s.hidden };
+    });
+    ends.sort((a, b) => a.y - b.y);
+    const minY = p === 0 ? 0 : ruleY(p) + 2 / k, maxY = p === nPanels - 1 ? plotBottom : ruleY(p + 1) - 2 / k;
+    if (ends.length && stacked(ends[0])) ends[0].y = Math.max(ends[0].y, minY + reach(ends[0]));
+    for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < room(ends[i - 1], ends[i])) ends[i].y = ends[i - 1].y + room(ends[i - 1], ends[i]);
+    if (compact || titled) {
+      for (let i = ends.length - 1; i >= 0; i--) {
+        const max = i === ends.length - 1 ? maxY - (stacked(ends[i]) ? reach(ends[i]) : 3 / k) : ends[i + 1].y - room(ends[i], ends[i + 1]);
+        if (ends[i].y > max) ends[i].y = max;
+      }
+    }
+    for (const e of ends) {
+      const base = e.y + 3 / k;
+      const firstRow = stacked(e) ? e.y + 2.5 / k - (e.rows.length - 1) / 2 * rowLh : base;
+      const texts = `<text x="${(W - padR + 4 / k + eyeW + valColW).toFixed(1)}" y="${base.toFixed(1)}" text-anchor="end" font-family="JetBrains Mono" font-size="${(9 / k).toFixed(2)}" font-weight="600" fill="${e.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2.5 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke">${_valTxt(e.unit, e.v)}</text>`
+        + e.rows.map((row, j) => `<text x="${(W - padR + 8 / k + eyeW + valColW).toFixed(1)}" y="${(firstRow + j * rowLh).toFixed(1)}" font-family="JetBrains Mono" font-size="${(7 / k).toFixed(2)}" font-weight="600" fill="${row.color}" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke"${e.hidden ? ' text-decoration="line-through"' : ''}>${_escHtml(row.text)}${row.tail ? `<tspan fill="${row.tail.color}"> ${_escHtml(row.tail.text)}</tspan>` : ''}</text>`).join('');
+      if (compact) { endLabels += texts; continue; }
+      // The label is a button (the user, 2026-11-05: the eye chips moved onto
+      // the chart's labels): the eye before the value hides the line or shows
+      // it again. It carries the chips' class and data, so saved-configs.js's
+      // .cfg-sub-chip click handler flips cfg.subShown[key] and re-renders.
+      const eyeX = W - padR + 2 / k, eyeS = 8 / k / 24, name = e.rows[0].text;
+      endLabels += `<g class="cfg-sub-chip mini-line-toggle${e.hidden ? ' legend-hidden' : ''}" data-config-id="${_escHtml(String(cfg.id))}" data-config-sub="${_escHtml(String(e.key))}" role="button" tabindex="0"><title>${e.hidden ? 'Show' : 'Hide'} ${_escHtml(name)}</title>`
+        + `<rect x="${eyeX.toFixed(1)}" y="${(e.y - reach(e)).toFixed(1)}" width="${(W - eyeX).toFixed(1)}" height="${(2 * reach(e)).toFixed(2)}" fill="transparent"/>`
+        + `<g transform="translate(${eyeX.toFixed(2)},${(e.y - 4 / k).toFixed(2)}) scale(${eyeS.toFixed(4)})" fill="none" stroke="${e.hidden ? 'rgba(122,122,166,0.9)' : e.color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${e.hidden ? MINI_EYE.off : MINI_EYE.open}</g>`
+        + texts + '</g>';
+    }
+  });
+
+  // Bands down every panel, caps in the strip, and once the window is under
+  // MINI_EVENT.marksWithinMs one mark per trade where it happened, in the
+  // panel that fired it: on that panel's first drawn line at that day's close, so a sell
+  // sits where the price broke the line and a buy where it came back (a trade
+  // inside a gap of that line gets no mark). Each mark is drawn twice, a white
+  // halo under the symbol, and remembered in data.marks for the hover. Lines,
+  // bands and marks are clipped to the plot, and lines and marks to their
+  // panel, since a zoomed line keeps one point beyond each edge.
+  const clipId = 'mini-clip-' + String(cfg.id).replace(/[^\w-]/g, '');
+  const eventBands = events.map((g, i) => panels.map(P =>
+    `<rect class="mini-ev${g.thin ? ' mini-ev-thin' : ''}" data-mini-ev="${i}" x="${g.x0.toFixed(1)}" y="${P.top.toFixed(2)}" width="${(g.x1 - g.x0).toFixed(1)}" height="${(P.bottom - P.top).toFixed(2)}"/>`).join('')).join('');
+  // The caps sit above the clip, so each is cut to the plot's width here: a band of a trade
+  // on the window's first or last day reaches past the plot's edge.
+  const eventCaps = events.map((g, i) => {
+    const x0 = Math.max(g.x0, padL), x1 = Math.min(g.x1, W - padR);
+    return `<rect class="mini-ev-cap${g.thin ? ' mini-ev-thin' : ''}" data-mini-ev="${i}" x="${x0.toFixed(1)}" y="${axisTopH.toFixed(2)}" width="${(x1 - x0).toFixed(1)}" height="${(padT - axisTopH).toFixed(2)}"/>`;
+  }).join('');
+  const markR = MINI_MARK.r / k, ringW = MINI_MARK.ring / k;
+  const markAt = it => {
+    const first = panelSeries[it.panel][0], pt = first ? _miniPtAt(first.pts, it.t) : null;
+    return pt ? { x: it.x, y: yAt(it.panel, pt.v), r: markR, item: it, panel: it.panel } : null;
+  };
+  const marks = t1 - t0 >= MINI_EVENT.marksWithinMs ? [] : events.flatMap(g => g.items).filter(it => it !== latestItem).map(markAt).filter(Boolean);
+  const latestMarkAt = latestItem ? markAt(latestItem) : null;
+  chartData.marks = latestMarkAt ? marks.concat(latestMarkAt) : marks;
+  const haloAttrs = `fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="${(ringW + 1.8 / k).toFixed(2)}"`;
+  const markSvg = m => {
+    const dash = m.item.dashed ? ` stroke-dasharray="${(1.5 / k).toFixed(2)} ${(1.2 / k).toFixed(2)}"` : '';
+    if (m.item.part && m.item.shape === 'circle') {
+      // A partial buy: only the bought share of the circle, outline and halo included.
+      const d = _miniWedgePath(m.x, m.y, markR, m.item.part[0], m.item.part[1]);
+      return `<path d="${d}" ${haloAttrs} stroke-linejoin="round"/>`
+        + `<path class="mini-ev-mark" d="${d}" fill="${m.item.color}" stroke="${m.item.ring}" stroke-width="${ringW.toFixed(2)}" stroke-linejoin="round"${dash}/>`;
+    }
+    return _miniMarkSvg(m.item.shape, m.x, m.y, markR, haloAttrs)
+      + _miniMarkSvg(m.item.shape, m.x, m.y, markR, `class="mini-ev-mark" fill="${m.item.color}" stroke="${m.item.ring}" stroke-width="${ringW.toFixed(2)}"` + dash);
+  };
+  const clips = `<clipPath id="${clipId}"><rect x="${padL}" y="${padT.toFixed(2)}" width="${plotW.toFixed(1)}" height="${plotH.toFixed(2)}"/></clipPath>`
+    + panels.map((P, p) => `<clipPath id="${clipId}-${p}"><rect x="${padL}" y="${P.top.toFixed(2)}" width="${plotW.toFixed(1)}" height="${(P.bottom - P.top).toFixed(2)}"/></clipPath>`).join('');
+  const panelLayers = panels.map((P, p) => `<g clip-path="url(#${clipId}-${p})">${panelPaths[p]}${marks.filter(m => m.panel === p).map(markSvg).join('')}</g>`).join('');
+  // The latest day's trade, while that day is on screen: its mark at the end
+  // of its line at any zoom, outside the clip so it renders whole, and open
+  // while the day still trades; and in the strip a chip in its colour saying
+  // what to do at which close, the price's age beside it while the day still
+  // trades, or under it, in the latest date's place, where the strip has no
+  // room. The chip keeps clear of the first panel's name and the zoom
+  // buttons: past them it says the move alone.
+  let latestTradeSvg = '';
+  if (latestItem) {
+    const it = latestItem, open = it.beforeClose != null;
+    if (latestMarkAt) latestTradeSvg += open
+      ? _miniMarkSvg(it.shape, latestMarkAt.x, latestMarkAt.y, markR, haloAttrs)
+        + _miniMarkSvg(it.shape, latestMarkAt.x, latestMarkAt.y, markR, `class="mini-ev-mark" fill="rgba(255,255,255,0.95)" stroke="${it.color}" stroke-width="${(1.2 / k).toFixed(2)}"`)
+      : markSvg(latestMarkAt);
+    const fs = 7 / k, charW = 0.6 * fs, padX = 3 / k, actH = 10 / k, actY = axisTopH + Math.max(0, (padT - axisTopH - actH) / 2);
+    const right = Math.min(W - padR, offRest && !compact ? btnX - 4 / k : Infinity);
+    const left = titled && panels[0].name ? padL + 1 + panels[0].name.length * 0.62 * fs + 4 / k : padL;
+    const move = _miniMoveText(it), full = `${move} at ${open ? "today's close" : `the ${_miniDayMonth(it.t)} close`}`;
+    const text = right - (full.length * charW + 2 * padX) >= left ? full : move;
+    const actW = text.length * charW + 2 * padX, actX = right - actW;
+    const age = open ? `price ${_miniCloseGap(it.beforeClose)} before the close` : '';
+    const ageAttrs = `font-family="JetBrains Mono" font-size="${fs.toFixed(2)}" font-weight="600" fill="rgba(122,122,166,0.95)" stroke="rgba(255,255,255,0.95)" stroke-width="${(2 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke"`;
+    latestTradeSvg += `<g class="mini-action-chip" pointer-events="none"><rect x="${actX.toFixed(1)}" y="${actY.toFixed(2)}" width="${actW.toFixed(1)}" height="${actH.toFixed(2)}" rx="${(3 / k).toFixed(2)}" fill="${it.color}"/>`
+      + `<text x="${(actX + actW / 2).toFixed(1)}" y="${(actY + 7.3 / k).toFixed(2)}" text-anchor="middle" font-family="JetBrains Mono" font-size="${fs.toFixed(2)}" font-weight="700" fill="#fff">${_escHtml(text)}</text>`
+      + (age ? (actX - 4 / k - age.length * charW >= left
+        ? `<text x="${(actX - 4 / k).toFixed(1)}" y="${(actY + 7.3 / k).toFixed(2)}" text-anchor="end" ${ageAttrs}>${age}</text>`
+        : `<text x="${(W - padR - 2 / k).toFixed(1)}" y="${(padT + 7.5 / k).toFixed(2)}" text-anchor="end" ${ageAttrs}>${age}</text>`) : '')
+      + '</g>';
+  }
+
+  return `<svg class="custom-lines-chart" data-mini-id="${_escHtml(String(cfg.id))}" viewBox="0 0 ${W} ${H}"><defs>${clips}</defs>${grid}<g clip-path="url(#${clipId})">${eventBands}</g>${panelLayers}${latestMark}${lineTags}${eventCaps}${panelTitles}${endLabels}${xAxis}${zoomUi}${latestTradeSvg}</svg>`;
+}
+
+// The panel opens through a width transition (and can be resized), so the
+// signal chart's first render can measure a stale width — leaving its
+// width-compensated text scaled wrong. This observer re-renders the chart
+// once the body's real width settles.
+const _miniChartResizeObs = (typeof ResizeObserver !== 'undefined') ? new ResizeObserver(() => {
+  clearTimeout(window._miniChartResizeT);
+  window._miniChartResizeT = setTimeout(_miniChartRerender, 150);
+}) : null;
+
+// --- signal mini chart hover: crosshair + per-line value tooltip ---------
+function _miniChartTipEl() {
+  let el = document.getElementById('mini-chart-tip');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'mini-chart-tip';
+    el.setAttribute('hidden', '');
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function _miniChartClearHover() {
+  document.querySelectorAll('.custom-lines-chart .mini-hover').forEach(g => g.remove());
+  document.querySelectorAll('.custom-lines-chart').forEach(svg => _miniHighlightEvent(svg, -1));
+  const tip = document.getElementById('mini-chart-tip');
+  if (tip) tip.setAttribute('hidden', '');
+  window._miniHoverActive = false;
+  window._miniPinned = null;
+  window._miniRangeShown = null;
+}
+// Nearest point to time t (pts are in date order — binary search).
+function _miniNearestPt(pts, t) {
+  let lo = 0, hi = pts.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m].t <= t) lo = m; else hi = m; }
+  return (t - pts[lo].t) <= (pts[hi].t - t) ? pts[lo] : pts[hi];
+}
+// The series' point at a snapped time, or null when that time falls inside a
+// break in the line (buildCustomLinesChartHtml's `gap`), so a gated line
+// reads as absent there instead of borrowing its nearest edge.
+function _miniPtAt(pts, t) {
+  let lo = 0, hi = pts.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m].t <= t) lo = m; else hi = m; }
+  if (pts[hi].gap && t > pts[lo].t && t < pts[hi].t) return null;
+  return _miniNearestPt(pts, t);
+}
+// Cursor position in the chart's own viewBox units.
+function _miniCursorX(svg, e, data) {
+  const rect = svg.getBoundingClientRect();
+  return (e.clientX - rect.left) / (rect.width / data.W);
+}
+function _miniCursorY(svg, e, data) {
+  const rect = svg.getBoundingClientRect();
+  return (e.clientY - rect.top) / (rect.height / data.H);
+}
+// Cursor x → the date at that position in the visible window.
+function _miniTimeAtX(data, x) {
+  const frac = Math.max(0, Math.min(1, (x - data.padL) / (data.W - data.padL - data.padR)));
+  return data.t0 + frac * (data.t1 - data.t0);
+}
+// Cursor position → the first series' nearest logged day. Every readout
+// (hover and drag-range alike) snaps to this anchor so all rows describe
+// the same real trading date.
+function _miniAnchorFromEvent(svg, e, data) {
+  return _miniNearestPt(data.series[0].pts, _miniTimeAtX(data, _miniCursorX(svg, e, data)));
+}
+// The trade mark nearest the cursor within its hit radius, if any.
+function _miniMarkAt(svg, e, data) {
+  const marks = data.marks || [];
+  if (!marks.length) return null;
+  const rect = svg.getBoundingClientRect(), pxPerUnit = rect.width / data.W;
+  const mx = (e.clientX - rect.left) / pxPerUnit, my = (e.clientY - rect.top) / pxPerUnit;
+  let best = null, bestD = Infinity;
+  for (const m of marks) {
+    const d = Math.hypot(mx - m.x, my - m.y) * pxPerUnit;
+    if (d <= m.r * pxPerUnit + MINI_MARK.hitPad && d < bestD) { best = m; bestD = d; }
+  }
+  return best;
+}
+// The trade-event band under the cursor, if any (see buildCustomLinesChartHtml).
+function _miniEventAt(data, x) {
+  const pad = MINI_EVENT.hoverPad;
+  const i = (data.events || []).findIndex(g => x >= g.x0 - pad && x <= g.x1 + pad);
+  return i < 0 ? null : { index: i, group: data.events[i] };
+}
+function _miniHighlightEvent(svg, index) {
+  if (!svg) return;
+  svg.querySelectorAll('.mini-ev, .mini-ev-cap').forEach(r => r.classList.toggle('is-hover', +r.getAttribute('data-mini-ev') === index));
+}
+function _miniXAt(data, t) {
+  return data.padL + (t - data.t0) / (data.t1 - data.t0) * (data.W - data.padL - data.padR);
+}
+// Exact-value formatter for readouts: two decimals below $1000.
+function _miniFmtExact(v) { return v >= 1000 ? fmt(v) : '$' + v.toFixed(2); }
+// A value in a readout: exact dollars, else as its panel reads it.
+function _miniFmtReadout(unit, v) { return unit === '$' ? _miniFmtExact(v) : _miniFmtValue(unit, v); }
+// The index of the last entry of a date-sorted array (log rows, holdings) at
+// or before a day; -1 when none is.
+function _miniLastIdxAt(arr, d) {
+  let lo = -1, hi = arr.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (arr[m].date <= d) lo = m; else hi = m - 1; }
+  return lo;
+}
+// That entry itself, or null.
+function _miniLatestAt(arr, d) {
+  const i = arr ? _miniLastIdxAt(arr, d) : -1;
+  return i < 0 ? null : arr[i];
+}
+// The strategy's own return over a dragged range, in percent: how the money
+// that followed the run this chart draws grew from the range's first day to
+// its last, with deposits and withdrawals taken out (a row's growth is its
+// value less what came in that day, over the row before; a row before any
+// money was in adds none). A chart that joins two runs (data.runs: the
+// panel's history run up to the main run's first day, then the main run)
+// chains each run's part of the range. Null when a row in the range carries
+// no value or no invested total, as a built-in panel's rows do: the readout
+// then has no such row.
+function _miniRunReturn(data, from, to) {
+  const hasMoney = r => typeof r.value === 'number' && typeof r.invested === 'number';
+  let growth = 1, steps = 0;
+  for (const run of data.runs) {
+    const rows = run.rows, end = run.until && run.until < to ? run.until : to;
+    const last = _miniLastIdxAt(rows, end);
+    // From the last row at or before the range's first day, or the run's first row when it starts later.
+    for (let j = Math.max(0, _miniLastIdxAt(rows, from)) + 1; j <= last; j++) {
+      const before = rows[j - 1], row = rows[j];
+      if (!hasMoney(before) || !hasMoney(row)) return null;
+      if (before.value > 0) growth *= (row.value - (row.invested - before.invested)) / before.value;
+      steps++;
+    }
+  }
+  return steps ? (growth - 1) * 100 : null;
+}
+function _miniPriceAt(fund, d) {
+  const i = typeof dailyDateToIdx !== 'undefined' && dailyDateToIdx ? dailyDateToIdx.get(d) : null;
+  const px = i != null ? daily[i][fund] : null;
+  return px > 0 ? px : null;
+}
+// What the strategy holds at a day, by name, for the tooltip ("Holding TQQQ",
+// "Holding TQQQ · cash"; the user, 2026-11-21: "just keep holding x"): from
+// the run's per-day holdings when it returned them (the engine-based and
+// multi-fund entries), else from the latest log row at or before the day: the
+// documented row (held, shares, cash), or an older row that names what the
+// whole value sits in (held and value, with share for "TQQQ + CASH"). Each
+// fund's worth is its shares at that day's close in the site's data. A fund
+// or the cash is named when it is at least MINI_HOLD_MIN_SHARE of the total,
+// so pennies beside the whole account are not called a holding; a fund the
+// site has no price for that day is named as it is. Empty when the log says
+// nothing.
+const MINI_HOLD_MIN_SHARE = 0.005;
+function _miniHoldingAt(data, d) {
+  let parts, cash;
+  const at = _miniLatestAt(data.holdings, d);
+  if (at) { parts = Object.entries(at.h).filter(([, sh]) => sh > 0); cash = at.cash > 0 ? at.cash : 0; }
+  else {
+    const row = _miniLatestAt(data.log, d);
+    if (!row || typeof row.held !== 'string') return '';
+    const names = row.held.toLowerCase().split('+').map(s => s.trim()), funds = names.filter(s => s !== 'cash');
+    if (typeof row.cash === 'number' && typeof row.shares === 'number') {
+      if (funds.length > 1) return '';
+      parts = funds.length && row.shares > 0 ? [[funds[0], row.shares]] : []; cash = row.cash > 0 ? row.cash : 0;
+    } else if (typeof row.value === 'number') {
+      const part = names.length === 1 ? (funds.length ? 1 : 0) : row.share / 100, px = funds.length ? _miniPriceAt(funds[0], d) : null;
+      if (!(part >= 0 && part <= 1) || funds.length > 1 || (funds.length && !px)) return '';
+      parts = funds.length && part > 0 ? [[funds[0], row.value * part / px]] : []; cash = row.value * (1 - part);
+    } else return '';
+  }
+  const priced = parts.map(([fund, sh]) => ({ fund, worth: _miniPriceAt(fund, d) ? sh * _miniPriceAt(fund, d) : null }));
+  const least = MINI_HOLD_MIN_SHARE * (priced.reduce((s, p) => s + (p.worth || 0), 0) + cash);
+  const names = priced.filter(p => p.worth == null || p.worth >= least).map(p => p.fund.toUpperCase());
+  if (cash >= 1 && cash >= least) names.push('cash');
+  return names.length ? `<div class="mct-hold">Holding ${names.map(n => `<b>${_escHtml(n)}</b>`).join(' · ')}</div>` : '';
+}
+// A readout's rows, one per panel in panel order: the panel's first line (the
+// price or reading its levels are compared with), then, where `level` is
+// given, the panel's other lines in brackets, the levels it is moving toward.
+// `value` formats the first line's part, `level` each bracketed one. A level's
+// own closing parenthesis is dropped ("Overextended (+55%)" reads
+// "Overextended") so the brackets never nest.
+// `hot` is the line nearest the cursor: its entry is bold, a level in full ink.
+function _miniPanelRows(data, items, value, level, hot) {
+  const mark = (it, html) => (it === hot ? `<span class="mct-hot">${html}</span>` : html);
+  return data.panels.map((_, p) => {
+    const own = items.filter(it => it.panel === p);
+    if (!own.length) return '';
+    const levels = level ? own.slice(1).map(it => mark(it, `${_escHtml(it.label.replace(/\s*\([^()]*\)$/, ''))} ${level(it)}`)).join(' · ') : '';
+    return `<div class="mct-row"><span class="mct-dot" style="background:${own[0].color}"></span>`
+      + `<span>${mark(own[0], `${_escHtml(own[0].label)} ${value(own[0])}`)}${levels ? ` <span class="mct-levels">(${levels})</span>` : ''}</span></div>`;
+  }).join('');
+}
+// A value's height on its line's own panel.
+const _miniLineY = (data, s, v) => _miniPanelY(data.panels[s.panel], v);
+// A day's readout: the crosshair with a dot on every line (`marks`, svg) and
+// the tooltip's part (`html`): the date, what is held, then each panel's
+// reading and the levels that move with the day. A level that never moves
+// (`fixed`) is left out: its value is on the chart's own label. `day` is
+// { t, d }: its time and its date as logged. `cy` is the cursor's height: the listed line nearest it, within the panel it is over,
+// is bold; null for a readout under hovered trades, where no line is.
+function _miniDayReadout(data, day, cy) {
+  const cx = _miniXAt(data, day.t).toFixed(1);
+  const hits = data.series.map(s => ({ ...s, pt: _miniPtAt(s.pts, day.t), reading: s === data.series.find(o => o.panel === s.panel) })).filter(h => h.pt);
+  const listed = hits.filter(h => h.reading || !h.fixed);
+  const over = cy == null ? -1 : data.panels.findIndex(P => cy >= P.top && cy <= P.bottom);
+  const hot = listed.filter(h => h.panel === over).sort((a, b) => Math.abs(_miniLineY(data, a, a.pt.v) - cy) - Math.abs(_miniLineY(data, b, b.pt.v) - cy))[0] || null;
+  return {
+    marks: `<line x1="${cx}" y1="${data.padT}" x2="${cx}" y2="${data.H - data.padB}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
+      + hits.map(h => `<circle cx="${cx}" cy="${_miniLineY(data, h, h.pt.v).toFixed(1)}" r="0.5" fill="${h.color}" stroke="#fff" stroke-width="0.25"/>`).join(''),
+    html: `<div class="mct-date">${_escHtml(fmtLogDate(day.d))}</div>`
+      + _miniHoldingAt(data, day.d)
+      + _miniPanelRows(data, listed, h => `<b>${_miniFmtReadout(h.unit, h.pt.v)}</b>`, h => _miniFmtReadout(h.unit, h.pt.v), hot),
+  };
+}
+// The day hovered trades are read on: the day of the trade nearest the
+// cursor, so the readout is always of a day one of them happened (at full
+// range the day under the cursor itself can be weeks from a band's trades).
+// It is the trade's own day as logged, whether or not the chart's first line
+// has a point there. `items` are the trades the tooltip lists.
+function _miniTradesDay(svg, e, data, items) {
+  const t = _miniTimeAtX(data, _miniCursorX(svg, e, data));
+  const nearest = items.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a));
+  return { t: nearest.t, d: nearest.date };
+}
+function _miniHoverGroup(svg) {
+  let g = svg.querySelector('.mini-hover');
+  if (!g) {
+    g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'mini-hover');
+    svg.appendChild(g);
+  }
+  return g;
+}
+// A dragged range's last row, under the lines' changes: the strategy's return
+// over the range as the chart's own run traded it (_miniRunReturn). Empty
+// where that run's rows carry no money, as a built-in panel's do.
+function _miniRangeReturnHtml(data, from, to) {
+  const own = _miniRunReturn(data, from, to);
+  if (own == null) return '';
+  const digits = Math.abs(own) < 1 ? 2 : 1, shown = +own.toFixed(digits) || 0;   // || 0: never "−0.00%"
+  return `<div class="mct-range"><span>Strategy return</span><b class="${shown >= 0 ? 'mct-pos' : 'mct-neg'}">${shown >= 0 ? '+' : '−'}${Math.abs(shown).toFixed(digits)}%</b></div>`;
+}
+// The tooltip's place: right of the cursor and under it, on the other side
+// where the window ends. `avoid` holds boxes in window pixels that must stay
+// uncovered (a dragged range's change badges, _miniRangeBadges).
+const MINI_TIP = { edge: 8, right: 14, left: 12, under: 12, over: 10, gap: 6 };   // px: room kept to the window's edge, to the cursor on each side, and to a box to avoid
+function _miniPlaceTip(tip, e, avoid) {
+  tip.removeAttribute('hidden');
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let left = e.clientX + MINI_TIP.right, top = e.clientY + MINI_TIP.under;
+  if (left + w > window.innerWidth - MINI_TIP.edge) left = e.clientX - w - MINI_TIP.left;
+  if (top + h > window.innerHeight - MINI_TIP.edge) top = e.clientY - h - MINI_TIP.over;
+  // A tall readout (a band with many trades) may not fit either side of the
+  // cursor; keep it on screen rather than letting its top run off.
+  top = Math.max(MINI_TIP.edge, Math.min(top, window.innerHeight - h - MINI_TIP.edge));
+  if (avoid && avoid.length) ({ left, top } = _miniTipClearOf(avoid, e, w, h, top));
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+// A place for a tooltip of w by h px that covers none of the boxes. Beside
+// them at the cursor's height (`top`): right of them all or left of them all,
+// whichever side is nearer the cursor, so the tooltip lands on the cursor's
+// outer side of a dragged range. Where the window has no room on either
+// side: under them all or over them all. Where it has none there either (a
+// window smaller than the tooltip and the boxes together): the one of those
+// four, moved inside the window, that covers the least of them.
+function _miniTipClearOf(avoid, e, w, h, top) {
+  const { edge, gap } = MINI_TIP, maxLeft = window.innerWidth - edge - w, maxTop = window.innerHeight - edge - h;
+  const box = { left: Math.min(...avoid.map(r => r.left)), right: Math.max(...avoid.map(r => r.right)), top: Math.min(...avoid.map(r => r.top)), bottom: Math.max(...avoid.map(r => r.bottom)) };
+  const inside = (v, max) => Math.max(edge, Math.min(v, max));
+  const nearest = (places) => places.filter(p => p.left >= edge && p.left <= maxLeft && p.top >= edge && p.top <= maxTop).sort((a, b) => a.away - b.away)[0];
+  const right = Math.max(e.clientX + MINI_TIP.right, box.right + gap), leftSide = Math.min(e.clientX - MINI_TIP.left - w, box.left - gap - w);
+  const beside = [{ left: right, top, away: right - e.clientX }, { left: leftSide, top, away: e.clientX - leftSide - w }];
+  const x = inside(e.clientX + MINI_TIP.right, maxLeft);
+  const under = Math.max(e.clientY + MINI_TIP.under, box.bottom + gap), over = Math.min(e.clientY - MINI_TIP.over - h, box.top - gap - h);
+  const stacked = [{ left: x, top: under, away: under - e.clientY }, { left: x, top: over, away: e.clientY - over - h }];
+  const clear = nearest(beside) || nearest(stacked);
+  if (clear) return clear;
+  // (No d3 here: the widget page loads this file without it.)
+  const covered = (p) => avoid.reduce((sum, r) => sum + Math.max(0, Math.min(p.left + w, r.right) - Math.max(p.left, r.left)) * Math.max(0, Math.min(p.top + h, r.bottom) - Math.max(p.top, r.top)), 0);
+  return beside.concat(stacked).map(p => ({ left: inside(p.left, maxLeft), top: inside(p.top, maxTop) })).map(p => ({ ...p, covered: covered(p) })).sort((a, b) => a.covered - b.covered)[0];
+}
+// A dragged range's change badges: one at the middle of each panel's chord
+// (`readings`: the panel's first line with its points at the range's ends,
+// xA and xB), naming the line and how far it moved. Each is at a fixed pixel
+// size (hence the divisions by k), pushed apart when chords run close
+// together and kept inside the plot, and with more than one panel inside the
+// chord's own panel. `box` is the badge's outline in the chart's own units.
+function _miniRangeBadges(data, readings, xA, xB) {
+  const k = data.k, fs = 7 / k, ch = fs * 0.6, lh = 10 / k, padX = 3 / k;
+  return data.panels.flatMap((P, p) => {
+    const own = readings.filter(s => s.panel === p).map(s => {
+      const move = _miniRangeMove(s.unit, s.p0.v, s.p1.v);
+      return { y: (_miniLineY(data, s, s.p0.v) + _miniLineY(data, s, s.p1.v)) / 2 - lh / 2, move, label: s.label };
+    }).sort((a, b) => a.y - b.y);
+    for (let i = 1; i < own.length; i++) if (own[i].y - own[i - 1].y < lh) own[i].y = own[i - 1].y + lh;
+    if (data.panels.length > 1) for (let i = own.length - 1; i >= 0; i--) {
+      const max = i === own.length - 1 ? P.bottom - lh * 0.3 : own[i + 1].y - lh;
+      if (own[i].y > max) own[i].y = max;
+    }
+    return own;
+  }).map(m => {
+    const tw = (m.label.length + 1 + m.move.text.length) * ch;
+    const xM = Math.max(data.padL + tw / 2 + padX, Math.min(data.W - data.padR - tw / 2 - padX, (xA + xB) / 2));
+    return { ...m, fs, xM, box: { x: xM - tw / 2 - padX, y: m.y - lh * 0.72, w: tw + 2 * padX, h: lh } };
+  });
+}
+// A trade as a person would say it: "Buy TQQQ", "Sell TQQQ", "Sell TQQQ → SQQQ"
+// when the proceeds were parked, "Buy TQQQ (from SQQQ)" when a buy left another
+// holding, "Switch SQQQ → TQQQ". Cash is where money rests between holdings,
+// never something bought or sold, so it is named only as a non-cash destination.
+function _miniMoveText(it) {
+  const isCash = h => !h || /^cash$/i.test(h);
+  if (it.kind === 'sell') return `Sell${isCash(it.from) ? '' : ' ' + it.from}${isCash(it.to) ? '' : ' → ' + it.to}`;
+  if (it.kind === 'buy') return `Buy ${it.to}${isCash(it.from) ? '' : ' (from ' + it.from + ')'}`;
+  if (it.kind === 'switch') return isCash(it.from) ? `Switch to ${it.to}` : `Switch ${it.from} → ${it.to}`;
+  return `${it.label} ${it.to}`;
+}
+// The trade list for a hovered band: each trade's action, what was held after
+// it, the date and the strategy's own note. A dense band lists its first
+// trades and counts the rest: the tooltip cannot scroll, and zooming in
+// splits the band anyway.
+const _miniListedTrades = group => group.items.slice(0, MINI_EVENT.maxListed);
+// The trades made on a day, in the order they were logged.
+const _miniTradesOn = (data, d) => (data.events || []).flatMap(g => g.items).filter(it => it.date === d);
+function _miniEventRows(group) {
+  const listed = _miniListedTrades(group), unlisted = group.items.length - listed.length;
+  return (group.items.length > 1 ? `<div class="mct-ev-head">${group.items.length} trades in this band</div>` : '')
+    + listed.map(it => `<div class="mct-ev"><span class="mct-dot" style="background:${it.color};box-shadow:0 0 0 2px ${it.ring}${it.part ? `;clip-path:${_miniWedgeClip(it.part[0], it.part[1])}` : ''}"></span>`
+        + `<span>${_escHtml(_miniMoveText(it))}</span><span class="mct-ev-when">${_escHtml(_miniTradeDay(it.date))}</span>`
+        + (it.note ? `<div class="mct-ev-note">${_escHtml(it.note)}</div>` : '')
+        + (it.beforeClose != null ? `<div class="mct-ev-note mct-ev-open">Not final: the price is from ${_miniCloseGap(it.beforeClose)} before the close.</div>` : '') + `</div>`).join('')
+    + (unlisted > 0 ? `<div class="mct-ev-head">and ${unlisted} more — zoom in to split this band</div>` : '');
+}
+// Wheel over the chart with the modifier held zooms the time axis around the
+// cursor; the panel must not scroll meanwhile, hence passive: false. Without
+// the key the event passes through and the panel scrolls as usual. Within
+// MINI_ZOOM.rightAnchorPx screen pixels of the plot's right edge the pivot is
+// the visible right edge itself, so zooming near the latest price keeps that
+// price in place instead of drifting with the cursor.
+document.addEventListener('wheel', (e) => {
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  const data = _miniDataOf(svg);
+  if (!svg || !data || !data.series.length || !modKeyHeld(e)) return;
+  e.preventDefault();
+  const span = data.t1 - data.t0, full = data.T1 - data.T0;
+  const scale = Math.pow(2, -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : MINI_ZOOM.wheelK));
+  const next = Math.max(Math.min(MINI_ZOOM.minSpanMs, full), Math.min(full, span / scale));
+  if (next === span) return;
+  const x = _miniCursorX(svg, e, data);
+  const pxPerUnit = svg.getBoundingClientRect().width / data.W, plotW = data.W - data.padL - data.padR;
+  // On a narrow panel the zone is capped at half the plot, so the left half still zooms at the cursor.
+  const zone = Math.min(MINI_ZOOM.rightAnchorPx, plotW * pxPerUnit / 2);
+  const nearRight = (data.W - data.padR - x) * pxPerUnit <= zone;
+  const pivot = nearRight ? data.t1 : _miniTimeAtX(data, x);
+  const frac = (pivot - data.t0) / span;
+  // Both ends from the pivot, so a pivot on an edge keeps that edge exactly
+  // (t0 + next can round a fraction of a millisecond off it, enough to read
+  // the latest date as off screen).
+  let t0 = pivot - frac * next, t1 = pivot + (1 - frac) * next;
+  if (t0 < data.T0) { t0 = data.T0; t1 = t0 + next; }
+  if (t1 > data.T1) { t1 = data.T1; t0 = t1 - next; }
+  if (next >= full) { t0 = data.T0; t1 = data.T1; }
+  // At the full range the zoom clears, unless the chart rests on a narrower
+  // home view: then the full range is kept as a zoom of its own.
+  if (next >= full && !data.home) delete window._miniZooms[data.cfgId];
+  else window._miniZooms[data.cfgId] = { t0, t1 };
+  _miniChartClearHover();
+  _miniChartRerender(data.cfgId);
+}, { passive: false });
+// The Latest chip: keep the span, end the window at the latest date.
+function _miniJumpToLatest(svg) {
+  const d = _miniDataOf(svg);
+  if (!d || d.t1 >= d.T1) return;   // the latest date is on screen already
+  const span = d.t1 - d.t0;
+  window._miniZooms[d.cfgId] = { t0: Math.max(d.T0, d.T1 - span), t1: d.T1 };
+  _miniChartClearHover();
+  _miniChartRerender(d.cfgId);
+}
+function _miniZoomReset(svg) {
+  const d = _miniDataOf(svg);
+  if (!d || !window._miniZooms[d.cfgId]) return;
+  delete window._miniZooms[d.cfgId];
+  _miniChartClearHover();
+  _miniChartRerender(d.cfgId);
+}
+document.addEventListener('dblclick', (e) => {
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  if (svg && !e.target.closest('.mini-line-toggle')) _miniZoomReset(svg);   // two quick clicks on an eye are two toggles, not a reset
+});
+document.addEventListener('click', (e) => {
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  if (!svg) return;
+  if (e.target.closest('.mini-zoom-reset')) _miniZoomReset(svg);
+  if (e.target.closest('.mini-latest')) _miniJumpToLatest(svg);
+});
+// Touch, through pointer events so the mouse handlers stay as they are: a
+// pinch zooms the time axis around the fingers' midpoint, a one-finger drag
+// across the chart pans it, and a vertical drag still scrolls the page
+// (touch-action: pan-y on the chart, styles.css, which also keeps the browser
+// from zooming the whole page on a pinch over it). A touch pointer is captured
+// by the element it lands on, and every step re-renders the chart into a new
+// svg, so the capture is released at once and each event finds the chart
+// under it; the gesture reads the chart's current data by its id.
+const _miniTouch = { cfgId: null, fingers: new Map(), start: null, raf: 0 };
+function _miniTouchStart(data, svg) {
+  const f = [..._miniTouch.fingers.values()];
+  const rect = svg.getBoundingClientRect(), pxPerUnit = rect.width / data.W;
+  const start = { t0: data.t0, t1: data.t1, pxPerMs: pxPerUnit * (data.W - data.padL - data.padR) / (data.t1 - data.t0), x: f[0].x, y: f[0].y, mode: f.length >= 2 ? 'pinch' : 'tap' };
+  if (f.length >= 2) {
+    start.dist = Math.hypot(f[1].x - f[0].x, f[1].y - f[0].y) || 1;
+    start.pivot = _miniTimeAtX(data, ((f[0].x + f[1].x) / 2 - rect.left) / pxPerUnit);
+  }
+  _miniTouch.start = start;
+}
+// The window to show; a frame at most, since every move re-renders the chart.
+function _miniTouchApply(t0, t1, data) {
+  if (t0 === data.t0 && t1 === data.t1) return;
+  if (t1 - t0 >= data.T1 - data.T0 && !data.home) delete window._miniZooms[data.cfgId];
+  else window._miniZooms[data.cfgId] = { t0, t1 };
+  if (!_miniTouch.raf) _miniTouch.raf = requestAnimationFrame(() => { _miniTouch.raf = 0; _miniChartRerender(data.cfgId); });
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  const data = _miniDataOf(svg);
+  if (!svg || !data || !data.series.length) return;
+  if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) e.target.releasePointerCapture(e.pointerId);
+  if (_miniTouch.cfgId !== data.cfgId) _miniTouch.fingers.clear();
+  _miniTouch.cfgId = data.cfgId;
+  _miniTouch.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  _miniTouchStart(data, svg);
+  if (_miniTouch.fingers.size >= 2) _miniChartClearHover();
+});
+document.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'touch' || !_miniTouch.fingers.has(e.pointerId)) return;
+  const data = window._miniCharts[_miniTouch.cfgId], start = _miniTouch.start;
+  if (!data || !start) return;
+  _miniTouch.fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const f = [..._miniTouch.fingers.values()];
+  const full = data.T1 - data.T0, startSpan = start.t1 - start.t0;
+  if (start.mode === 'pinch' && f.length >= 2) {
+    // The span scales with the fingers' distance; the date under their first midpoint stays put, as the wheel's pivot does.
+    const dist = Math.hypot(f[1].x - f[0].x, f[1].y - f[0].y) || 1;
+    const next = Math.max(Math.min(MINI_ZOOM.minSpanMs, full), Math.min(full, startSpan * start.dist / dist));
+    const frac = (start.pivot - start.t0) / startSpan;
+    let t0 = start.pivot - frac * next, t1 = start.pivot + (1 - frac) * next;
+    if (t0 < data.T0) { t0 = data.T0; t1 = t0 + next; }
+    if (t1 > data.T1) { t1 = data.T1; t0 = t1 - next; }
+    if (next >= full) { t0 = data.T0; t1 = data.T1; }
+    _miniTouchApply(t0, t1, data);
+    return;
+  }
+  if (f.length !== 1) return;
+  const dx = f[0].x - start.x, dy = f[0].y - start.y;
+  // A drag is a pan once it has gone sideways; a vertical one is the page's scroll.
+  if (start.mode === 'tap') { if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return; start.mode = 'pan'; _miniChartClearHover(); }
+  if (start.mode !== 'pan') return;
+  const span = start.t1 - start.t0;
+  const t1 = Math.min(data.T1, Math.max(data.T0 + span, start.t1 - dx / start.pxPerMs));
+  _miniTouchApply(t1 - span, t1, data);
+});
+const _miniTouchEnd = (e) => {
+  if (e.pointerType !== 'touch' || !_miniTouch.fingers.has(e.pointerId)) return;
+  _miniTouch.fingers.delete(e.pointerId);
+  const data = window._miniCharts[_miniTouch.cfgId], svg = document.querySelector(`.custom-lines-chart[data-mini-id="${_miniTouch.cfgId}"]`);
+  if (_miniTouch.fingers.size && data && svg) _miniTouchStart(data, svg);   // a pinch down to one finger: a fresh drag from here
+  else { _miniTouch.start = null; _miniTouch.cfgId = null; }
+};
+document.addEventListener('pointerup', _miniTouchEnd);
+document.addEventListener('pointercancel', _miniTouchEnd);
+// Mouse down on the chart starts one of two drags. With the modifier held it
+// pans the zoomed window: the chart follows the cursor, pixel for pixel, until
+// the button is released, and stops at either end of the data (a full view has
+// nowhere to go). Without it the drag selects a range, like the main chart's:
+// while dragging, the overlay shades the span, draws each panel's chord
+// between its reading's two endpoints, and the tooltip shows how long the
+// range is, each reading's exact from → to values and the strategy's return
+// over it. Auto-clears on release. The range drag
+// starts on the plot only: the strip above it belongs to the trade bands.
+document.addEventListener('mousedown', (e) => {
+  // Any press dismisses a pinned range, as on the main chart; a press on a
+  // chart then starts its own drag.
+  if (window._miniPinned) _miniChartClearHover();
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  const data = _miniDataOf(svg);
+  if (!svg || !data || !data.series.length) return;
+  if (modKeyHeld(e)) {
+    const pxPerUnit = svg.getBoundingClientRect().width / data.W;
+    window._miniPan = { cfgId: data.cfgId, clientX: e.clientX, t0: data.t0, t1: data.t1, pxPerMs: pxPerUnit * (data.W - data.padL - data.padR) / (data.t1 - data.t0) };
+    document.body.classList.add('mini-panning');
+    _miniChartClearHover();
+    e.preventDefault();
+    return;
+  }
+  if (_miniCursorY(svg, e, data) < data.padT) return;
+  window._miniDragAnchor = _miniAnchorFromEvent(svg, e, data);
+  window._miniDragCfg = data.cfgId;   // the range belongs to this chart
+  e.preventDefault(); // no text selection while dragging
+});
+document.addEventListener('mouseup', (e) => {
+  if (window._miniPan) {
+    window._miniPan = null;
+    document.body.classList.remove('mini-panning');
+  }
+  if (!window._miniDragAnchor) return;
+  // Shift at release keeps the range and its readout, the main chart's pin,
+  // until Escape or the next press.
+  const shown = window._miniRangeShown;
+  const pin = e.shiftKey && shown && shown.cfgId === window._miniDragCfg;
+  window._miniDragAnchor = null;
+  window._miniDragCfg = null;
+  if (pin) { window._miniPinned = shown.cfgId; return; }
+  _miniChartClearHover();
+});
+// Escape dismisses a pinned range before the page's own Escape handlers see it
+// (one closes the strategy panel this chart sits in); the next Escape does that.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !window._miniPinned) return;
+  _miniChartClearHover();
+  e.stopPropagation();
+}, true);
+document.addEventListener('mousemove', (e) => {
+  const pan = window._miniPan;
+  if (pan) {
+    const data = window._miniCharts[pan.cfgId];
+    if (!data) return;
+    // The window moves by its right end, so a pan that reaches the latest date
+    // lands on it exactly (t0 + span can round a hair short of it).
+    const span = pan.t1 - pan.t0;
+    const t1 = Math.min(data.T1, Math.max(data.T0 + span, pan.t1 - (e.clientX - pan.clientX) / pan.pxPerMs));
+    if (t1 === data.t1) return;
+    window._miniZooms[data.cfgId] = { t0: t1 - span, t1 };
+    _miniChartRerender(data.cfgId);
+    return;
+  }
+  // A pinned range holds the tooltip until it is dismissed: no hover meanwhile.
+  if (window._miniPinned) return;
+  const svg = e.target && e.target.closest && e.target.closest('.custom-lines-chart');
+  if (!svg) { if (window._miniHoverActive && !window._miniDragAnchor) _miniChartClearHover(); return; }
+  const data = _miniDataOf(svg);
+  if (!data || !data.series.length) return;
+  const plotBottom = data.H - data.padB;
+  const g = _miniHoverGroup(svg);
+  const tip = _miniChartTipEl();
+  const drag = window._miniDragAnchor && window._miniDragCfg === data.cfgId ? window._miniDragAnchor : null;
+  window._miniRangeShown = null;   // set again below while the readout is a range
+
+  // The strip above the plot is the trade layer: over a band the tooltip
+  // lists that band's trades, then a day's readout under them (the user,
+  // 2026-11-21: "I want normal hover details also to be shown"); off a band
+  // it shows nothing. The plain hover below names only the trades of the day
+  // it reads.
+  if (!drag && _miniCursorY(svg, e, data) < data.padT) {
+    const hit = e.target.closest('.mini-zoom-reset, .mini-latest') ? null : _miniEventAt(data, _miniCursorX(svg, e, data));
+    _miniHighlightEvent(svg, hit ? hit.index : -1);
+    window._miniHoverActive = true;
+    if (!hit) { g.innerHTML = ''; tip.setAttribute('hidden', ''); return; }
+    const day = _miniDayReadout(data, _miniTradesDay(svg, e, data, _miniListedTrades(hit.group)), null);
+    g.innerHTML = day.marks;
+    tip.innerHTML = _miniEventRows(hit.group) + day.html;
+    _miniPlaceTip(tip, e);
+    return;
+  }
+  _miniHighlightEvent(svg, -1);
+  const anchor = _miniAnchorFromEvent(svg, e, data);
+
+  if (drag && drag.t !== anchor.t) {
+    // Range mode: shaded span + a chord per panel, the prices' moves in the tooltip.
+    let lo = drag, hi = anchor;
+    if (hi.t < lo.t) { lo = anchor; hi = drag; }
+    const xA = _miniXAt(data, lo.t), xB = _miniXAt(data, hi.t);
+    const spans = data.series.map(s => ({ ...s, p0: _miniPtAt(s.pts, lo.t), p1: _miniPtAt(s.pts, hi.t) })).filter(s => s.p0 && s.p1);
+    // Each panel's reading gets a chord and a badge on the chart; its levels
+    // get none, also while the reading is hidden or has no point at an end of
+    // the range (a level would take its place and show a flat "+0.00"). The
+    // tooltip lists the prices only, the readings in dollars (the user,
+    // 2026-11-22: "we are only interested in tqqq price change, soxl price
+    // change and strategy change, remove all others", then: "even through it
+    // not in tooltip, still keep signal change in the sygnal chart").
+    const readings = data.readings.map((key, p) => spans.find(s => s.panel === p && s.key === key)).filter(Boolean);
+    const prices = readings.filter(s => s.unit === '$');
+    const badges = _miniRangeBadges(data, readings, xA, xB);
+    g.innerHTML = `<rect x="${xA.toFixed(1)}" y="${data.padT}" width="${(xB - xA).toFixed(1)}" height="${(plotBottom - data.padT).toFixed(2)}" fill="rgba(134,118,255,0.10)"/>`
+      + `<line x1="${xA.toFixed(1)}" y1="${data.padT}" x2="${xA.toFixed(1)}" y2="${plotBottom}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
+      + `<line x1="${xB.toFixed(1)}" y1="${data.padT}" x2="${xB.toFixed(1)}" y2="${plotBottom}" stroke="rgba(56,56,116,0.35)" stroke-width="0.3" stroke-dasharray="2,2"/>`
+      + readings.map(s => {
+          const y0 = _miniLineY(data, s, s.p0.v).toFixed(1), y1 = _miniLineY(data, s, s.p1.v).toFixed(1);
+          return `<line x1="${xA.toFixed(1)}" y1="${y0}" x2="${xB.toFixed(1)}" y2="${y1}" stroke="${s.color}" stroke-width="0.5" stroke-dasharray="2,1.5"/>
+            <circle cx="${xA.toFixed(1)}" cy="${y0}" r="0.9" fill="${s.color}" stroke="#fff" stroke-width="0.3"/>
+            <circle cx="${xB.toFixed(1)}" cy="${y1}" r="0.9" fill="${s.color}" stroke="#fff" stroke-width="0.3"/>`;
+        }).join('')
+      // Each chord's midpoint gets a badge naming the line and its change (percent, points or a plain difference, by the panel's unit), green/red by sign.
+      + badges.map(m => {
+          const col = m.move.up ? '#00b929' : '#dc2626';
+          return `<rect x="${m.box.x.toFixed(1)}" y="${m.box.y.toFixed(1)}" width="${m.box.w.toFixed(1)}" height="${m.box.h.toFixed(2)}" rx="${(3 / data.k).toFixed(2)}" fill="#fff" stroke="${col}" stroke-width="${(0.8 / data.k).toFixed(2)}"/>
+              <text x="${m.xM.toFixed(1)}" y="${m.y.toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono" font-size="${m.fs.toFixed(2)}" font-weight="600"><tspan fill="rgba(56,56,116,0.85)">${_escHtml(m.label)} </tspan><tspan fill="${col}" font-weight="700">${m.move.text}</tspan></text>`;
+        }).join('');
+    // The badges' boxes in window pixels: the tooltip keeps clear of them.
+    const svgBox = svg.getBoundingClientRect(), px = svgBox.width / data.W;
+    const avoid = badges.map(m => ({ left: svgBox.left + m.box.x * px, right: svgBox.left + (m.box.x + m.box.w) * px, top: svgBox.top + m.box.y * px, bottom: svgBox.top + (m.box.y + m.box.h) * px }));
+    // How long the range is, then each price from the range's start to its
+    // end, coloured by direction, with its change in percent beside it, then
+    // the strategy's return. The chords' badges carry every reading's change.
+    tip.innerHTML = `<div class="mct-date">${formatRangeDuration(lo.d, hi.d)}</div>`
+      + _miniPanelRows(data, prices, s => `<span class="mct-from">${_miniFmtExact(s.p0.v)} →</span> `
+          + `<b class="${s.p1.v >= s.p0.v ? 'mct-pos' : 'mct-neg'}">${_miniFmtExact(s.p1.v)} (${_miniRangeMove(s.unit, s.p0.v, s.p1.v).text})</b>`)
+      + _miniRangeReturnHtml(data, lo.d, hi.d);
+    _miniPlaceTip(tip, e, avoid);
+    window._miniRangeShown = { cfgId: data.cfgId };
+    window._miniHoverActive = true;
+    return;
+  }
+
+  // A trade mark under the cursor: its trade, then the readout of the trade's day.
+  const mark = drag ? null : _miniMarkAt(svg, e, data);
+  if (mark) {
+    const day = _miniDayReadout(data, _miniTradesDay(svg, e, data, [mark.item]), null);
+    g.innerHTML = day.marks + `<circle cx="${mark.x.toFixed(2)}" cy="${mark.y.toFixed(2)}" r="${(mark.r + 2.5 / data.k).toFixed(2)}" fill="none" stroke="${mark.item.color}" stroke-width="${(1 / data.k).toFixed(2)}"/>`;
+    tip.innerHTML = _miniEventRows({ items: [mark.item] }) + day.html;
+    _miniPlaceTip(tip, e);
+    window._miniHoverActive = true;
+    return;
+  }
+
+  // Plain hover: the readout of the snapped day, under the trades made on
+  // that day (the user, 2026-11-22: "I was holding soxl next day cash but I
+  // don't see any event").
+  const day = _miniDayReadout(data, anchor, _miniCursorY(svg, e, data));
+  g.innerHTML = day.marks;
+  tip.innerHTML = _miniTradesOn(data, anchor.d).map(it => _miniEventRows({ items: [it] })).join('') + day.html;
+  _miniPlaceTip(tip, e);
+  window._miniHoverActive = true;
+});
+
+// Series colours for the signal mini chart. A line named after a fund (its
+// label starts with the fund's ticker: "TQQQ price", "SPY 430-day return",
+// "SOXL ahead of SOXX") wears that fund's colour, js/data.js FUND_COLORS, the
+// same colour the fund has on the main chart and in every other strategy's
+// chart (the user, 2026-11-06: "consistent colors for all things, like for
+// tqqq price, for soxl price"). Every other line takes this palette by its
+// place among the panel's other such lines, so the first level in a panel is
+// indigo in every strategy. Every line is on screen at once, so the six were
+// chosen to clear the dataviz validator's floors under ALL pairings (OKLab
+// ΔE 15 as seen and 6 under protan/deutan simulation; at worst 16.9 and 7.9)
+// and, each of them, TQQQ's red. Against the other funds a few pairs sit
+// inside the floors (QQQ's blue and the magenta, QLD's violet and the indigo,
+// GLD's gold and the brown), so at render time an entry closer than the floors
+// to a fund colour drawn in the same panel moves to the end of the order for
+// that panel and is used only once the others run out. Nothing wraps: a panel
+// holds six lines at most (readLines), and a fund's line takes none of these.
+const CUSTOM_MINI_COLORS = ['#4f46e5', '#a21caf', '#0d9488', '#854d0e', '#7788ff', '#ea5da9'];
+const LINE_COLOR_FLOORS = { normal: 15, cvd: 6 };
+// The panel a declared line draws in: its group's name, "" for the first panel.
+function customLineGroup(ln) { return (ln && ln.group) || ''; }
+// The fund a declared line is named after: the ticker its label starts with
+// ("TQQQ price" → tqqq), null for a level ("250-day median", "Hold SOXL under").
+function fundOfLine(ln) {
+  const m = /^([A-Z]{3,4}) /.exec(ln.label || '');
+  const fund = m && m[1].toLowerCase();
+  return fund && FUND_COLORS[fund] ? fund : null;
+}
+// A colour for every declared line, in order: a fund's for the first line of
+// each fund in a panel, the palette for the rest (a second line of the same
+// fund included), the entries near the panel's fund colours last.
+function customLineColors(lines) {
+  const fundsIn = {};   // group → the fund colours drawn in that panel
+  for (const ln of lines) { const fund = fundOfLine(ln); if (fund) (fundsIn[customLineGroup(ln)] = fundsIn[customLineGroup(ln)] || new Set()).add(FUND_COLORS[fund]); }
+  const clear = (a, b) => { const s = colorSeparation(a, b); return s.normal >= LINE_COLOR_FLOORS.normal && s.cvd >= LINE_COLOR_FLOORS.cvd; };
+  const orderFor = group => { const far = c => [...(fundsIn[group] || [])].every(f => clear(c, f)); return [...CUSTOM_MINI_COLORS.filter(far), ...CUSTOM_MINI_COLORS.filter(c => !far(c))]; };
+  const panels = {};   // group → { funds coloured so far, levels coloured so far, this panel's palette order }
+  return lines.map(ln => {
+    const group = customLineGroup(ln), panel = panels[group] = panels[group] || { funds: new Set(), levels: 0, order: orderFor(group) };
+    const fund = fundOfLine(ln);
+    if (fund && !panel.funds.has(fund)) { panel.funds.add(fund); return FUND_COLORS[fund]; }
+    return panel.order[panel.levels++ % panel.order.length];
+  });
+}

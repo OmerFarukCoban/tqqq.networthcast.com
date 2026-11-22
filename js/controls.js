@@ -320,6 +320,25 @@ function updateDeployAvailability() {
 // and the tooltip would appear hidden behind the panel header. We also
 // clamp the horizontal anchor by the tooltip's worst-case half-width so
 // it can't spill past either viewport edge.
+// The tooltip opens above its icon. An icon near the top of the window (the
+// one in the years-held window's sentence) has no room there, so its tooltip
+// opens below instead ([data-tip-below], styles.css). The tooltip is a
+// ::after and has no box before it shows, so its height is read off a hidden
+// element that wears the tooltip's own styles (.info-tip-measure shares the
+// ::after's rules in styles.css) and holds the same text.
+function infoTipHeight(icon) {
+  let probe = document.getElementById('info-tip-measure');
+  if (!probe) {
+    probe = document.createElement('div');
+    probe.id = 'info-tip-measure';
+    probe.className = 'info-tip-measure';
+    probe.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(probe);
+  }
+  probe.textContent = icon.getAttribute('data-tip');
+  probe.toggleAttribute('data-tip-wide', icon.hasAttribute('data-tip-wide'));
+  return probe.offsetHeight;
+}
 function positionInfoTip(e) {
   const icon = e.target.closest && e.target.closest('.info-icon[data-tip]');
   if (!icon) return;
@@ -332,24 +351,55 @@ function positionInfoTip(e) {
   let cx = r.left + r.width / 2;
   if (maxCx > minCx) cx = Math.max(minCx, Math.min(maxCx, cx));
   icon.style.setProperty('--tip-left', cx + 'px');
-  icon.style.setProperty('--tip-top',  (r.top - 6) + 'px');
+  const below = r.top - 6 - infoTipHeight(icon) < PAD;
+  icon.toggleAttribute('data-tip-below', below);
+  icon.style.setProperty('--tip-top',  (below ? r.bottom + 6 : r.top - 6) + 'px');
 }
 document.addEventListener('mouseover', positionInfoTip);
 document.addEventListener('focusin',   positionInfoTip);
 
 
-// Draggable resize handle on the strategy panel — like a code-editor split.
-// Width persists in its own localStorage key (separate from LS_KEY so it
-// survives version resets — it's a harmless UI preference). Clamped so the
-// panel can't get uselessly narrow or eat the whole viewport.
+// Draggable divider between the docked strategy panel and the chart — like a
+// code-editor split (js/chart.js's syncPanelDock docks the panel; the
+// docked column reads --panel-w). Width persists in its own localStorage key
+// (separate from LS_KEY so it survives version resets — it's a harmless UI
+// preference). Clamped so the panel can't get uselessly narrow or squeeze the
+// chart beside it below a readable width.
 const PANEL_WIDTH_KEY = '9sig-panel-width';
 const PANEL_MIN_W = 280;
-const panelMaxW = () => Math.round(window.innerWidth * 0.98);
-function applyPanelWidth(w) {
-  const content = document.querySelector('.strategy-panel-content');
-  if (!content) return;
-  const clamped = Math.max(PANEL_MIN_W, Math.min(panelMaxW(), w));
-  content.style.width = clamped + 'px';
+const PANEL_CHART_MIN_W = 400;
+// At 900px and less (a fold phone's inner screen, a tablet held upright; the
+// panel docks from 680px, js/chart.js's PANEL_DOCK_MQ) the layout cannot give
+// the chart 400px beside a 280px panel. The chart keeps a phone's width there,
+// which its narrow layout is made for (at 295px the legend chips and the
+// period controls ran into each other), and the panel opens at just under
+// half: two phone-wide panes.
+const PANEL_NARROW_MQ = window.matchMedia('(max-width: 900px)');
+const PANEL_NARROW_CHART_MIN_W = 360;
+const PANEL_NARROW_DEFAULT_SHARE = 0.45;
+// Until the divider is dragged, and again for each new custom strategy
+// (resetPanelWidth), the panel takes this share of the layout.
+const PANEL_DEFAULT_SHARE = 0.25;
+// The width last dragged to, or null for the default share. A narrower window
+// clamps what is shown without forgetting it, so widening the window again
+// brings it back.
+let _panelWidthPref = null;
+function applyPanelWidth(w = _panelWidthPref) {
+  const layout = document.querySelector('.layout');
+  if (!layout) return w;
+  const narrow = PANEL_NARROW_MQ.matches;
+  const chartMin = narrow ? PANEL_NARROW_CHART_MIN_W : PANEL_CHART_MIN_W;
+  const max = layout.clientWidth - parseFloat(getComputedStyle(layout).columnGap) - chartMin;
+  const want = w != null ? w : layout.clientWidth * (narrow ? PANEL_NARROW_DEFAULT_SHARE : PANEL_DEFAULT_SHARE);
+  const clamped = Math.round(Math.max(PANEL_MIN_W, Math.min(max, want)));
+  layout.style.setProperty('--panel-w', clamped + 'px');
+  return clamped;
+}
+// Back to the default share, forgetting the width last dragged to.
+function resetPanelWidth() {
+  _panelWidthPref = null;
+  try { localStorage.removeItem(PANEL_WIDTH_KEY); } catch (e) {}
+  applyPanelWidth();
 }
 (function initPanelResizer() {
   const resizer = document.getElementById('strategy-panel-resizer');
@@ -358,37 +408,47 @@ function applyPanelWidth(w) {
   // Restore a saved width on load.
   try {
     const saved = parseFloat(localStorage.getItem(PANEL_WIDTH_KEY));
-    if (Number.isFinite(saved)) applyPanelWidth(saved);
+    if (Number.isFinite(saved)) _panelWidthPref = saved;
   } catch (e) {}
+  applyPanelWidth();
 
-  let startX = 0, startW = 0, dragging = false;
+  // Pointer events, captured by the divider: one path for a mouse, a finger
+  // and a pen, and the drag keeps reaching the divider wherever the pointer
+  // goes. It listened for the mouse alone until 2026-11-11, so a touch screen
+  // could not move it (the user, on a fold phone). The divider's
+  // touch-action: none (styles.css) keeps the browser from taking the drag
+  // for a scroll.
+  let startX = 0, startW = 0, dragId = null;
   const onMove = (e) => {
-    if (!dragging) return;
-    const w = startW + (e.clientX - startX);
-    applyPanelWidth(w);
+    if (e.pointerId !== dragId) return;
+    _panelWidthPref = applyPanelWidth(startW + (e.clientX - startX));
+    // The legend above the chart can re-wrap at the new width, which moves
+    // the chart's bottom edge.
+    fitChartHeight();
     e.preventDefault();
   };
-  const onUp = () => {
-    if (!dragging) return;
-    dragging = false;
+  const onUp = (e) => {
+    if (e.pointerId !== dragId) return;
+    dragId = null;
     content.classList.remove('is-resizing');
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    try { localStorage.setItem(PANEL_WIDTH_KEY, String(parseInt(content.style.width, 10) || 360)); } catch (e) {}
+    document.body.classList.remove('panel-resizing');
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(_panelWidthPref)); } catch (err) {}
   };
-  resizer.addEventListener('mousedown', (e) => {
-    dragging = true;
+  resizer.addEventListener('pointerdown', (e) => {
+    if (dragId !== null) return;   // a second finger while one is dragging
+    dragId = e.pointerId;
+    resizer.setPointerCapture(e.pointerId);
     startX = e.clientX;
     startW = content.getBoundingClientRect().width;
     content.classList.add('is-resizing');
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    document.body.classList.add('panel-resizing');
     e.preventDefault();
   });
+  resizer.addEventListener('pointermove', onMove);
+  resizer.addEventListener('pointerup', onUp);
+  resizer.addEventListener('pointercancel', onUp);
   // Keep within bounds if the window shrinks.
-  window.addEventListener('resize', () => {
-    if (content.style.width) applyPanelWidth(parseInt(content.style.width, 10) || 360);
-  });
+  window.addEventListener('resize', () => applyPanelWidth());
 })();
 
 // In-chart "log" pill is the sole source-of-truth for the logarithmic
@@ -502,11 +562,12 @@ if (inflPill) inflPill.addEventListener('click', () => {
   }
   // chart.js calls this right after it rewrites #disp-entry / #disp-exit —
   // new text changes the groups' widths, so they need re-centering; also
-  // re-run on resize (px positions).
+  // re-run whenever the track's width changes (px positions): a window
+  // resize, the strategy panel docking beside the chart, or its divider.
   window.refreshPeriodThumbLabels = function () {
     positionThumbLabels(valToPercent(+entryInput.value), valToPercent(+exitInput.value));
   };
-  window.addEventListener('resize', window.refreshPeriodThumbLabels);
+  new ResizeObserver(window.refreshPeriodThumbLabels).observe(container);
 
   // `side` identifies which thumb actually moved this time ('entry' or
   // 'exit') — only THAT side's exact-day override (js/date-picker.js) gets
@@ -689,6 +750,17 @@ if (inflPill) inflPill.addEventListener('click', () => {
   window._dualRange = { updateUI, setMax, step, stopPlay };
 })();
 
+// The two personal payloads of a share link, saved strategies (`scz`/`sc`)
+// and the real transaction history (`txz`/`tx`), travel in the URL fragment,
+// after `#`. A browser never sends the fragment to the server, and GitHub
+// Pages answers 414 to any request whose query string passes about 8,100
+// characters (measured 2026-10-08): one custom strategy's code plus a real
+// history is already past that. Everything else stays a query param, so
+// migrateSharedLink and the `v` stamp are untouched. js/init.js reads these
+// keys back from the fragment first and the query second, so links made
+// before this change still load.
+const SHARE_FRAGMENT_PARAMS = ['scz', 'sc', 'txz', 'tx'];
+
 // Share: encode the full UI state into URL params so the receiver lands on
 // the exact same view. Includes sliders, strategy params, toggles, envelope
 // opacity, dataset visibility (per-line legend toggles), and the analytics
@@ -813,11 +885,9 @@ async function shareConfig() {
   // Worker sandbox (no DOM, storage, cookies, or network), so running someone
   // else's strategy is safe.
   if (activeCfgs.length) {
-    const lean = activeCfgs.map(c => {
-      const o = { type: c.type, name: c.name, params: c.params || {}, color: c.color };
-      if (c.type === 'custom') { o.code = c.code || ''; o.desc = c.desc || ''; }
-      return o;
-    });
+    // An unedited library strategy goes by its library number, an edited or
+    // own one with its code (sharedConfigOf in js/saved-configs.js).
+    const lean = activeCfgs.map(sharedConfigOf);
     // `scz` is the deflated payload (see packSharePayload) — a custom
     // strategy's source is long enough that the plain form blows the URL
     // length limit. `sc` stays as the fallback for browsers without
@@ -878,11 +948,38 @@ async function shareConfig() {
       }
     }
   }
+  // The strategy the shared history's day change follows (js/transactions.js's
+  // txFollowKey), unless it's the default; a saved one by its position in
+  // activeCfgs, like the analytics keys above.
+  if (window._txSchedule && window._txSchedule.rows && window._txSchedule.rows.length) {
+    const follow = txFollowKey(window._txSchedule);
+    const sharedFollow = follow !== TX_FOLLOW_DEFAULT ? shareAnalyticsKey(follow) : null;
+    if (sharedFollow) params.set('tf', sharedFollow);
+  }
   if (typeof analyticsYearMin !== 'undefined' && analyticsYearMin != null) {
     params.set('anp', String(analyticsYearMin));
   }
   if (typeof analyticsYearMax !== 'undefined' && analyticsYearMax != null) {
     params.set('amp', String(analyticsYearMax));
+  }
+  // The years-held window (js/years-held.js): open or not, its lines (a saved
+  // strategy by its position, like the analytics keys above) and its start years.
+  if (typeof isYearsHeldOpen === 'function' && isYearsHeldOpen()) {
+    params.set('ym', '1');
+  }
+  if (typeof yearsHeldKeys !== 'undefined' && yearsHeldKeys.length) {
+    const sharedLines = yearsHeldKeys.map(shareAnalyticsKey).filter(Boolean);
+    if (sharedLines.length) params.set('yk', sharedLines.join(','));
+  }
+  if (typeof yearsHeldYearMin !== 'undefined' && yearsHeldYearMin != null) {
+    params.set('yn', String(yearsHeldYearMin));
+  }
+  if (typeof yearsHeldYearMax !== 'undefined' && yearsHeldYearMax != null) {
+    params.set('yx', String(yearsHeldYearMax));
+  }
+  // What its lines show, unless it is the median.
+  if (typeof yearsHeldMeasure !== 'undefined' && yearsHeldMeasure !== 'median') {
+    params.set('ys', yearsHeldMeasure);
   }
 
   // A pinned chart range-selection (drag-to-select, held with Shift so it
@@ -895,20 +992,19 @@ async function shareConfig() {
   // positional index.
   if (pinnedRange) { params.set('rf', pinnedRange[0]); params.set('rt', pinnedRange[1]); }
 
-  const url = window.location.origin + window.location.pathname + '?' + params.toString();
+  // Payloads into the fragment (see SHARE_FRAGMENT_PARAMS), the rest stays
+  // a query string the server will accept.
+  const fragment = new URLSearchParams();
+  SHARE_FRAGMENT_PARAMS.filter(key => params.has(key)).forEach(key => { fragment.set(key, params.get(key)); params.delete(key); });
+  const fragmentText = fragment.toString();
+  const url = window.location.origin + window.location.pathname + '?' + params.toString() + (fragmentText ? '#' + fragmentText : '');
 
   const toast = document.getElementById('share-toast');
-  // Servers and chat apps start rejecting URLs around 8k characters. The
-  // payload is compressed, so this only trips with a pile of long custom
-  // strategies — say so rather than handing over a link that 414s.
-  const tooLong = url.length > 8000;
-  if (toast) toast.textContent = tooLong
-    ? 'Link copied — but it is very long (' + Math.round(url.length / 1000) + 'k chars) and some apps may cut it off'
-    : 'Link copied to clipboard';
+  if (toast) toast.textContent = 'Link copied to clipboard';
   navigator.clipboard.writeText(url).then(() => {
     if (!toast) return;
     toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), tooLong ? 4000 : 2000);
+    setTimeout(() => toast.classList.remove('show'), 2000);
   }).catch(() => {
     prompt('Copy this link:', url);
   });

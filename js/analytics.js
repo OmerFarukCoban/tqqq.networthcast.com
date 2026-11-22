@@ -49,6 +49,9 @@ const STRATEGY_REGISTRY = {
   'bh-sso':  { label: 'B&H SSO',  pointsKey: 'ssoPoints',      valueOf: (p) => p.value, prependStart: true  },
   'bh-spxl': { label: 'B&H SPXL', pointsKey: 'spxlPoints',     valueOf: (p) => p.value, prependStart: true  },
   'bh-sqqq': { label: 'B&H SQQQ', pointsKey: 'sqqqPoints',     valueOf: (p) => p.value, prependStart: true  },
+  'bh-gld':  { label: 'B&H GLD',  pointsKey: 'gldPoints',      valueOf: (p) => p.value, prependStart: true  },
+  'bh-soxl': { label: 'B&H SOXL', pointsKey: 'soxlPoints',     valueOf: (p) => p.value, prependStart: true  },
+  'bh-soxx': { label: 'B&H SOXX', pointsKey: 'soxxPoints',     valueOf: (p) => p.value, prependStart: true  },
   'sma':     { label: 'SMA', pointsKey: 'smaPoints',           valueOf: (p) => p.value, prependStart: false,
                // SMA depends on the current asset+window — earliest valid
                // quarter is when the SMA series first becomes non-null.
@@ -200,9 +203,7 @@ function _analyticsYearSpan() {
 // is a plain absolutely-positioned bar driven off the same min/max the thumbs
 // already show — kept in a helper since both the picker refresh and the drag
 // handler need to repaint it.
-function _updateYearRangeFill(minInput, maxInput) {
-  const fill = document.getElementById('analytics-year-range-fill');
-  if (!fill) return;
+function _updateYearRangeFill(minInput, maxInput, fill) {
   const trackMin = +minInput.min, trackMax = +minInput.max;
   const span = trackMax - trackMin;
   if (!(span > 0)) { fill.style.left = '0%'; fill.style.width = '0%'; return; }
@@ -210,6 +211,46 @@ function _updateYearRangeFill(minInput, maxInput) {
   const hiPct = (+maxInput.value - trackMin) / span * 100;
   fill.style.left = loPct + '%';
   fill.style.width = (hiPct - loPct) + '%';
+}
+
+// A start-year dual slider: two overlapping range inputs (.period-dual-range in
+// styles.css), the bar between their thumbs and a "lo–hi" label, found by id
+// prefix — the heatmap's ('analytics') and the years-held window's
+// ('years-held'). A bound is null while its thumb rests on the data's own end,
+// so an open-ended range keeps following the data as years are added.
+function yearRangeControl(prefix) {
+  const minInput = document.getElementById(prefix + '-year-min-input');
+  const maxInput = document.getElementById(prefix + '-year-max-input');
+  const paint = () => {
+    document.getElementById(prefix + '-year-range-display').textContent = minInput.value + '–' + maxInput.value;
+    _updateYearRangeFill(minInput, maxInput, document.getElementById(prefix + '-year-range-fill'));
+  };
+  return {
+    // Put the thumbs at (yearMin, yearMax), each pulled inside the data's
+    // years. Returns the pair as it now stands.
+    show(yearMin, yearMax) {
+      const span = _analyticsYearSpan();
+      if (!span || span.span < 1) return { yearMin, yearMax };
+      if (yearMin != null && yearMin < span.minYear) yearMin = span.minYear;
+      if (yearMax != null && yearMax > span.maxYear) yearMax = span.maxYear;
+      minInput.min = maxInput.min = String(span.minYear);
+      minInput.max = maxInput.max = String(span.maxYear);
+      minInput.value = String(yearMin != null ? yearMin : span.minYear);
+      maxInput.value = String(yearMax != null ? yearMax : span.maxYear);
+      paint();
+      return { yearMin, yearMax };
+    },
+    // After a thumb moved: the other one is pushed along rather than crossed,
+    // so the range never inverts. Returns the new pair.
+    read(movedMin) {
+      let lo = parseInt(minInput.value, 10), hi = parseInt(maxInput.value, 10);
+      if (movedMin && lo > hi) { hi = lo; maxInput.value = String(hi); }
+      if (!movedMin && hi < lo) { lo = hi; minInput.value = String(lo); }
+      paint();
+      const span = _analyticsYearSpan();
+      return { yearMin: (span && lo <= span.minYear) ? null : lo, yearMax: (span && hi >= span.maxYear) ? null : hi };
+    },
+  };
 }
 
 // Show/hide the ", for start years <min>–<max>" sentence chunk. Hidden in
@@ -330,22 +371,7 @@ function refreshAnalyticsPickers() {
   }
 
   // ----- ", for start years <min>–<max>" — filters which start-year rows the grid draws -----
-  const minInput = document.getElementById('analytics-year-min-input');
-  const maxInput = document.getElementById('analytics-year-max-input');
-  const rangeDisplay = document.getElementById('analytics-year-range-display');
-  const yearSpan = _analyticsYearSpan();
-  if (minInput && maxInput && yearSpan && yearSpan.span >= 1) {
-    if (analyticsYearMin != null && analyticsYearMin < yearSpan.minYear) analyticsYearMin = yearSpan.minYear;
-    if (analyticsYearMax != null && analyticsYearMax > yearSpan.maxYear) analyticsYearMax = yearSpan.maxYear;
-    const lo = analyticsYearMin != null ? analyticsYearMin : yearSpan.minYear;
-    const hi = analyticsYearMax != null ? analyticsYearMax : yearSpan.maxYear;
-    minInput.min = maxInput.min = String(yearSpan.minYear);
-    minInput.max = maxInput.max = String(yearSpan.maxYear);
-    minInput.value = String(lo);
-    maxInput.value = String(hi);
-    if (rangeDisplay) rangeDisplay.textContent = lo + '–' + hi;
-    _updateYearRangeFill(minInput, maxInput);
-  }
+  ({ yearMin: analyticsYearMin, yearMax: analyticsYearMax } = yearRangeControl('analytics').show(analyticsYearMin, analyticsYearMax));
   _setYearRangeVisible(analyticsBaseline !== 'custom-pct');
 }
 
@@ -356,7 +382,16 @@ function refreshAnalyticsPickers() {
 // time the modal opens (see toggleAnalytics), before refreshAnalyticsPickers
 // reads analyticsStrategy/analyticsBaseline to build the dropdowns.
 function pickAnalyticsDefaultsFromChart() {
-  if (typeof chart === 'undefined' || !chart || !chart.data) return;
+  const picks = analyticsChartPicks(analyticsStrategy);
+  if (!picks) return; // nothing visible on the chart — leave the previous selection
+  analyticsStrategy = picks.strategy;
+  if (picks.baseline) analyticsBaseline = picks.baseline;
+}
+// The picks themselves: { strategy, baseline } as heatmap keys, or null when
+// the chart shows no line. `strategy` stays `currentStrategy` when no visible
+// line can be one; `baseline` is undefined when no other line is visible.
+function analyticsChartPicks(currentStrategy) {
+  if (typeof chart === 'undefined' || !chart || !chart.data) return null;
   const bhUL = ((document.getElementById('select-bh-underlying') || {}).value || 'tqqq').toLowerCase();
   const baseIdx = (typeof BASE_COLOR_DATASET_IDX !== 'undefined') ? BASE_COLOR_DATASET_IDX : {};
   const candidates = [];
@@ -385,19 +420,21 @@ function pickAnalyticsDefaultsFromChart() {
     if (m && Number.isFinite(m.end)) candidates.push({ key: CFG_KEY_PREFIX + cfg.id, end: m.end, isBaselineOnly: false });
   }
 
-  if (!candidates.length) return; // nothing visible on the chart — leave the previous selection
+  if (!candidates.length) return null;
 
+  const picks = { strategy: currentStrategy, baseline: undefined };
   // Top = the best-performing visible line eligible to BE the strategy.
   const stratCandidates = candidates.filter(c => !c.isBaselineOnly);
   if (stratCandidates.length) {
-    analyticsStrategy = stratCandidates.reduce((a, b) => b.end > a.end ? b : a).key;
+    picks.strategy = stratCandidates.reduce((a, b) => b.end > a.end ? b : a).key;
   }
   // Bottom = the worst-performing visible line, excluding whatever just got
   // picked as the strategy (comparing a line against itself is meaningless).
-  const baseCandidates = candidates.filter(c => c.key !== analyticsStrategy);
+  const baseCandidates = candidates.filter(c => c.key !== picks.strategy);
   if (baseCandidates.length) {
-    analyticsBaseline = baseCandidates.reduce((a, b) => b.end < a.end ? b : a).key;
+    picks.baseline = baseCandidates.reduce((a, b) => b.end < a.end ? b : a).key;
   }
+  return picks;
 }
 
 // Generic per-strategy accessors driven by STRATEGY_REGISTRY. Each strategy
@@ -564,25 +601,38 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Snapshot the analytics chart (header + full grid) and download as PNG.
+async function downloadAnalytics() {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const baseStr = analyticsBaseline === 'custom'
+    ? `custom-${Math.round(analyticsCustomTarget)}`
+    : analyticsBaseline;
+  return downloadChartImage('analytics-modal', 'analytics-heatmap', `tqqq-analytics-${analyticsStrategy}-vs-${baseStr}-${stamp}.png`);
+}
+
+// Snapshot a chart modal — its header and the whole of its chart area
+// (`wrapId`), scrolled-out parts included — and download it as `filename`.
+// Elements marked data-capture="skip" (controls that only make sense live) are
+// left out of the picture.
 // Two complications handled:
 //  1. The grid lives inside nested flex/scroll containers — every level needs
 //     `overflow: visible` and unbounded sizing to expose the full content.
 //  2. html2canvas renders native <select> controls inconsistently (text shifts
 //     down). We swap each select for a styled <strong> showing the selected
 //     option's text just for the duration of the capture, then restore.
-async function downloadAnalytics() {
+async function downloadChartImage(modalId, wrapId, filename) {
   if (typeof html2canvas !== 'function') {
     alert('Image library still loading — please try again in a moment.');
     return;
   }
-  const target = document.querySelector('#analytics-modal .analytics-chart');
+  const modal = document.getElementById(modalId);
+  const target = modal.querySelector('.analytics-chart');
   if (!target) return;
 
   const expandTargets = [
-    document.querySelector('#analytics-modal .modal-content'),
-    document.querySelector('#analytics-modal .modal-body'),
+    modal.querySelector('.modal-content'),
+    modal.querySelector('.modal-body'),
     target,
-    document.getElementById('analytics-heatmap'),
+    document.getElementById(wrapId),
   ].filter(Boolean);
   const origStyles = expandTargets.map(el => ({
     el,
@@ -604,11 +654,13 @@ async function downloadAnalytics() {
     const opt = sel.options[sel.selectedIndex];
     const repl = document.createElement('strong');
     repl.textContent = opt ? opt.text : sel.value;
-    repl.style.cssText = 'color: var(--text); font-weight: 600; font-family: "JetBrains Mono", monospace; font-size: 10px; padding: 0 4px;';
+    repl.style.cssText = 'color: var(--text); font-weight: 600; font-family: "JetBrains Mono", monospace; font-size:calc(10px * var(--ui-scale)); padding: 0 4px;';
     sel.style.display = 'none';
     sel.parentNode.insertBefore(repl, sel);
     selectSwaps.push({ sel, repl });
   });
+  const skipped = [...target.querySelectorAll('[data-capture="skip"]')];
+  skipped.forEach(el => el.setAttribute('hidden', ''));
 
   // Let layout settle after style changes.
   await new Promise(r => requestAnimationFrame(r));
@@ -626,11 +678,6 @@ async function downloadAnalytics() {
       windowWidth:  fullW,
       windowHeight: fullH,
     });
-    const stamp = new Date().toISOString().slice(0, 10);
-    const baseStr = analyticsBaseline === 'custom'
-      ? `custom-${Math.round(analyticsCustomTarget)}`
-      : analyticsBaseline;
-    const filename = `tqqq-analytics-${analyticsStrategy}-vs-${baseStr}-${stamp}.png`;
     canvas.toBlob((blob) => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -647,6 +694,7 @@ async function downloadAnalytics() {
       repl.remove();
       sel.style.display = '';
     });
+    skipped.forEach(el => el.removeAttribute('hidden'));
     origStyles.forEach(({ el, overflow, maxHeight, height, flex }) => {
       el.style.overflow  = overflow;
       el.style.maxHeight = maxHeight;
@@ -769,33 +817,36 @@ document.addEventListener('input', (e) => {
   const isMin = e.target && e.target.id === 'analytics-year-min-input';
   const isMax = e.target && e.target.id === 'analytics-year-max-input';
   if (!isMin && !isMax) return;
-  const minInput = document.getElementById('analytics-year-min-input');
-  const maxInput = document.getElementById('analytics-year-max-input');
-  let lo = parseInt(minInput.value, 10), hi = parseInt(maxInput.value, 10);
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
-  if (isMin && lo > hi) { hi = lo; maxInput.value = String(hi); }
-  if (isMax && hi < lo) { lo = hi; minInput.value = String(lo); }
-  const yearSpan = _analyticsYearSpan();
-  analyticsYearMin = (yearSpan && lo <= yearSpan.minYear) ? null : lo;
-  analyticsYearMax = (yearSpan && hi >= yearSpan.maxYear) ? null : hi;
-  const display = document.getElementById('analytics-year-range-display');
-  if (display) display.textContent = lo + '–' + hi;
-  _updateYearRangeFill(minInput, maxInput);
+  ({ yearMin: analyticsYearMin, yearMax: analyticsYearMax } = yearRangeControl('analytics').read(isMin));
   buildHeatmap();
 });
 
+// The page's money sliders, by the key the sentence dropdowns carry, with how a
+// dollar or percent value becomes a slider position.
+const MONEY_SLIDERS = {
+  initial: { id: 'slider-initial', toSlider: (v) => initialToSlider(v) },
+  monthly: { id: 'slider-monthly', toSlider: (v) => monthlyToSlider(v) },
+  raise:   { id: 'slider-raise',   toSlider: (v) => v },
+  rate:    { id: 'slider-rate',    toSlider: (v) => rateToSlider(v) },
+};
+// Set one of them and let the page react as if the user had dragged it: the
+// main chart redraws and the value is saved.
+function setMoneySlider(key, value) {
+  const slider = MONEY_SLIDERS[key];
+  const el = document.getElementById(slider.id);
+  el.value = String(slider.toSlider(value));
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 // Metric dropdowns inside the modal — change feeds back to the underlying
 // page slider/select, dispatches the appropriate event so the main chart
-// updates and localStorage saves, then rebuilds the heatmap.
+// updates and localStorage saves, then rebuilds the heatmap. (The years-held
+// window's dropdowns share the class and have their own handler.)
 document.addEventListener('change', (e) => {
   if (!e.target || !e.target.classList || !e.target.classList.contains('metric-select')) return;
+  if (!e.target.closest('#analytics-modal')) return;
   const key = e.target.dataset.metricKey;
   const rawValue = e.target.value;
-  const fireInput = (id, sliderValue) => {
-    const el = document.getElementById(id);
-    el.value = String(sliderValue);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  };
   const fireChange = (id, val) => {
     const el = document.getElementById(id);
     el.value = String(val);
@@ -824,12 +875,7 @@ document.addEventListener('change', (e) => {
   }
   const value = parseFloat(rawValue);
   if (!Number.isFinite(value)) return;
-  switch (key) {
-    case 'initial': fireInput('slider-initial', initialToSlider(value)); break;
-    case 'monthly': fireInput('slider-monthly', monthlyToSlider(value)); break;
-    case 'raise':   fireInput('slider-raise',   value); break;
-    case 'rate':    fireInput('slider-rate',    rateToSlider(value)); break;
-  }
+  if (MONEY_SLIDERS[key]) setMoneySlider(key, value);
   buildHeatmap();
 });
 
@@ -1105,7 +1151,7 @@ document.addEventListener('change', (e) => {
         <span>${escA(stratLabel)} &middot; INVESTED ${startYear} &middot; ${period}Y</span>
         <span class="tt-dd">DD ${ddStr}${ddRangeHtml}</span>
       </div>
-      <div class="tt-strat">${fmtFull(Math.round(value))} <span style="color:var(--text-muted);font-size:11px;font-weight:500">(ended ${endYear})</span></div>
+      <div class="tt-strat">${fmtFull(Math.round(value))} <span style="color:var(--text-muted);font-size:calc(11px * var(--ui-scale));font-weight:500">(ended ${endYear})</span></div>
       ${lineChart}
     `;
   }
@@ -1208,7 +1254,7 @@ const METRIC_OPTS = {
   monthly: [0, 50, 100, 150, 200, 250, 300, 400, 500, 600, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000, 7500, 10000, 15000, 20000, 25000, 50000, 100000],
   raise:   [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 10, 12, 15, 20],
   rate:    [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100],
-  sa:      ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  sa:      ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
   sw:      [100, 150, 200, 250],
   // SMA enrichment: hysteresis buffers + RSI overheat exit.
   seb:     [0, 1, 2, 3, 4, 5],
@@ -1216,28 +1262,28 @@ const METRIC_OPTS = {
   sro:     [0, 60, 70, 80, 90],
   src:     [0, 40, 50, 60, 70],
   // SMA out-asset, DCA ladders, bodyguard rules.
-  soa:     ['cash', 'qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
-  sbga:    ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  soa:     ['cash', 'qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
+  sbga:    ['qqq', 'spy', 'tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
   sdi:     [0, 3, 6, 12],
   sdo:     [0, 3, 6, 12],
   sbg:     [0, 30, 35, 40, 45, 50],
   // 9sig: which leveraged ETF to trade, and signal-line growth.
-  nu:      ['tqqq', 'qld', 'sso', 'spxl', 'sqqq'],
+  nu:      ['tqqq', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
   ng:      [0.5, 0.6, 0.7, 0.8, 0.9, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150],
   // 9sig rule customization:
   //   nc = 30-down no-sell drop % below 2-yr high (≥100 effectively disables)
   //   ns = spike-reset trigger (quarterly gain %; 0 disables)
   nc:      [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 140, 150, 180],
   nbp:     [50, 60, 70, 75, 80, 85, 90, 95, 100],
-  npa:     ['cash', 'qqq', 'spy', 'qld', 'tqqq', 'sso', 'spxl', 'sqqq'],
+  npa:     ['cash', 'qqq', 'spy', 'qld', 'tqqq', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
   ncw:     [3, 6, 9, 12, 15, 18, 21, 24, 36, 48, 60],
   ns:      [0, 25, 50, 60, 70, 75, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 225, 250, 275, 300, 350, 400, 500],
   np:      ['weekly', 'monthly', 'quarterly', 'yearly'],
   nh:      [0, 10, 20, 30, 40, 50, 60, 70, 80, 90],
   // SMA: which leveraged ETF the strategy holds when the signal is "in".
-  su:      ['tqqq', 'qld', 'sso', 'spxl', 'qqq', 'spy', 'sqqq'],
+  su:      ['tqqq', 'qld', 'sso', 'spxl', 'qqq', 'spy', 'sqqq', 'gld', 'soxl', 'soxx'],
   // Buy & Hold: which ETF is bought and held.
-  bu:      ['tqqq', 'qld', 'qqq', 'spy', 'sso', 'spxl', 'sqqq'],
+  bu:      ['tqqq', 'qld', 'qqq', 'spy', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'],
   // Per-strategy parked-cash interest rates (% per year).
   nr:      [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 14, 15, 16, 18, 20],
   scr:     [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 14, 15, 16, 18, 20],
@@ -1401,19 +1447,28 @@ function sentenceMetricSelect(key, current, fmt, dim) {
   return `<select class="metric-select as-metric${dim ? ' as-metric--dim' : ''}" data-metric-key="${key}" title="Applies to every strategy in the run">${opts}</select>`;
 }
 
+// A percent option's label: whole numbers bare, else one decimal.
+const fmtPctOption = (x) => (x % 1 === 0 ? x.toFixed(0) : x.toFixed(1)) + '%';
+
+// Investment inputs live inline in a sentence ("…with the entry amount of
+// [X] and monthly investment of [Y] increasing yearly by [Z]"). They apply to
+// every strategy in the run; editing one drives the matching page slider.
+// Fills the three slots '<prefix>-initial-slot', '-monthly-slot', '-raise-slot'
+// (the heatmap's 'analytics', the years-held window's 'years-held').
+function renderMoneySlots(prefix, initial, monthly, annualRaise) {
+  const setSlot = (name, html) => { document.getElementById(prefix + '-' + name + '-slot').innerHTML = html; };
+  setSlot('initial', sentenceMetricSelect('initial', initial, fmtFull, initial <= 0));
+  setSlot('monthly', sentenceMetricSelect('monthly', monthly, fmtFull, monthly <= 0));
+  setSlot('raise',   sentenceMetricSelect('raise', annualRaise * 100, fmtPctOption, monthly <= 0 || annualRaise <= 0));
+}
+
 function renderAnalyticsMetrics(initial, monthly, annualRaise, rate, strategy) {
   const m = document.getElementById('analytics-metrics');
   if (!m) return;
-  const pct = (x) => (x % 1 === 0 ? x.toFixed(0) : x.toFixed(1)) + '%';
+  const pct = fmtPctOption;
   const dimRate = (initial <= 0 && monthly <= 0);
 
-  // Investment inputs live inline in the sentence ("…with the entry amount of
-  // [X] and monthly investment of [Y] increasing yearly by [Z]"). They apply to
-  // every strategy in the run; editing one drives the matching page slider.
-  const setSlot = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
-  setSlot('analytics-initial-slot', sentenceMetricSelect('initial', initial, fmtFull, initial <= 0));
-  setSlot('analytics-monthly-slot', sentenceMetricSelect('monthly', monthly, fmtFull, monthly <= 0));
-  setSlot('analytics-raise-slot',   sentenceMetricSelect('raise', annualRaise * 100, pct, monthly <= 0 || annualRaise <= 0));
+  renderMoneySlots('analytics', initial, monthly, annualRaise);
 
   // First strategy's own parameters. (Global investment inputs — Initial /
   // Monthly / Annual raise — live in the sidebar; they're not repeated here.)
@@ -1488,7 +1543,7 @@ function showSpiralTooltip(tooltip, e, d, threshold) {
 
   tooltip.innerHTML = `
     <div class="tt-period">${escA(stratLabel)} &middot; STARTED ${d.year}</div>
-    <div class="tt-strat">${fmtFull(Math.round(todayValue))}${yearsLater > 0 ? ` <span style="color:var(--text-muted);font-size:11px;font-weight:500">(${yearsLater}y later, ${endYearLabel})</span>` : ''}</div>
+    <div class="tt-strat">${fmtFull(Math.round(todayValue))}${yearsLater > 0 ? ` <span style="color:var(--text-muted);font-size:calc(11px * var(--ui-scale));font-weight:500">(${yearsLater}y later, ${endYearLabel})</span>` : ''}</div>
     ${lineChart}
     <div class="tt-foot">
       <span>${d.year}${tag} alone: <strong style="color:var(--text)">${sign}${d.pct.toFixed(2)}%</strong></span>
@@ -1532,7 +1587,7 @@ function strategyDateValues(sim, strat) {
 // 'custom-pct' (per-cell flat target derived from prior cell × (1+pct)).
 function baselineDateValues(sim, key, cellBaselineVal, stratSeries) {
   if (!sim) return [];
-  if (key === '9sig' || key === 'bh-tqqq' || key === 'bh-qld' || key === 'bh-qqq' || key === 'bh-spy' || key === 'bh-sso' || key === 'bh-spxl' || key === 'bh-sqqq' || key === 'sma') {
+  if (key === '9sig' || key === 'bh-tqqq' || key === 'bh-qld' || key === 'bh-qqq' || key === 'bh-spy' || key === 'bh-sso' || key === 'bh-spxl' || key === 'bh-sqqq' || key === 'bh-gld' || key === 'bh-soxl' || key === 'bh-soxx' || key === 'sma') {
     return strategyDateValues(sim, key);
   }
   if (key === 'compounded') {
@@ -1596,8 +1651,9 @@ function _underlyingAndGrowth() {
 // strategy is in play either as the heatmap strategy or as its baseline)
 // also run simulateSMA() and attach its result. Avoids paying for the SMA
 // loop in the common case where it isn't displayed.
-function _smaParamsForAnalytics() {
-  const usesSMA = (analyticsStrategy === 'sma' || analyticsBaseline === 'sma');
+// `keys`: the lines the caller draws; the heatmap's two sides when left out.
+function _smaParamsForAnalytics(keys) {
+  const usesSMA = (keys || [analyticsStrategy, analyticsBaseline]).includes('sma');
   if (!usesSMA) return null;
   const { smaUlCol } = _underlyingAndGrowth();
   return {
@@ -1608,7 +1664,7 @@ function _smaParamsForAnalytics() {
   };
 }
 
-function _runAnalyticsSim(initial, monthly, rate, entryIdx, exitIdx, annualRaise, opts) {
+function _runAnalyticsSim(initial, monthly, rate, entryIdx, exitIdx, annualRaise, opts, keys) {
   // Inject the page-level underlying + qGrowth + rule choices into opts so
   // the main sim runs on whatever the user picked. Caller-provided opts win.
   // `rate` here is the Invested Compounded baseline rate; 9sig and SMA each
@@ -1617,7 +1673,7 @@ function _runAnalyticsSim(initial, monthly, rate, entryIdx, exitIdx, annualRaise
   const { sigUlCol, qGrowth, crashDropPct, crashLookbackMonths, spikeTriggerPct, rebalancePeriod, cashPct, contribDeployPct, targetFromPrevTarget, buyThrottlePct, parkAsset, spikeResetPct, nineSigTradeCostPct, nineSigCashRate, smaCashRate } = _ug;
   opts = Object.assign({ underlyingCol: sigUlCol, qGrowth, crashDropPct, crashLookbackMonths, spikeTriggerPct, rebalancePeriod, cashPct, contribDeployPct, targetFromPrevTarget, buyThrottlePct, parkAsset, spikeResetPct, tradeCostPct: nineSigTradeCostPct, baselineRate: rate }, opts);
   const sim = simulate(initial, monthly, nineSigCashRate, entryIdx, exitIdx, annualRaise, opts);
-  const smaP = _smaParamsForAnalytics();
+  const smaP = _smaParamsForAnalytics(keys);
   if (smaP) {
     const r = simulateSMA(initial, monthly, smaCashRate, entryIdx, exitIdx, annualRaise, smaP);
     sim.smaPoints = r.smaPoints;
@@ -1710,6 +1766,13 @@ let _analyticsCodeCache = new Map();
 function analyticsCodeCacheKey(cfg, initial, monthly, annualRaise, entryIdx, exitIdx) {
   return [cfg.id, cfg.code || '', JSON.stringify(cfg.params || {}), initial, monthly, annualRaise, entryIdx, exitIdx].join('|');
 }
+// A sandbox run's answer as (date, value) points; [] when the run failed.
+function analyticsCodePoints(msg) {
+  if (!msg || !Array.isArray(msg.log)) return [];
+  return msg.log
+    .filter(r => r && r.date != null && typeof r.value === 'number' && Number.isFinite(r.value))
+    .map(r => ({ date: String(r.date), value: r.value }));
+}
 // Run a CODE-based saved config in the sandboxed worker over [entryIdx, exitIdx]
 // and resolve to its (date, value) points. Uses runCustomPreview so the run
 // never lands in the live chart's result cache. Resolves [] on error/timeout.
@@ -1722,16 +1785,72 @@ function analyticsCodeRun(cfg, initial, monthly, annualRaise, entryIdx, exitIdx)
     }
     const globals = computeCustomGlobals(cfg, { initial, monthly, annualRaise, simEntryIdx: entryIdx, exitIdx });
     runCustomPreview(cfg, {}, globals, (msg, err) => {
-      let pts = [];
-      if (!err && msg && Array.isArray(msg.log)) {
-        pts = msg.log
-          .filter(r => r && r.date != null && typeof r.value === 'number' && Number.isFinite(r.value))
-          .map(r => ({ date: String(r.date), value: r.value }));
-      }
+      noteOwnMoney(cfg, msg);
+      const pts = err ? [] : analyticsCodePoints(msg);
       _analyticsCodeCache.set(ck, pts);
       resolve(pts);
     });
   });
+}
+
+// ----- Code strategies, every row at once ---------------------------------
+// A heatmap build asks a code strategy for one run per start-year row. Through
+// the page's single sandbox worker those go one after another (73 rows of a
+// 50 ms strategy: 3.5 s). warmAnalyticsCodeRuns posts them all to a pool of
+// sandbox workers instead (fitPool in js/saved-configs.js, one worker per
+// spare core) and stores each answer in the cache above, so the row loop that
+// follows finds its runs waiting. The workers send back each row's date and
+// value alone; the points are the ones analyticsCodeRun would have kept.
+
+// Below this many missing runs the pool is not worth starting: each of its
+// workers is handed its own copy of the price data first.
+const ANALYTICS_POOL_MIN_RUNS = 8;
+//   keys: the build's lines (only saved code strategies are run here)
+//   rowRanges: [[entryIdx, exitIdx]] — each row's run
+//   isCurrent(): false once a newer build has taken over. The pool is the
+//     build's own and is closed at the first answer after that, so a
+//     superseded build's runs do not hold up the next one's; nothing is
+//     cached from a closed pool (its unanswered runs come back empty).
+//   onProgress(runsBack, runsPosted)
+// Resolves when every posted run is back or dropped.
+async function warmAnalyticsCodeRuns(keys, rowRanges, money, isCurrent, onProgress) {
+  const { initial, monthly, annualRaise } = money;
+  const codeConfigs = [...new Set(keys)].filter(isCfgKey).map(cfgFromKey)
+    .filter(cfg => cfg && cfg.type === 'custom' && cfg.code && String(cfg.code).trim());
+  const missing = codeConfigs.flatMap(cfg => rowRanges
+    .map(([entryIdx, exitIdx]) => ({ cfg, entryIdx, exitIdx, ck: analyticsCodeCacheKey(cfg, initial, monthly, annualRaise, entryIdx, exitIdx) }))
+    .filter(run => !_analyticsCodeCache.has(run.ck)));
+  if (missing.length < ANALYTICS_POOL_MIN_RUNS) return;
+  const pool = fitPool();
+  let dropped = false, back = 0;
+  await Promise.all(missing.map(({ cfg, entryIdx, exitIdx, ck }) => {
+    const globals = computeCustomGlobals(cfg, { initial, monthly, annualRaise, simEntryIdx: entryIdx, exitIdx });
+    // The row loop reads only each row's value, so that is all the workers send back.
+    return pool.run(cfg.code, globals, cfg.params || {}, 'values').then(msg => {
+      if (dropped) return;
+      if (!isCurrent()) { dropped = true; pool.close(); return; }
+      noteOwnMoney(cfg, msg);
+      _analyticsCodeCache.set(ck, analyticsCodePoints(msg));
+      onProgress(++back, missing.length);
+    });
+  }));
+  if (!dropped) pool.close();
+}
+
+// Saved code strategies seen to bring their own deposits (money: "own"), by
+// config id. Their value series answers to those deposits, not to the money a
+// window's sentence sets, so a return measured against the sentence's money
+// would mean nothing (the years-held window gives such a strategy no line).
+const _analyticsOwnMoneyIds = new Set();
+function noteOwnMoney(cfg, msg) {
+  if (msg && msg.money === 'own') _analyticsOwnMoneyIds.add(cfg.id);
+}
+// True for a saved strategy's key once a run here, or the main chart's own run
+// of it, has shown that it brings its own money.
+function analyticsBringsOwnMoney(key) {
+  if (!isCfgKey(key)) return false;
+  const id = key.slice(CFG_KEY_PREFIX.length);
+  return _analyticsOwnMoneyIds.has(id) || ((window._customResults || {})[id] || {}).money === 'own';
 }
 
 // Synchronous peek at the memoized worker result — the tooltip is built inline
@@ -2475,6 +2594,151 @@ const _wcagLum = (c) => {
 };
 const _wcagRatio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 
+// The heatmap's cells: one per (start year, years held) the data covers.
+//   yearMin, yearMax: the start years to keep (null = the data's own end)
+//   keys: the lines drawn from them — no cell starts before one's history does
+// Null with under two years of data, else
+//   cells:   [{ year, period, entryIdx, exitIdx, value }], newest start year first
+//   lookup:  'year:period' -> cell
+//   periods: [1, 2, …] — the years-held columns
+function analyticsCellPlan(yearMin, yearMax, keys) {
+  // Year -> first/last quarter index.
+  const yearFirst = new Map();
+  const yearLast  = new Map();
+  for (let i = 0; i < quarterlyData.length; i++) {
+    const y = parseInt(quarterlyData[i][0].substring(0, 4));
+    if (!yearFirst.has(y)) yearFirst.set(y, i);
+    yearLast.set(y, i);
+  }
+  const allYears = Array.from(yearFirst.keys()).sort((a, b) => a - b);
+  if (allYears.length < 2) return null;
+  const minYear = allYears[0];
+  const maxYear = allYears[allYears.length - 1];
+  const periods = [];
+  for (let p = 1; p <= (maxYear - minYear); p++) periods.push(p);
+  // Row filter: which start-year rows to draw. Unlike a period-length filter,
+  // this directly determines the row set, so the grid visibly shrinks/grows
+  // with the slider instead of leaving rows that can't reach a long enough
+  // holding period sitting empty.
+  const rowMinYear = yearMin != null ? Math.max(minYear, yearMin) : minYear;
+  const rowMaxYear = yearMax != null ? Math.min(maxYear, yearMax) : maxYear;
+
+  // Build the list of valid (startYear, period) cells. The row is the year
+  // you started investing; the column is "N years later". Entry anchors at
+  // the *last trading day of the previous year* — that's effectively the
+  // first close of the starting year, matching what a normal person means by
+  // "I invested at the start of 2025". For the earliest year in the dataset
+  // (no prior year exists), we fall back to the first quarter of the starting
+  // year. We include the latest year (maxYear) even when only partial data
+  // exists for it — its row will just show fewer columns / partial-year values.
+  // Floor entry by the most-restrictive of (selected heatmap strategy,
+  // selected heatmap baseline) — and ONLY those. The main chart's legend
+  // visibility is independent of the heatmap's range.
+  let floorEntryIdx = 0;
+  for (const k of keys) {
+    if (!k) continue;
+    const e = (typeof earliestQIdxOf === 'function') ? earliestQIdxOf(k) : 0;
+    if (e > floorEntryIdx) floorEntryIdx = e;
+  }
+
+  const cells = [];
+  for (let sy = rowMaxYear; sy >= rowMinYear; sy--) {
+    for (const p of periods) {
+      const endYear = sy + p - 1;
+      if (endYear > maxYear) continue;
+      if (!yearLast.has(endYear)) continue;
+      const entryIdx = (sy > minYear && yearLast.has(sy - 1))
+        ? yearLast.get(sy - 1)
+        : yearFirst.get(sy);
+      if (entryIdx == null) continue;
+      if (entryIdx < floorEntryIdx) continue;
+      const exitIdx  = yearLast.get(endYear);
+      if (exitIdx - entryIdx < 1) continue; // need at least one quarter of span
+      cells.push({ year: sy, period: p, entryIdx, exitIdx, value: 0 });
+    }
+  }
+  const lookup = new Map();
+  for (const c of cells) lookup.set(c.year + ':' + c.period, c);
+  return { cells, lookup, periods, rowMinYear, rowMaxYear };
+}
+
+// Runs every line in `keys` once for each start-year row of `cells` and hands
+// the row to onRow.
+//   keys: heatmap keys (built-in, 'compounded', 'custom', 'cfg:<id>')
+//   money: { initial, monthly, rate, annualRaise }
+//   isCurrent(): false once a newer build has taken over — the run stops there
+//   onProgress(cellsDone, cellsTotal)
+//   onRow({ rowCells, entryIdx, rowDates, seriesByKey }): seriesByKey maps each
+//     key to its value series, quarter-aligned from the row's entry, so a
+//     cell's value is series[cell.exitIdx - entryIdx].
+// Resolves true when every row ran, false when it stopped early.
+async function analyticsRunRows({ cells, keys, money, isCurrent, onProgress, onRow }) {
+  const { initial, monthly, rate, annualRaise } = money;
+  // The count shown only climbs: the code strategies' pooled runs fill it
+  // first, then the rows catch up underneath it.
+  let shownDone = 0;
+  const progress = (done) => { shownDone = Math.max(shownDone, done); onProgress(shownDone, cells.length); };
+  progress(0);
+
+  // Per-row optimization: every cell with the same start year shares the
+  // same entryIdx, and simulate() is forward-only — so one sim from
+  // entryIdx → max(exitIdx in row) gives every shorter cell's answer too.
+  // Cuts ~2640 sims down to ~88 sims, with each cell sampled at the right
+  // quarter offset. Plus simulate's monthly-contribution loops now use the
+  // O(1) monthlyByQuarter index, so each sim is also faster.
+  const cellsByRow = new Map();
+  for (const c of cells) {
+    let arr = cellsByRow.get(c.year);
+    if (!arr) { arr = []; cellsByRow.set(c.year, arr); }
+    arr.push(c);
+  }
+
+  // Code strategies first, every row's run at once (warmAnalyticsCodeRuns).
+  const rowRanges = [...cellsByRow.values()].map(rowCells => [rowCells[0].entryIdx, Math.max(...rowCells.map(c => c.exitIdx))]);
+  await warmAnalyticsCodeRuns(keys, rowRanges, money, isCurrent, (back, posted) => progress(Math.floor(cells.length * back / posted)));
+  if (!isCurrent()) return false;
+
+  // The shared built-in sim is only needed when a line is a built-in strategy
+  // or the 'compounded' baseline; if every line is saved/custom we skip it.
+  const keyNeedsBuiltin = (k) => k === 'compounded' || (!isCfgKey(k) && k !== 'custom' && k !== 'custom-pct');
+  const needBuiltinSim = keys.some(keyNeedsBuiltin);
+  let processed = 0;
+  let rowsProcessed = 0;
+  const totalRows = cellsByRow.size;
+  for (const [, rowCells] of cellsByRow) {
+    const entryIdx = rowCells[0].entryIdx;
+    let maxExitIdx = entryIdx;
+    for (const c of rowCells) if (c.exitIdx > maxExitIdx) maxExitIdx = c.exitIdx;
+
+    // One built-in sim per row covers every built-in strategy + 'compounded'
+    // baseline. Saved strategies run with their own params via
+    // analyticsRowSeries — synchronously for parameter strategies, through
+    // the sandboxed worker for code strategies (hence the awaits below).
+    const sim = needBuiltinSim ? _runAnalyticsSim(initial, monthly, rate, entryIdx, maxExitIdx, annualRaise, {}, keys) : null;
+    const rowDates = [];
+    for (let i = entryIdx; i <= maxExitIdx; i++) rowDates.push(quarterlyData[i][0]);
+    const seriesCtx = { builtinSim: sim, entryIdx, maxExitIdx, rowDates, initial, monthly, rate, annualRaise };
+
+    const seriesByKey = new Map();
+    for (const key of keys) {
+      seriesByKey.set(key, await analyticsRowSeries(key, seriesCtx));
+      if (!isCurrent()) return false;
+    }
+    onRow({ rowCells, entryIdx, rowDates, seriesByKey });
+    processed += rowCells.length;
+
+    rowsProcessed++;
+    // Yield once per row instead of per cell — far fewer rAF round-trips
+    // than the old chunked-by-30-cells approach.
+    progress(processed);
+    if (rowsProcessed % 8 === 0 || rowsProcessed === totalRows) {
+      await new Promise(r => requestAnimationFrame(r));
+      if (!isCurrent()) return false;
+    }
+  }
+  return true;
+}
+
 async function buildHeatmap() {
   if (!quarterlyData) return;
   const epoch = ++analyticsBuildEpoch;
@@ -2482,6 +2746,8 @@ async function buildHeatmap() {
   const progEl = document.getElementById('analytics-progress');
   const progBar = document.getElementById('analytics-progress-bar');
   const progText = document.getElementById('analytics-progress-text');
+  // The two sides this build draws, held for its whole run.
+  const strat = analyticsStrategy, baseline = analyticsBaseline;
 
   // Mirror render()'s parameter pull
   const initial = sliderToInitial(+document.getElementById('slider-initial').value);
@@ -2518,63 +2784,9 @@ async function buildHeatmap() {
     return;
   }
 
-  // Year -> first/last quarter index.
-  const yearFirst = new Map();
-  const yearLast  = new Map();
-  for (let i = 0; i < quarterlyData.length; i++) {
-    const y = parseInt(quarterlyData[i][0].substring(0, 4));
-    if (!yearFirst.has(y)) yearFirst.set(y, i);
-    yearLast.set(y, i);
-  }
-  const allYears = Array.from(yearFirst.keys()).sort((a, b) => a - b);
-  if (allYears.length < 2) { grid.classList.remove('loading'); grid.textContent = 'Not enough data.'; return; }
-  const minYear = allYears[0];
-  const maxYear = allYears[allYears.length - 1];
-  const periods = [];
-  for (let p = 1; p <= (maxYear - minYear); p++) periods.push(p);
-  // Row filter: which start-year rows to draw. Unlike a period-length filter,
-  // this directly determines the row set, so the grid visibly shrinks/grows
-  // with the slider instead of leaving rows that can't reach a long enough
-  // holding period sitting empty.
-  const rowMinYear = analyticsYearMin != null ? Math.max(minYear, analyticsYearMin) : minYear;
-  const rowMaxYear = analyticsYearMax != null ? Math.min(maxYear, analyticsYearMax) : maxYear;
-
-  // Build the list of valid (startYear, period) cells. The row is the year
-  // you started investing; the column is "N years later". Entry anchors at
-  // the *last trading day of the previous year* — that's effectively the
-  // first close of the starting year, matching what a normal person means by
-  // "I invested at the start of 2025". For the earliest year in the dataset
-  // (no prior year exists), we fall back to the first quarter of the starting
-  // year. We include the latest year (maxYear) even when only partial data
-  // exists for it — its row will just show fewer columns / partial-year values.
-  // Floor entry by the most-restrictive of (selected heatmap strategy,
-  // selected heatmap baseline) — and ONLY those. The main chart's legend
-  // visibility is independent of the heatmap's range.
-  let floorEntryIdx = 0;
-  for (const k of [analyticsStrategy, analyticsBaseline]) {
-    if (!k) continue;
-    const e = (typeof earliestQIdxOf === 'function') ? earliestQIdxOf(k) : 0;
-    if (e > floorEntryIdx) floorEntryIdx = e;
-  }
-
-  const cells = [];
-  for (let sy = rowMaxYear; sy >= rowMinYear; sy--) {
-    for (const p of periods) {
-      const endYear = sy + p - 1;
-      if (endYear > maxYear) continue;
-      if (!yearLast.has(endYear)) continue;
-      const entryIdx = (sy > minYear && yearLast.has(sy - 1))
-        ? yearLast.get(sy - 1)
-        : yearFirst.get(sy);
-      if (entryIdx == null) continue;
-      if (entryIdx < floorEntryIdx) continue;
-      const exitIdx  = yearLast.get(endYear);
-      if (exitIdx - entryIdx < 1) continue; // need at least one quarter of span
-      cells.push({ year: sy, period: p, entryIdx, exitIdx, value: 0 });
-    }
-  }
-  const lookup = new Map();
-  for (const c of cells) lookup.set(c.year + ':' + c.period, c);
+  const plan = analyticsCellPlan(analyticsYearMin, analyticsYearMax, [strat, baseline]);
+  if (!plan) { grid.classList.remove('loading'); grid.textContent = 'Not enough data.'; return; }
+  const { cells, lookup, periods, rowMinYear, rowMaxYear } = plan;
 
   // Reuse the existing skeleton if its structure matches the expected cell
   // set — then we don't blow away the previous run's values + colors when
@@ -2618,50 +2830,18 @@ async function buildHeatmap() {
   const cellRefs = new Map();
   grid.querySelectorAll('td.heatmap-cell[data-yp]').forEach(td => cellRefs.set(td.dataset.yp, td));
 
-  // Show progress
   progEl.removeAttribute('hidden');
-  progBar.style.width = '0%';
-  progText.textContent = '0 / ' + cells.length;
-
-  // Per-row optimization: every cell with the same start year shares the
-  // same entryIdx, and simulate() is forward-only — so one sim from
-  // entryIdx → max(exitIdx in row) gives every shorter cell's answer too.
-  // Cuts ~2640 sims down to ~88 sims, with each cell sampled at the right
-  // quarter offset. Plus simulate's monthly-contribution loops now use the
-  // O(1) monthlyByQuarter index, so each sim is also faster.
-  const cellsByRow = new Map();
-  for (const c of cells) {
-    let arr = cellsByRow.get(c.year);
-    if (!arr) { arr = []; cellsByRow.set(c.year, arr); }
-    arr.push(c);
-  }
-
-  const strat = analyticsStrategy;
-  // The shared built-in sim is only needed when a side is a built-in strategy
-  // or the 'compounded' baseline; if both sides are saved/custom we skip it.
-  const keyNeedsBuiltin = (k) => k === 'compounded' || (!isCfgKey(k) && k !== 'custom' && k !== 'custom-pct');
-  const needBuiltinSim = keyNeedsBuiltin(strat) || keyNeedsBuiltin(analyticsBaseline);
-  let processed = 0;
-  let rowsProcessed = 0;
-  const totalRows = cellsByRow.size;
-  for (const [, rowCells] of cellsByRow) {
-    const entryIdx = rowCells[0].entryIdx;
-    let maxExitIdx = entryIdx;
-    for (const c of rowCells) if (c.exitIdx > maxExitIdx) maxExitIdx = c.exitIdx;
-
-    // One built-in sim per row covers every built-in strategy + 'compounded'
-    // baseline. Saved strategies (strat or baseline) run with their own params
-    // via analyticsRowSeries — synchronously for parameter strategies, through
-    // the sandboxed worker for code strategies (hence the awaits below).
-    const sim = needBuiltinSim ? _runAnalyticsSim(initial, monthly, rate, entryIdx, maxExitIdx, annualRaise, opts) : null;
-    const rowDates = [];
-    for (let i = entryIdx; i <= maxExitIdx; i++) rowDates.push(quarterlyData[i][0]);
-    const seriesCtx = { builtinSim: sim, entryIdx, maxExitIdx, rowDates, initial, monthly, rate, annualRaise };
-
-    const stratSeries = await analyticsRowSeries(strat, seriesCtx);
-    if (epoch !== analyticsBuildEpoch) return;
-    const baseSeries  = await analyticsRowSeries(analyticsBaseline, seriesCtx);
-    if (epoch !== analyticsBuildEpoch) return;
+  const ran = await analyticsRunRows({
+    cells,
+    keys: [strat, baseline],
+    money: { initial, monthly, rate, annualRaise },
+    isCurrent: () => epoch === analyticsBuildEpoch,
+    onProgress: (done, total) => {
+      progBar.style.width = ((done / total) * 100).toFixed(1) + '%';
+      progText.textContent = done + ' / ' + total;
+    },
+    onRow: ({ rowCells, entryIdx, rowDates, seriesByKey }) => {
+    const stratSeries = seriesByKey.get(strat), baseSeries = seriesByKey.get(baseline);
     const ddPrefix    = computeMaxDDPrefix(stratSeries);
 
     for (const c of rowCells) {
@@ -2685,19 +2865,10 @@ async function buildHeatmap() {
         td.dataset.ddPeak   = c.ddPeak   || '';
         td.dataset.ddTrough = c.ddTrough || '';
       }
-      processed++;
     }
-
-    rowsProcessed++;
-    // Yield once per row instead of per cell — far fewer rAF round-trips
-    // than the old chunked-by-30-cells approach.
-    progBar.style.width = ((processed / cells.length) * 100).toFixed(1) + '%';
-    progText.textContent = processed + ' / ' + cells.length;
-    if (rowsProcessed % 8 === 0 || rowsProcessed === totalRows) {
-      await new Promise(r => requestAnimationFrame(r));
-      if (epoch !== analyticsBuildEpoch) return;
-    }
-  }
+    },
+  });
+  if (!ran) return;
 
   // Global log-derived range for the diverging color scale.
   let minLogD = 0, maxLogD = 0;

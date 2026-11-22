@@ -18,43 +18,46 @@
   //   'sma'  → simulateSMA(), final = smaPoints value
   //   'bh'   → Buy & Hold; all four underlyings' finals come from ONE 9sig sim
   //            (no per-option resim), so no `apply` is needed.
+  // `name` is the setting's name in the Fit summary (js/saved-configs.js
+  // runNativeFit); `fit: false` keeps a cost or execution setting (trading
+  // cost, cash interest, settlement days, the rebalance point) out of the search.
   const PREVIEW_SELECTS = {
-    'select-9sig-cash':       { kind: '9sig', apply: (p, v) => { p.cashPct = (+v || 0) / 100; } },
-    'select-9sig-underlying': { kind: '9sig', apply: (p, v) => { p.underlyingCol = ulColFromVal(v); } },
-    'select-9sig-cashrate':   { kind: '9sig', apply: (p, v) => { p.cashRate = (+v || 0) / 100; } },
-    'select-9sig-period':     { kind: '9sig', apply: (p, v) => { p.rebalancePeriod = v; } },
-    'select-9sig-growth':     { kind: '9sig', apply: (p, v) => { p.qGrowth = (+v || 0) / 100; } },
-    'select-9sig-crashdrop':  { kind: '9sig', apply: (p, v) => { p.crashDropPct = +v; } },
-    'select-9sig-crashwin':   { kind: '9sig', apply: (p, v) => { p.crashLookbackMonths = +v; } },
-    'select-9sig-spike':      { kind: '9sig', apply: (p, v) => { p.spikeTriggerPct = +v; } },
-    'select-9sig-buypower':   { kind: '9sig', apply: (p, v) => { p.buyThrottlePct = +v; } },
-    'select-9sig-park-asset': { kind: '9sig', apply: (p, v) => { p.parkAsset = v; } },
-    'select-9sig-deploy':     { kind: '9sig', apply: (p, v) => { p.contribDeployPct = (+v || 0) / 100; } },
-    'select-9sig-target-compound': { kind: '9sig', apply: (p, v) => { p.targetFromPrevTarget = v === 'target'; } },
-    'select-9sig-rebalance-point': { kind: '9sig', apply: (p, v) => { p.rebalPct = +v || 0; } },
-    'select-9sig-spike-target': { kind: '9sig', apply: (p, v) => { p.spikeResetPct = v; } },
-    'select-9sig-cost':       { kind: '9sig', apply: (p, v) => { p.tradeCostPct = +v || 0; } },
+    'select-9sig-cash':       { kind: '9sig', name: 'Entry cash share', apply: (p, v) => { p.cashPct = (+v || 0) / 100; } },
+    'select-9sig-underlying': { kind: '9sig', name: 'Fund', apply: (p, v) => { p.underlyingCol = ulColFromVal(v); } },
+    'select-9sig-cashrate':   { kind: '9sig', name: 'Cash interest', fit: false, apply: (p, v) => { p.cashRate = (+v || 0) / 100; } },
+    'select-9sig-period':     { kind: '9sig', name: 'Rebalance every', apply: (p, v) => { p.rebalancePeriod = v; } },
+    'select-9sig-growth':     { kind: '9sig', name: 'Target growth', apply: (p, v) => { p.qGrowth = (+v || 0) / 100; } },
+    'select-9sig-crashdrop':  { kind: '9sig', name: "Crash hold after a fall of", apply: (p, v) => { p.crashDropPct = +v; } },
+    'select-9sig-crashwin':   { kind: '9sig', name: 'Crash high over the past', apply: (p, v) => { p.crashLookbackMonths = +v; } },
+    'select-9sig-spike':      { kind: '9sig', name: 'Rally gain that takes profits', apply: (p, v) => { p.spikeTriggerPct = +v; } },
+    'select-9sig-buypower':   { kind: '9sig', name: 'Largest buy, share of cash', apply: (p, v) => { p.buyThrottlePct = +v; } },
+    'select-9sig-park-asset': { kind: '9sig', name: 'Cash held in', apply: (p, v) => { p.parkAsset = v; } },
+    'select-9sig-deploy':     { kind: '9sig', name: 'Contributions straight into stock', apply: (p, v) => { p.contribDeployPct = (+v || 0) / 100; } },
+    'select-9sig-target-compound': { kind: '9sig', name: 'Target grows from', apply: (p, v) => { p.targetFromPrevTarget = v === 'target'; } },
+    'select-9sig-rebalance-point': { kind: '9sig', name: 'Rebalance point', fit: false, apply: (p, v) => { p.rebalPct = +v || 0; } },
+    'select-9sig-spike-target': { kind: '9sig', name: 'Stock share after profits', apply: (p, v) => { p.spikeResetPct = v; } },
+    'select-9sig-cost':       { kind: '9sig', name: 'Trading cost', fit: false, apply: (p, v) => { p.tradeCostPct = +v || 0; } },
     'select-bh-underlying':   { kind: 'bh' },
-    'select-sma-underlying':  { kind: 'sma', apply: (p, v) => { p.underlyingCol = ulColFromVal(v); } },
-    'select-sma-asset':       { kind: 'sma', apply: (p, v) => { p.smaAsset = v; } },
-    'select-sma-window':      { kind: 'sma', apply: (p, v) => { p.smaWindow = +v; } },
-    'select-sma-cashrate':    { kind: 'sma', apply: (p, v) => { p.cashRate = (+v || 0) / 100; } },
-    'select-sma-entry-buf':   { kind: 'sma', apply: (p, v) => { p.entryBufferPct = +v; } },
-    'select-sma-exit-buf':    { kind: 'sma', apply: (p, v) => { p.exitBufferPct = +v; } },
-    'select-sma-rsi-oh':      { kind: 'sma', apply: (p, v) => { p.rsiOverheatThreshold = +v; } },
-    'select-sma-rsi-cool':    { kind: 'sma', apply: (p, v) => { p.rsiCoolThreshold = +v; } },
-    'select-sma-out-asset':   { kind: 'sma', apply: (p, v) => { p.outAsset = v; } },
-    'select-sma-dca-in':      { kind: 'sma', apply: (p, v) => { p.dcaInMonths = +v; } },
-    'select-sma-dca-to-out':  { kind: 'sma', apply: (p, v) => { p.dcaToOutMonths = +v; } },
-    'select-sma-bg-gtfo':     { kind: 'sma', apply: (p, v) => { p.bgGtfoPct = +v; } },
-    'select-sma-bg-asset':    { kind: 'sma', apply: (p, v) => { p.bgAsset = v; } },
-    'select-sma-bg-window':   { kind: 'sma', apply: (p, v) => { p.bgWindow = +v; } },
-    'select-sma-cost':        { kind: 'sma', apply: (p, v) => { p.tradeCostPct = +v; } },
-    'select-sma-rsi-oh-window':   { kind: 'sma', apply: (p, v) => { p.rsiOhWindow = +v; } },
-    'select-sma-rsi-cool-window': { kind: 'sma', apply: (p, v) => { p.rsiCoolWindow = +v; } },
-    'select-sma-confirm-buy':     { kind: 'sma', apply: (p, v) => { p.confirmBuySteps = +v; } },
-    'select-sma-confirm-sell':    { kind: 'sma', apply: (p, v) => { p.confirmSellSteps = +v; } },
-    'select-sma-settle':          { kind: 'sma', apply: (p, v) => { p.settleDays = +v; } },
+    'select-sma-underlying':  { kind: 'sma', name: 'Fund bought', apply: (p, v) => { p.underlyingCol = ulColFromVal(v); } },
+    'select-sma-asset':       { kind: 'sma', name: 'Signal from', apply: (p, v) => { p.smaAsset = v; } },
+    'select-sma-window':      { kind: 'sma', name: 'Average window', apply: (p, v) => { p.smaWindow = +v; } },
+    'select-sma-cashrate':    { kind: 'sma', name: 'Cash interest', fit: false, apply: (p, v) => { p.cashRate = (+v || 0) / 100; } },
+    'select-sma-entry-buf':   { kind: 'sma', name: 'Buy buffer', apply: (p, v) => { p.entryBufferPct = +v; } },
+    'select-sma-exit-buf':    { kind: 'sma', name: 'Sell buffer', apply: (p, v) => { p.exitBufferPct = +v; } },
+    'select-sma-rsi-oh':      { kind: 'sma', name: 'RSI sell level', apply: (p, v) => { p.rsiOverheatThreshold = +v; } },
+    'select-sma-rsi-cool':    { kind: 'sma', name: 'RSI buy-back level', apply: (p, v) => { p.rsiCoolThreshold = +v; } },
+    'select-sma-out-asset':   { kind: 'sma', name: 'Held when out', apply: (p, v) => { p.outAsset = v; } },
+    'select-sma-dca-in':      { kind: 'sma', name: 'Ease in over', apply: (p, v) => { p.dcaInMonths = +v; } },
+    'select-sma-dca-to-out':  { kind: 'sma', name: 'Ease out over', apply: (p, v) => { p.dcaToOutMonths = +v; } },
+    'select-sma-bg-gtfo':     { kind: 'sma', name: 'Bubble brake level', apply: (p, v) => { p.bgGtfoPct = +v; } },
+    'select-sma-bg-asset':    { kind: 'sma', name: 'Bubble brake reads', apply: (p, v) => { p.bgAsset = v; } },
+    'select-sma-bg-window':   { kind: 'sma', name: 'Bubble brake average', apply: (p, v) => { p.bgWindow = +v; } },
+    'select-sma-cost':        { kind: 'sma', name: 'Trading cost', fit: false, apply: (p, v) => { p.tradeCostPct = +v; } },
+    'select-sma-rsi-oh-window':   { kind: 'sma', name: 'RSI sell window', apply: (p, v) => { p.rsiOhWindow = +v; } },
+    'select-sma-rsi-cool-window': { kind: 'sma', name: 'RSI buy-back window', apply: (p, v) => { p.rsiCoolWindow = +v; } },
+    'select-sma-confirm-buy':     { kind: 'sma', name: 'Buy confirmation', apply: (p, v) => { p.confirmBuySteps = +v; } },
+    'select-sma-confirm-sell':    { kind: 'sma', name: 'Sell confirmation', apply: (p, v) => { p.confirmSellSteps = +v; } },
+    'select-sma-settle':          { kind: 'sma', name: 'Settlement days', fit: false, apply: (p, v) => { p.settleDays = +v; } },
   };
   const PREVIEW_SELECT_IDS = Object.keys(PREVIEW_SELECTS);
 
@@ -120,7 +123,7 @@
   function readSmaParams() {
     return Object.assign(readBaseParams(), {
       cashRate:      _num('select-sma-cashrate', 0) / 100,
-      underlyingCol: (function () { const v = _str('select-sma-underlying', 'tqqq'); return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : 1; })(),
+      underlyingCol: (function () { const v = _str('select-sma-underlying', 'tqqq'); return v === 'qqq' ? 2 : v === 'spy' ? 3 : v === 'qld' ? 4 : v === 'sso' ? 5 : v === 'spxl' ? 6 : v === 'sqqq' ? 7 : v === 'gld' ? 8 : v === 'soxl' ? 9 : v === 'soxx' ? 10 : 1; })(),
       smaAsset:      _str('select-sma-asset', 'qqq'),
       smaWindow:     _num('select-sma-window', 200),
       // The other ~17 select-sma-* knobs — was a third hand-typed copy of the
@@ -129,7 +132,7 @@
     }, (typeof readSmaBaseOpts === 'function' ? readSmaBaseOpts() : {}));
   }
 
-  function nineSigFinal(p) {
+  function nineSigRun(p) {
     let _qd;
     if (p.rebalPct > 0 && typeof buildEnvelopeQData === 'function' && typeof PERIOD_DAYS !== 'undefined') {
       const pd = PERIOD_DAYS[p.rebalancePeriod] || 63;
@@ -144,7 +147,7 @@
       const q2 = buildExactRangeQData(p.rebalancePeriod, p.entryDateOverride, p.exitDateOverride);
       if (q2 && q2.length >= 2) _qd = q2;
     }
-    const r = simulate(p.initial, p.monthly, p.cashRate, p.simEntryIdx, p.exitIdx, p.annualRaise, {
+    return simulate(p.initial, p.monthly, p.cashRate, p.simEntryIdx, p.exitIdx, p.annualRaise, {
       schedule: p.schedule,
       ...(_qd ? { qData: _qd } : {}),
       ...(p.hasExactOverride ? { entryDateOverride: p.entryDateOverride, exitDateOverride: p.exitDateOverride } : {}),
@@ -154,11 +157,14 @@
       targetFromPrevTarget: p.targetFromPrevTarget,
       buyThrottlePct: p.buyThrottlePct, parkAsset: p.parkAsset, spikeResetPct: p.spikeResetPct, tradeCostPct: p.tradeCostPct, baselineRate: p.baselineRate, skipBH: true,
     });
-    return (r.log && r.log.length) ? r.log[r.log.length - 1].total : 0;
   }
-  function smaFinal(p) {
-    const r = simulateSMA(p.initial, p.monthly, p.cashRate, p.simEntryIdx, p.exitIdx, p.annualRaise, {
-      schedule: p.schedule,
+  const nineSigFinalOf = (r) => (r.log && r.log.length) ? r.log[r.log.length - 1].total : 0;
+  function nineSigFinal(p) { return nineSigFinalOf(nineSigRun(p)); }
+  // emitDD: the dense holdings the daily drawdown reads (the Fit search wants
+  // them; a bar preview needs only the final value).
+  function smaRun(p, emitDD) {
+    return simulateSMA(p.initial, p.monthly, p.cashRate, p.simEntryIdx, p.exitIdx, p.annualRaise, {
+      schedule: p.schedule, emitDD: !!emitDD,
       smaAsset: p.smaAsset, smaWindow: p.smaWindow, underlyingCol: p.underlyingCol,
       entryBufferPct: p.entryBufferPct, exitBufferPct: p.exitBufferPct,
       rsiOverheatThreshold: p.rsiOverheatThreshold, rsiCoolThreshold: p.rsiCoolThreshold,
@@ -168,8 +174,29 @@
       rebalanceCheck: p.rebalanceCheck, confirmBuySteps: p.confirmBuySteps, confirmSellSteps: p.confirmSellSteps, settleDays: p.settleDays,
       ...(p.hasExactOverride ? { entryDateOverride: p.entryDateOverride, exitDateOverride: p.exitDateOverride } : {}),
     });
-    return (r.smaPoints && r.smaPoints.length) ? r.smaPoints[r.smaPoints.length - 1].value : 0;
   }
+  const smaFinalOf = (r) => (r.smaPoints && r.smaPoints.length) ? r.smaPoints[r.smaPoints.length - 1].value : 0;
+  function smaFinal(p) { return smaFinalOf(smaRun(p)); }
+  // The Fit search's hooks for the built-in panels (js/saved-configs.js
+  // runNativeFit): the selects it may change, their names, the panel's params
+  // as they stand (the chart's window, money and transactions, as the bar
+  // previews read them), and one run's final value and max drawdown, measured
+  // at every daily close as the chart's own drawdown is (js/chart.js).
+  window.previewFit = {
+    selects: (kind) => PREVIEW_SELECT_IDS.filter(id => PREVIEW_SELECTS[id].kind === kind && PREVIEW_SELECTS[id].fit !== false),
+    name: (id) => PREVIEW_SELECTS[id].name,
+    base: (kind) => kind === 'sma' ? readSmaParams() : read9sigParams(),
+    measure(kind, base, values) {
+      const p = Object.assign({}, base);
+      for (const id in values) PREVIEW_SELECTS[id].apply(p, values[id]);
+      if (kind === 'sma') {
+        const r = smaRun(p, true);
+        return { final: smaFinalOf(r), dd: computeDailyMaxDrawdownMulti(r.ddControls, daily).pct };
+      }
+      const r = nineSigRun(p), fund = String(values['select-9sig-underlying'] || _str('select-9sig-underlying', 'tqqq'));
+      return { final: nineSigFinalOf(r), dd: computeDailyMaxDrawdown(nineSigDDControls(r.log), daily, fund).pct };
+    },
+  };
   // One 9sig sim (no skipBH) yields all four Buy & Hold finals at once.
   function bhFinals() {
     const p = read9sigParams();
@@ -188,7 +215,7 @@
       buyThrottlePct: p.buyThrottlePct, parkAsset: p.parkAsset, baselineRate: p.baselineRate,
     });
     const lastVal = (arr) => (arr && arr.length) ? arr[arr.length - 1].value : 0;
-    return { tqqq: lastVal(r.bhPoints), qqq: lastVal(r.qqqPoints), spy: lastVal(r.spyPoints), qld: lastVal(r.qldPoints), sso: lastVal(r.ssoPoints), spxl: lastVal(r.spxlPoints), sqqq: lastVal(r.sqqqPoints) };
+    return { tqqq: lastVal(r.bhPoints), qqq: lastVal(r.qqqPoints), spy: lastVal(r.spyPoints), qld: lastVal(r.qldPoints), sso: lastVal(r.ssoPoints), spxl: lastVal(r.spxlPoints), sqqq: lastVal(r.sqqqPoints), gld: lastVal(r.gldPoints), soxl: lastVal(r.soxlPoints), soxx: lastVal(r.soxxPoints) };
   }
 
   // Final values for every option of `select`, by its preview kind.
@@ -413,11 +440,56 @@
     select.addEventListener('change', () => syncTrigger(select));
   }
 
+  // Copying settings sentences: left to the browser, each dropdown copies as
+  // its hidden select, its label and its caret on lines of their own. A
+  // selection holding a dropdown copies as the sentences read instead: each
+  // dropdown as its current value, one line per sentence, no ⓘ marks.
+  const LINE_TAGS = /^(DIV|P|LI|TR|H[1-6]|SECTION|ARTICLE|UL|OL|TABLE)$/;
+  // A cloned select keeps its options' markup, not the live choice, so the
+  // value is read from the page's own select when it has an id.
+  function selectedText(select) {
+    const live = select.id ? document.getElementById(select.id) : null;
+    const s = live && live.tagName === 'SELECT' ? live : select;
+    const o = s.options[s.selectedIndex];
+    return o ? o.text : '';
+  }
+  function sentenceText(node, out) {
+    node.childNodes.forEach(n => {
+      if (n.nodeType === Node.TEXT_NODE) { out.push(n.nodeValue.replace(/\s+/g, ' ')); return; }
+      if (n.nodeType !== Node.ELEMENT_NODE || n.matches('.info-icon, .pdrop-caret, script, style, [hidden]')) return;
+      if (n.matches('.pdrop-trigger')) { const label = n.querySelector('.pdrop-trigger-label'); out.push((label || n).textContent); return; }
+      if (n.tagName === 'SELECT') { if (!n.classList.contains('pdrop-native-hidden')) out.push(selectedText(n)); return; }
+      if (n.tagName === 'BR') { out.push('\n'); return; }
+      if (n.tagName === 'TD' || n.tagName === 'TH') out.push('\t');
+      const line = LINE_TAGS.test(n.tagName);
+      if (line) out.push('\n');
+      sentenceText(n, out);
+      if (line) out.push('\n');
+    });
+  }
+  document.addEventListener('copy', (e) => {
+    const sel = window.getSelection();
+    if (!e.clipboardData || !sel || sel.isCollapsed || !sel.rangeCount) return;
+    const frag = sel.getRangeAt(0).cloneContents();
+    if (!frag.querySelector('.pdrop-trigger, select')) return;
+    const out = [];
+    sentenceText(frag, out);
+    const text = out.join('').split('\n')
+      .map(l => l.replace(/[  ]+/g, ' ').replace(/ ([.,;:!?])/g, '$1').trim())
+      .filter(l => l)
+      .join('\n');
+    e.clipboardData.setData('text/plain', text);
+    e.preventDefault();
+  });
+
   function init() {
     PREVIEW_SELECT_IDS.forEach(id => enhance(document.getElementById(id)));
   }
   // Lets other code (e.g. init.js after URL/localStorage restore, which sets
   // select values WITHOUT dispatching 'change') refresh every trigger label.
+  // Buy & hold final values per fund, with the chart's money and period: the
+  // Fit search's drawdown hurdle (js/saved-configs.js fitHurdle).
+  window.previewBhFinals = bhFinals;
   window.refreshPreviewTriggers = function () {
     PREVIEW_SELECT_IDS.forEach(id => { const s = document.getElementById(id); if (s) syncTrigger(s); });
   };

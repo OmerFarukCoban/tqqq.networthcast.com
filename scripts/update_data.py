@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Fetches daily closing prices for QQQ, QLD, TQQQ, SPY, SSO, SPXL, and SQQQ
-from Yahoo Finance and short-term interest rates from FRED, then writes them
+Fetches daily closing prices for QQQ, QLD, TQQQ, SPY, SSO, SPXL, SQQQ, and
+GLD from Yahoo Finance and short-term interest rates from FRED, then writes them
 as TSV files consumed by index.html.
 
 Two modes. The default (no flags, what the cron runs) is an incremental
-refresh: replace the post-IPO tail of the seven price TSVs with fresh
+refresh: replace the post-IPO tail of the eight price TSVs with fresh
 yfinance bars, copy the committed pre-IPO synthesized prefix through
 untouched, never touch FRED. --rebuild runs the full synthesis below.
---refresh-rates re-pulls the FRED TSVs (three rate files + nfci.tsv); nothing else does.
+--refresh-rates re-pulls the FRED TSVs (three rate files; nfci.tsv only gains new weeks); nothing else does.
+--high-low-history rewrites the high/low files' pre-launch rows (QQQ from
+^NDX bars, TQQQ derived from QQQ's) from the committed price files; the
+default refresh then copies those rows through like the price files' prefix.
 
 Pre-IPO history is fabricated by walking actual daily index values backward
 from each ETF's first real trading day, applying the leveraged-return-minus-
@@ -50,6 +53,8 @@ Synthesis formulas:
   SPXL 1988 → 2008    ← ^SP500TR                     (3× − 2×rate − SPXL exp)
   SQQQ pre-1999       ← extended ^NDX                (inverse model, below)
   SQQQ 1999 → 2010    ← derived NDX-TR               (inverse model, below)
+  GLD  pre-2004       ← daily gold prices            (1× − GLD expense;
+                        see gold_history for the sources)
 
 The three ^GSPC fallbacks are clipped to the extended-^NDX start date, not to
 1985. With ^ndx_d.csv present that is 1938, and the committed TSVs carry it
@@ -98,17 +103,23 @@ Known biases (after the financing-cost correction and swap spreads):
     and daily rebalancing slippage on QLD, SSO, and SPXL.
 
 Usage:
-    python3 update_data.py                    # incremental price refresh
-    python3 update_data.py --refresh-rates    # re-pull FRED rate TSVs
-    python3 update_data.py --rebuild          # full synthesis from scratch
+    python3 scripts/update_data.py                    # incremental price refresh
+    python3 scripts/update_data.py --refresh-rates    # re-pull FRED rate TSVs
+    python3 scripts/update_data.py --rebuild          # full synthesis from scratch
+    python3 scripts/update_data.py --gold-history     # rewrite synthetic-gld.tsv only
+    python3 scripts/update_data.py --split-registry   # add every split Yahoo lists to data/splits.tsv
 """
+import bisect
 import csv
 import io
 import os
+import re
 import sys
 import time
 import urllib.request
 from datetime import timedelta
+
+from split_guard import RECENT_DAYS, note_splits, plan_refresh
 
 try:
     import yfinance as yf
@@ -116,7 +127,7 @@ except ImportError:
     print("yfinance not installed. Run: pip install yfinance")
     sys.exit(1)
 
-basedir = os.path.dirname(os.path.abspath(__file__))
+basedir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the repo root; this script lives in scripts/
 
 QQQ_EXPENSE_DAILY  = 0.0020   / 252  # 0.20%   annual
 QLD_EXPENSE_DAILY  = 0.0095   / 252  # 0.95%   annual (ProShares Ultra QQQ, 2×)
@@ -124,6 +135,9 @@ TQQQ_EXPENSE_DAILY = 0.0088   / 252  # 0.88%   annual
 SPY_EXPENSE_DAILY  = 0.000945 / 252  # 0.0945% annual
 SSO_EXPENSE_DAILY  = 0.0087   / 252  # 0.87%   annual (ProShares Ultra S&P500, 2×)
 SPXL_EXPENSE_DAILY = 0.0095   / 252  # 0.95%   annual (Direxion Daily S&P500 Bull 3×)
+GLD_EXPENSE_DAILY  = 0.0040   / 252  # 0.40%   annual (SPDR Gold Shares)
+SOXL_EXPENSE_DAILY = 0.0075   / 252  # 0.75%   annual (Direxion Daily Semiconductor Bull 3×)
+SOXX_EXPENSE_DAILY = 0.0035   / 252  # 0.35%   annual (iShares Semiconductor ETF, 1×)
 # === Swap-spread calibration ==============================================
 # Real leveraged ETFs pay their swap counterparty something HIGHER than the
 # bare Fed Funds rate. The spread reflects counterparty risk premium, swap
@@ -142,6 +156,13 @@ SPXL_EXPENSE_DAILY = 0.0095   / 252  # 0.95%   annual (Direxion Daily S&P500 Bul
 QLD_SWAP_SPREAD   = 0.005
 SSO_SWAP_SPREAD   = 0.005
 TQQQ_SWAP_SPREAD  = 0.0065
+# SOXL's prefix runs on the price-only PHLX index (^SOX), so its fitted term is
+# an effective spread: the real swap spread less the dividends the index leaves
+# out (about 1%/yr for semiconductors, 3 pp at 3×). Fitted on 2010-03-11 to
+# 2021-05-31, the years SOXL tracked ^SOX before moving to the ICE Semiconductor
+# Index: the forward replay then matches the real fund's end value (median daily
+# error 0.105%, worst rolling year 17.6%). At 0 it runs 3.6 pp/yr light.
+SOXL_SWAP_SPREAD  = -0.0181
 SPXL_SWAP_SPREAD  = 0.005
 
 # === Inverse (-3x) model, calibrated ======================================
@@ -170,6 +191,14 @@ DFF_START   = '1954-07-01'
 TBMS_START  = '1934-01-01'
 
 DATA_DIR = 'data'
+# Every split of every fund: Fund, Day, Split, Noted. The refresh adds a row
+# when it meets a split (yahoo_splits), and the workflow names a new row in the
+# commit subject. Reasons and rules: scripts/split_guard.py.
+SPLIT_REGISTRY = 'splits.tsv'
+
+# How FRED requests name themselves (fetch_fred). FRED serves this and
+# Python's default label; it stalls a bare "Mozilla/5.0" until timeout.
+FRED_USER_AGENT = 'tqqq-networthcast-data-updater (+https://tqqq.networthcast.com)'
 
 tickers = [
     ('QQQ',    'synthetic-qqq.tsv'),
@@ -179,7 +208,75 @@ tickers = [
     ('SSO',    'synthetic-sso.tsv'),
     ('SPXL',   'synthetic-spxl.tsv'),
     ('SQQQ',   'synthetic-sqqq.tsv'),
+    ('GLD',    'synthetic-gld.tsv'),
+    ('SOXL',   'synthetic-soxl.tsv'),
+    ('SOXX',   'synthetic-soxx.tsv'),
 ]
+# Daily highs and lows of the funds the Turnaround Monday rule can read (its
+# signal: a Monday close under the prior day's low buys, a close over the
+# prior day's high sells). Real bars from each fund's launch, from the same
+# download as the closes; js/data.js places them against the price file's
+# close. Before a launch, a synthesized prefix (high_low_history below), which
+# the daily refresh copies through like the price files' prefix.
+high_low = {
+    'TQQQ': 'tqqq-hl.tsv',
+    'QQQ':  'qqq-hl.tsv',
+    'SPY':  'spy-hl.tsv',
+}
+# Where each fund's pre-launch highs and lows come from: an index's own bars,
+# or another fund's bars at a leverage (build_high_low_files). ^NDX bars on
+# Yahoo start 1985-10-01; ^IXIC's before late 1984 repeat the close, so no
+# range reaches further back. SPY has none yet: real bars only, from 1993.
+high_low_history = {
+    'QQQ':  {'index': '^NDX'},
+    'TQQQ': {'from': 'QQQ', 'leverage': 3},
+}
+# GLD before its 2004-11-18 launch is gold's own price less GLD's fee
+# (build_gld_prefix), on a daily gold price stitched from these sources:
+#   2000-08-30 → 2004-11-17  Yahoo GC=F, front-month gold futures
+#   1968-06-18 → 1998-12-30  Bundesbank: the Frankfurt Stock Exchange fixing,
+#                            DM per kg, turned into dollars per ounce at the
+#                            same day's Frankfurt DM/USD rate
+#   the rest, from 1953      monthly London prices from datahub's public-domain
+#                            gold-prices file (World Bank Pink Sheet from 1960,
+#                            Timothy Green's yearly averages before). Each
+#                            month's price sits on the 15th, the days between
+#                            follow a straight line in log price, so these
+#                            stretches (1953 to June 1968, 1999 to August 2000)
+#                            have no daily swings.
+# The LBMA's daily London fix (1968+) would be the better source, but its site
+# blocks scripted downloads, and FRED dropped its copy in 2022.
+# SOXL before its 2010-03-11 launch is the PHLX Semiconductor index (^SOX, Yahoo,
+# from 1994-05-04) walked backward at 3× with financing, like TQQQ from ^NDX
+# (build_soxl_prefix). No semiconductor index with daily history exists before
+# the index's own launch in December 1993. Before ^SOX's first Yahoo day the
+# index is stood in for by Ken French's "Chips" industry portfolio: CRSP's
+# value-weighted daily return of every listed US electronic-equipment company
+# (SIC 3622, 3661-3666, 3669-3679, 3810, 3812; semiconductors are 3674),
+# dividends and delisted companies included, daily from July 1926. Its returns
+# are scaled by french_beta, the index's daily beta to it where both exist
+# (1.17 over 1994-2001, 1.10 over 2001-2010, 1.04 over 2010-2021, 1.15 since;
+# daily R² 0.79 to 0.91). So both files start on the price files' first day.
+# The stand-in is rough: its level ran 4.5 points a year under the index in
+# 1994-2001 and 4.5 over a real semiconductor fund (Fidelity Select
+# Electronics) in 1985-1994, and it is calmer than semiconductors were
+# (research/soxl-history/).
+soxl_history = {
+    'index':         '^SOX',
+    'french_zip':    'https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/49_Industry_Portfolios_daily_CSV.zip',
+    'french_column': 'Chips',
+    'french_beta':   1.15,
+}
+# SOXX before its 2001-07-13 launch is the same index less SOXX's fee, at 1x, no
+# financing (build_soxx_prefix): the 1x leg of the SOXL vs SOXX strategy, as QQQ
+# is of TQQQ vs QQQ. ^SOX is price-only, so the prefix runs about 1%/yr light.
+TROY_OUNCES_PER_KG = 32.1507466
+gold_history = {
+    'futures':              'GC=F',
+    'frankfurt_dem_per_kg': 'https://api.statistiken.bundesbank.de/rest/data/BBEX3/D.XAU.DEM.EA.AC.C01?format=csv&lang=en',
+    'dem_per_usd':          'https://api.statistiken.bundesbank.de/rest/data/BBEX3/D.USD.DEM.AA.AC.000?format=csv&lang=en',
+    'monthly_usd':          'https://raw.githubusercontent.com/datasets/gold-prices/main/data/monthly.csv',
+}
 
 
 def cell(value):
@@ -287,7 +384,10 @@ def fetch_fred(series_id, start_date, fallback_path=None, attempts=3, force_remo
     for attempt in range(1, attempts + 1):
         try:
             print(f"Fetching FRED {series_id} (attempt {attempt}/{attempts})...")
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            # FRED's bot screen stalls a request that claims to be a bare
+            # "Mozilla/5.0" browser until it times out (NFCI stuck at
+            # 2026-08-28 for two months); an honest client name gets through.
+            req = urllib.request.Request(url, headers={'User-Agent': FRED_USER_AGENT})
             raw = urllib.request.urlopen(req, timeout=60).read().decode('utf-8')
             out = []
             reader = csv.reader(io.StringIO(raw))
@@ -354,6 +454,27 @@ def write_rate_tsv(path, rows):
         f.write("Date\tRate\n")
         for d, v in rows:
             f.write(f"{d.month}/{d.day}/{d.year} 16:00:00\t{v:.4f}\n")
+
+
+def append_new_readings(existing, fetched):
+    """The NFCI file with the weeks after its last row added from `fetched`;
+    no existing row is rewritten.
+
+    The Chicago Fed re-estimates the index's whole history every week: the
+    week of 2020-04-03 read 0.07 when it was published, 0.34 in 2022, 0.51 in
+    April 2025 and 0.31 in November 2026. A file replaced from FRED each week
+    lets a backtest's past credit-veto days move with the data vintage (run on
+    the April 2025 file, the NFCI veto strategy showed 82.6% a year for
+    2010-2025 instead of 88.0%). So the committed file holds, from 2011-05-20
+    (the first reading the index was published live with), each week's value
+    as first published (ALFRED, built 2026-11-10), and before that the history
+    as FRED had it that day; each run adds only newer weeks, at the value FRED
+    shows when they first appear. See research/recheck/nfci/ and
+    research/recheck/vintage/."""
+    if not existing:
+        return fetched
+    last = existing[-1][0]
+    return existing + [(d, v) for d, v in fetched if d > last]
 
 
 def walk_backward(source_pairs, anchor_date, anchor_price, leverage, expense_daily, rate_map=None, rate_spread=0.0):
@@ -516,11 +637,326 @@ def write_price_tsv(path, prefix_pairs, real_df):
             f.write(f'{date_str}\t{render(date_str, cell(row["Close"]))}\n')
 
 
+def parse_tsv_date(date_str):
+    """'3/10/1999 16:00:00' -> Timestamp('1999-03-10'), the TSVs' date format."""
+    import pandas as pd
+    m, d, y = date_str.split(' ')[0].split('/')
+    return pd.Timestamp(int(y), int(m), int(d))
+
+
+def read_high_low_tsv(path):
+    """Rows of a *-hl.tsv as [(Timestamp, high, low, close)], file order."""
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path) as f:
+        next(f, None)  # header
+        for line in f:
+            date_str, high, low, close = line.rstrip('\n').split('\t')
+            rows.append((parse_tsv_date(date_str), float(high), float(low), float(close)))
+    return rows
+
+
+def real_high_low_rows(real_df):
+    """A yfinance download as [(Timestamp, high, low, close)]."""
+    return [(normalize_ts(date), cell(row['High']), cell(row['Low']), cell(row['Close']))
+            for date, row in real_df.iterrows()]
+
+
+def write_high_low_tsv(path, prefix_rows, real_df):
+    """Write Date\\tHigh\\tLow\\tClose: the synthesized pre-launch rows
+    (build_high_low_files), then every real yfinance bar (high_low above). The
+    bar's own close rides along so js/data.js places the high and low against
+    the price file's close as ratios, and a difference in dividend adjustment
+    between the two files cannot shift them (the first copies, from Yahoo's
+    chart API, sat up to 0.7% off the price files)."""
+    with open(path, 'w') as f:
+        f.write('Date\tHigh\tLow\tClose\n')
+        for d, high, low, close in prefix_rows + real_high_low_rows(real_df):
+            f.write(f'{d.month}/{d.day}/{d.year} 16:00:00\t{fmt_close(high)}\t{fmt_close(low)}\t{fmt_close(close)}\n')
+
+
+def index_high_low_prefix(index_df, first_real):
+    """A fund's rows before its launch from its index's own bars. js/data.js
+    reads a row's high and low as ratios to the row's close, so the index's
+    levels serve as they are. Days Yahoo serves without a full bar are left
+    out; the app then falls back to the prior close for that day."""
+    return [r for r in real_high_low_rows(index_df) if r[0] < first_real and r[1] > 0 and r[2] > 0 and r[3] > 0]
+
+
+def leveraged_high_low_prefix(base_rows, base_close, fund_close, leverage, first_real):
+    """A daily-reset leveraged fund's high and low before its launch, from its
+    base fund's bars. At any moment of a day the fund is worth its prior close
+    times (1 + leverage x the base's move since the prior close), less the
+    day's costs, so at the base's high it is at its own high (for a leverage
+    above 0). The costs are read off the two price files' closes:
+    (1 + leverage x the base's daily return) - the fund's daily return.
+
+    Checked where both have real bars (TQQQ from QQQ, 2010-02-12 to
+    2026-11-03, 4,207 days): within 0.04% of TQQQ's real high and low on the
+    median day, 0.23% on 95% of days, and "a close under the prior day's low"
+    agrees on 99.6% of days."""
+    base_ratio = {d: (high / close, low / close) for d, high, low, close in base_rows}
+    days = sorted(d for d in fund_close if d < first_real)
+    rows = []
+    for prev, d in zip(days, days[1:]):
+        if d not in base_ratio or prev not in base_close or d not in base_close:
+            continue
+        b0, b1, f0, f1 = base_close[prev], base_close[d], fund_close[prev], fund_close[d]
+        costs = 1 + leverage * (b1 / b0 - 1) - f1 / f0
+        high_ratio, low_ratio = base_ratio[d]
+        at = lambda ratio: f0 * (1 + leverage * (b1 * ratio / b0 - 1) - costs)
+        rows.append((d, at(high_ratio), at(low_ratio), f1))
+    return rows
+
+
+def fetch_high_low_indexes():
+    """The index downloads high_low_history reads, by symbol."""
+    return {how['index']: fetch(how['index']) for how in high_low_history.values() if 'index' in how}
+
+
+def build_high_low_files(real_by_ticker, index_dfs):
+    """Write every *-hl.tsv: the pre-launch rows high_low_history describes,
+    then the real bars. Leveraged funds read their base fund's rows (its
+    prefix included) and the two committed price files, so the price TSVs
+    must be written first."""
+    data_dir = os.path.join(basedir, DATA_DIR)
+    price_file = dict(tickers)
+    rows_by_ticker = {}
+    # Funds built from another fund's bars go after the ones they read.
+    for ticker in sorted(high_low, key=lambda t: 'from' in high_low_history.get(t, {})):
+        filename = high_low[ticker]
+        real_df = real_by_ticker[ticker]
+        first_real = normalize_ts(real_df.index[0])
+        how = high_low_history.get(ticker)
+        if how is None:
+            prefix = []
+        elif 'index' in how:
+            prefix = index_high_low_prefix(index_dfs[how['index']], first_real)
+        else:
+            base = how['from']
+            base_close = dict(read_price_tsv(os.path.join(data_dir, price_file[base])))
+            fund_close = dict(read_price_tsv(os.path.join(data_dir, price_file[ticker])))
+            prefix = leveraged_high_low_prefix(rows_by_ticker[base], base_close, fund_close, how['leverage'], first_real)
+        write_high_low_tsv(os.path.join(data_dir, filename), prefix, real_df)
+        rows_by_ticker[ticker] = prefix + real_high_low_rows(real_df)
+        start = prefix[0][0] if prefix else first_real
+        print(f"  {filename}: {len(prefix)} synthesized + {len(real_df)} real bars, from {start.strftime('%Y-%m-%d')}")
+
+
+def fetch_text(url):
+    """A URL's body as text, requested under the updater's own name."""
+    print(f"Fetching {url}...")
+    req = urllib.request.Request(url, headers={'User-Agent': FRED_USER_AGENT})
+    return urllib.request.urlopen(req, timeout=120).read().decode('utf-8-sig')
+
+
+def read_bundesbank_csv(text):
+    """A Bundesbank time-series CSV as {Timestamp: value}. Its data rows start
+    with an ISO date, and '.' marks a day without a value; the rest is notes."""
+    import pandas as pd
+    return {pd.Timestamp(row[0]): float(row[1]) for row in csv.reader(io.StringIO(text))
+            if len(row) >= 2 and re.fullmatch(r'\d{4}-\d{2}-\d{2}', row[0]) and row[1] != '.'}
+
+
+def read_monthly_gold_csv(text):
+    """datahub's monthly gold file (Date as YYYY-MM, Price) as
+    [(15th of the month, dollars per ounce)]."""
+    import pandas as pd
+    reader = csv.reader(io.StringIO(text))
+    next(reader)  # header row: Date,Price
+    return [(pd.Timestamp(f'{row[0]}-15'), float(row[1])) for row in reader]
+
+
+def frankfurt_gold_usd(dem_per_kg, dem_per_usd):
+    """The Frankfurt fixing in dollars per troy ounce, on days with both quotes."""
+    return sorted((d, dem / dem_per_usd[d] / TROY_OUNCES_PER_KG)
+                  for d, dem in dem_per_kg.items() if d in dem_per_usd)
+
+
+def gold_prices_on(days, daily_sources, monthly):
+    """Gold's price on each of `days`, as [(Timestamp, price)].
+
+    Inside a daily source's span, its latest price on or before the day (a
+    market holiday repeats the prior fix). Elsewhere, the monthly prices joined
+    by straight lines in log price, with each span's first and last price among
+    them, so a stretch meets the daily data on both sides without a jump.
+    Before the first monthly price, that price."""
+    spans = [(source[0][0], source[-1][0], [d for d, _ in source], source) for source in daily_sources]
+    knots = sorted([(d, p) for d, p in monthly if not any(first <= d <= last for first, last, _, _ in spans)]
+                   + [point for source in daily_sources for point in (source[0], source[-1])])
+    knot_days = [d for d, _ in knots]
+    out = []
+    for day in days:
+        span = next((s for s in spans if s[0] <= day <= s[1]), None)
+        if span is not None:
+            out.append((day, span[3][bisect.bisect_right(span[2], day) - 1][1]))
+            continue
+        k = bisect.bisect_right(knot_days, day)
+        if k == 0:
+            out.append((day, knots[0][1]))
+            continue
+        (d0, p0), (d1, p1) = knots[k - 1], knots[k]
+        out.append((day, p0 * (p1 / p0) ** ((day - d0) / (d1 - d0))))
+    return out
+
+
+def build_gld_prefix(gld_df, days):
+    """GLD's rows before its launch, as [(Timestamp, close)]: gold_prices_on
+    the given trading days (the QQQ file's, so every price file shares one
+    calendar), walked back from GLD's first close at leverage 1 less GLD's
+    fee."""
+    dem_per_kg = read_bundesbank_csv(fetch_text(gold_history['frankfurt_dem_per_kg']))
+    dem_per_usd = read_bundesbank_csv(fetch_text(gold_history['dem_per_usd']))
+    monthly = read_monthly_gold_csv(fetch_text(gold_history['monthly_usd']))
+    futures = df_to_pairs(fetch(gold_history['futures']))
+    first_real = normalize_ts(gld_df.index[0])
+    gold = gold_prices_on([d for d in days if d <= first_real],
+                          [frankfurt_gold_usd(dem_per_kg, dem_per_usd), futures], monthly)
+    _, pairs = walk_backward(gold, first_real, cell(gld_df['Close'].iloc[0]),
+                             leverage=1, expense_daily=GLD_EXPENSE_DAILY)
+    return pairs
+
+
+def write_gld_file(gld_df):
+    """synthetic-gld.tsv from scratch: build_gld_prefix on the committed QQQ
+    file's trading days, then GLD's real closes."""
+    data_dir = os.path.join(basedir, DATA_DIR)
+    price_file = dict(tickers)
+    days = [d for d, _ in read_price_tsv(os.path.join(data_dir, price_file['QQQ']))]
+    prefix = build_gld_prefix(gld_df, days)
+    write_price_tsv(os.path.join(data_dir, price_file['GLD']), prefix, gld_df)
+    print(f"  {price_file['GLD']}: {len(prefix)} synthesized + {len(gld_df)} real, "
+          f"{prefix[0][0].strftime('%Y-%m-%d')} to {gld_df.index[-1].strftime('%Y-%m-%d')}")
+
+
+def fetch_french_industry(url, column):
+    """One industry's value-weighted daily returns from Ken French's 49-industry
+    file, as [(Timestamp, return)], the return a fraction."""
+    import zipfile
+    import pandas as pd
+    req = urllib.request.Request(url, headers={'User-Agent': FRED_USER_AGENT})
+    raw = urllib.request.urlopen(req, timeout=120).read()
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        lines = archive.read(archive.namelist()[0]).decode('latin-1').splitlines()
+    start = next(i for i, line in enumerate(lines) if 'Average Value Weighted Returns' in line)
+    k = [c.strip() for c in lines[start + 1].split(',')].index(column)
+    out = []
+    for line in lines[start + 2:]:
+        parts = line.split(',')
+        day = parts[0].strip()
+        if not re.fullmatch(r'\d{8}', day):
+            break   # the value-weighted block ends at the first line that is not a day
+        value = float(parts[k])
+        if value <= -99:
+            raise ValueError(f"French {column}: no return on {day}")
+        out.append((pd.Timestamp(int(day[:4]), int(day[4:6]), int(day[6:])), value / 100.0))
+    return out
+
+
+_semis_index = {}
+
+
+def semis_index(days):
+    """The semiconductor index on the given trading days (the QQQ file's), as
+    [(Timestamp, level)]: ^SOX from its first Yahoo day, and before that a level
+    walked back from ^SOX's first close on French's Chips returns times
+    french_beta (soxl_history). A French day the price files' calendar lacks
+    (1975-02-28) is compounded into the next day the files have. Fetched once
+    per run."""
+    key = (days[0], days[-1], len(days))
+    if key in _semis_index:
+        return _semis_index[key]
+    wanted = set(days)
+    sox = [(d, c) for d, c in df_to_pairs(fetch(soxl_history['index'])) if d in wanted]
+    first_day, level = sox[0]
+    chips = fetch_french_industry(soxl_history['french_zip'], soxl_history['french_column'])
+    beta = soxl_history['french_beta']
+    early_days = sorted(d for d in wanted if d <= first_day)
+    by_day = [(d, r) for d, r in chips if early_days[0] < d <= first_day]
+    early, at = [], len(by_day) - 1
+    for i in range(len(early_days) - 1, 0, -1):
+        growth, used = 1.0, 0
+        while at >= 0 and by_day[at][0] > early_days[i - 1]:
+            growth *= 1 + beta * by_day[at][1]
+            at -= 1
+            used += 1
+        if not used:
+            raise ValueError(f"French {soxl_history['french_column']}: no return between "
+                             f"{early_days[i - 1].date()} and {early_days[i].date()}")
+        level /= growth
+        early.append((early_days[i - 1], level))
+    _semis_index[key] = early[::-1] + sox
+    return _semis_index[key]
+
+
+def build_soxl_prefix(soxl_df, days, rate_map):
+    """SOXL's rows before its launch, as [(Timestamp, close)]: the semiconductor
+    index on the given trading days (the QQQ file's; semis_index), walked back
+    from SOXL's first close at 3× with financing at the short rate plus
+    SOXL_SWAP_SPREAD and SOXL's fee."""
+    first_real = normalize_ts(soxl_df.index[0])
+    sox = [(d, c) for d, c in semis_index(days) if d <= first_real]
+    _, pairs = walk_backward(sox, first_real, cell(soxl_df['Close'].iloc[0]),
+                             leverage=3, expense_daily=SOXL_EXPENSE_DAILY,
+                             rate_map=rate_map, rate_spread=SOXL_SWAP_SPREAD)
+    return pairs
+
+
+def build_soxx_prefix(soxx_df, days):
+    """SOXX's rows before its launch: the semiconductor index on the given
+    trading days (semis_index) walked back from SOXX's first close at 1x less
+    SOXX's fee."""
+    first_real = normalize_ts(soxx_df.index[0])
+    sox = [(d, c) for d, c in semis_index(days) if d <= first_real]
+    _, pairs = walk_backward(sox, first_real, cell(soxx_df['Close'].iloc[0]), leverage=1, expense_daily=SOXX_EXPENSE_DAILY)
+    return pairs
+
+
+def write_soxx_file(soxx_df):
+    """synthetic-soxx.tsv from scratch: build_soxx_prefix on the committed QQQ file's trading days, then SOXX's real closes."""
+    data_dir = os.path.join(basedir, DATA_DIR)
+    price_file = dict(tickers)
+    days = [d for d, _ in read_price_tsv(os.path.join(data_dir, price_file['QQQ']))]
+    prefix = build_soxx_prefix(soxx_df, days)
+    write_price_tsv(os.path.join(data_dir, price_file['SOXX']), prefix, soxx_df)
+    print(f"  {price_file['SOXX']}: {len(prefix)} synthesized + {len(soxx_df)} real, "
+          f"{prefix[0][0].strftime('%Y-%m-%d')} to {soxx_df.index[-1].strftime('%Y-%m-%d')}")
+
+
+def write_soxl_file(soxl_df):
+    """synthetic-soxl.tsv from scratch: build_soxl_prefix on the committed QQQ
+    file's trading days with the committed short rates, then SOXL's real closes."""
+    data_dir = os.path.join(basedir, DATA_DIR)
+    price_file = dict(tickers)
+    days = [d for d, _ in read_price_tsv(os.path.join(data_dir, price_file['QQQ']))]
+    rate_map = dict(read_rate_tsv(os.path.join(data_dir, 'short-rates.tsv')))
+    prefix = build_soxl_prefix(soxl_df, days, rate_map)
+    write_price_tsv(os.path.join(data_dir, price_file['SOXL']), prefix, soxl_df)
+    print(f"  {price_file['SOXL']}: {len(prefix)} synthesized + {len(soxl_df)} real, "
+          f"{prefix[0][0].strftime('%Y-%m-%d')} to {soxl_df.index[-1].strftime('%Y-%m-%d')}")
+
+
+def yahoo_splits(ticker):
+    """Every split Yahoo lists for `ticker`, oldest first, as (day, shares
+    ratio: 3.0 for a 3-for-1, 0.2 for a 1-for-5 reverse). Each one that
+    data/splits.tsv has no row for is added to it."""
+    listed = [(normalize_ts(day), float(shares)) for day, shares in yf.Ticker(ticker).splits.items()]
+    stamp = time.strftime('found %Y-%m-%d %H:%M UTC', time.gmtime())
+    days = [(f'{day:%Y-%m-%d}', shares) for day, shares in listed]
+    for fund, day, split, _ in note_splits(os.path.join(basedir, DATA_DIR, SPLIT_REGISTRY), ticker, days, stamp):
+        print(f"  !! SPLIT {fund} {split} on {day}: added to {SPLIT_REGISTRY}")
+    return listed
+
+
 def incremental_refresh():
     """Default daily-cron path. The synthesized pre-IPO prefix of each TSV
-    is permanent and lives in the committed file; we only need to refresh
-    the post-IPO real-data tail with fresh yfinance bars (and pick up any
-    Yahoo backfill corrections to existing real rows).
+    lives in the committed file; we only need to refresh the post-IPO
+    real-data tail with fresh yfinance bars (and pick up any Yahoo backfill
+    corrections to existing real rows). The prefix follows whatever factor
+    Yahoo applied to the history since the last run (a dividend), and a split
+    is carried through the day Yahoo's history takes to settle: plan_refresh
+    in split_guard.py.
 
     No rate-file FRED pulls, no ^NDX, no ^SOX, no synthesis logic — those are
     bootstrap-only concerns (use --rebuild). Daily runs touch the ETF TSVs
@@ -536,21 +972,44 @@ def incremental_refresh():
             print(f"  {filename}: yfinance returned no rows; leaving TSV untouched")
             continue
         first_real = normalize_ts(real_df.index[0])
-        existing = read_price_tsv(path)
-        prefix_pairs = [(d, c) for d, c in existing if d < first_real]
-        write_price_tsv(path, prefix_pairs, real_df)
+        fresh = df_to_pairs(real_df)
+
+        def recent_split():
+            # A second request, made only when the history looks unusual. If it
+            # fails the rows are written as served, and the log says why.
+            try:
+                listed = yahoo_splits(ticker)
+            except Exception as e:
+                print(f"  !! {ticker}: Yahoo's split list did not load ({e})")
+                return None
+            recent = [s for s in listed if 0 <= (fresh[-1][0] - s[0]).days <= RECENT_DAYS]
+            return recent[-1] if recent else None
+
+        plan = plan_refresh(read_price_tsv(path), fresh, recent_split)
         last = real_df.index[-1].strftime('%Y-%m-%d')
-        print(f"  {filename}: {len(prefix_pairs)} preserved + {len(real_df)} real, through {last}")
+        if plan.note:
+            print(f"  !! {ticker}: {plan.note}")
+        if plan.kept is not None:
+            write_price_tsv(path, plan.kept, real_df.iloc[plan.start:])
+            print(f"  {filename}: {len(plan.kept)} kept + {len(real_df) - plan.start} from Yahoo, through {last}")
+        if ticker in high_low:
+            hl_path = os.path.join(data_dir, high_low[ticker])
+            hl_prefix = [r for r in read_high_low_tsv(hl_path) if r[0] < first_real]
+            write_high_low_tsv(hl_path, hl_prefix, real_df)
+            print(f"  {high_low[ticker]}: {len(hl_prefix)} preserved + {len(real_df)} real bars, through {last}")
 
     # NFCI (weekly) is a LIVE decision input for the credit-veto strategy, so
     # the cron keeps it current — unlike the historical rate files, which only
     # refresh via --refresh-rates. FRED downtime must never break the price
-    # refresh above, so any failure leaves the committed TSV untouched.
+    # refresh above, so any failure leaves the committed TSV untouched. Only
+    # weeks after the file's last row are added (append_new_readings).
     try:
         nfci = fetch_fred('NFCI', '1971-01-01', force_remote=True)
         if nfci:
-            write_rate_tsv(os.path.join(data_dir, 'nfci.tsv'), nfci)
-            print(f"  nfci.tsv: {len(nfci)} weekly rows, through {nfci[-1][0].strftime('%Y-%m-%d')}")
+            nfci_path = os.path.join(data_dir, 'nfci.tsv')
+            nfci_rows = append_new_readings(read_rate_tsv(nfci_path), nfci)
+            write_rate_tsv(nfci_path, nfci_rows)
+            print(f"  nfci.tsv: {len(nfci_rows)} weekly rows, through {nfci_rows[-1][0].strftime('%Y-%m-%d')}")
     except Exception as e:
         print(f"  nfci.tsv: FRED unreachable ({e}); leaving committed TSV untouched")
 
@@ -570,10 +1029,62 @@ _argp.add_argument('--rebuild', action='store_true',
 _argp.add_argument('--refresh-rates', action='store_true',
                    help='Re-fetch FRED DFF + TB3MS + NFCI from the network and '
                         'overwrite data/fed-funds-effective.tsv + data/t-bill-3mo.tsv + '
-                        'data/short-rates.tsv + data/nfci.tsv. Use to refresh the '
-                        'committed rate/signal data; not needed for synthesis '
-                        '(historical rates do not change).')
+                        'data/short-rates.tsv; data/nfci.tsv only gains the weeks '
+                        'after its last row (its history is never rewritten). Use to '
+                        'refresh the committed rate/signal data; not needed for '
+                        'synthesis (historical rates do not change).')
+_argp.add_argument('--high-low-history', action='store_true',
+                   help='Rewrite the high/low files with their pre-launch rows '
+                        '(QQQ from ^NDX bars, TQQQ from QQQ at 3x; see '
+                        'high_low_history) built from the committed price files. '
+                        'Nothing else is touched.')
+_argp.add_argument('--soxl-history', action='store_true',
+                   help='Rewrite synthetic-soxl.tsv: SOXL\'s real closes plus its '
+                        'pre-launch rows from the PHLX Semiconductor index at 3×, '
+                        'and before the index from Ken French\'s Chips industry '
+                        '(see soxl_history), on the committed QQQ file\'s trading '
+                        'days and short rates. Nothing else is touched.')
+_argp.add_argument('--soxx-history', action='store_true',
+                   help='Rewrite synthetic-soxx.tsv: SOXX\'s real closes plus its '
+                        'pre-launch rows from the PHLX Semiconductor index at 1x '
+                        'less its fee, and before the index from Ken French\'s '
+                        'Chips industry, on the committed QQQ file\'s trading days.')
+_argp.add_argument('--gold-history', action='store_true',
+                   help='Rewrite synthetic-gld.tsv: GLD\'s real closes plus its '
+                        'pre-launch rows from gold prices (see gold_history), on '
+                        'the committed QQQ file\'s trading days. Nothing else is '
+                        'touched.')
+_argp.add_argument('--split-registry', action='store_true',
+                   help='Add to data/splits.tsv every split Yahoo lists for '
+                        'every fund that the file has no row for. Run it when '
+                        'a fund is added. Nothing else is touched.')
 _args = _argp.parse_args()
+
+if _args.split_registry:
+    for ticker, _ in tickers:
+        print(f"  {ticker}: {len(yahoo_splits(ticker))} splits listed")
+    print("Done.")
+    sys.exit(0)
+
+if _args.high_low_history:
+    build_high_low_files({t: fetch(t) for t in high_low}, fetch_high_low_indexes())
+    print("Done.")
+    sys.exit(0)
+
+if _args.gold_history:
+    write_gld_file(fetch('GLD'))
+    print("Done.")
+    sys.exit(0)
+
+if _args.soxl_history:
+    write_soxl_file(fetch('SOXL'))
+    print("Done.")
+    sys.exit(0)
+
+if _args.soxx_history:
+    write_soxx_file(fetch('SOXX'))
+    print("Done.")
+    sys.exit(0)
 
 if not _args.rebuild:
     incremental_refresh()
@@ -592,6 +1103,10 @@ tqqq_df         = fetch('TQQQ')
 spy_df          = fetch('SPY')
 sso_df          = fetch('SSO')                              # ProShares 2× S&P500, 2006-06-21+
 spxl_df         = fetch('SPXL')                             # Direxion 3× S&P500, 2008-11-05+
+gld_df          = fetch('GLD')                              # SPDR Gold Shares, 2004-11-18+
+sqqq_df         = fetch('SQQQ')                             # ProShares UltraPro Short QQQ, 2010-02-11+
+soxl_df         = fetch('SOXL')                             # Direxion 3× semiconductors, 2010-03-11+
+soxx_df         = fetch('SOXX')                             # iShares Semiconductor, 2001-07-13+
 ndx_df          = fetch('^NDX')
 gspc_df         = fetch('^GSPC')
 sp500tr_df      = fetch('^SP500TR')
@@ -609,7 +1124,8 @@ dff_pairs       = fetch_fred('DFF',   DFF_START,  fallback_path=os.path.join(bas
 tbms_pairs      = fetch_fred('TB3MS', TBMS_START, fallback_path=os.path.join(basedir, DATA_DIR, 't-bill-3mo.tsv'),           force_remote=_args.refresh_rates)  # monthly 1934+
 # Chicago Fed NFCI (weekly, 1971+). Not a synthesis input — it feeds the
 # NFCI-credit-veto strategy in the app (js/data.js aligns it to trading days
-# with a 7-day publication lag). Refreshed alongside the rate files.
+# with a 7-day publication lag). Refreshed alongside the rate files, by adding
+# the weeks after the committed file's last row (append_new_readings).
 nfci_pairs      = fetch_fred('NFCI',  '1971-01-01', fallback_path=os.path.join(basedir, DATA_DIR, 'nfci.tsv'),               force_remote=_args.refresh_rates)  # weekly 1971+
 combined_rates  = build_combined_rates(dff_pairs, tbms_pairs)
 rate_map        = dict(combined_rates)                      # Timestamp → percent
@@ -799,12 +1315,22 @@ else:
     sqqq_prefix_rows = sqqq_p1_rows
 
 
+# ---- GLD: real SPDR Gold Shares from 2004-11-18, gold-price prefix ----
+# On QQQ's trading days, so the files share one calendar (build_gld_prefix).
+qqq_days = [parse_tsv_date(s) for s, _ in qqq_prefix_rows] + [normalize_ts(d) for d in qqq_df.index]
+gld_prefix_rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in build_gld_prefix(gld_df, qqq_days)]
+
+# ---- SOXL: real from 2010-03-11, 3× the semiconductor index with financing before (semis_index) ----
+soxl_prefix_rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in build_soxl_prefix(soxl_df, qqq_days, rate_map)]
+soxx_prefix_rows = [(d.strftime('%-m/%-d/%Y 16:00:00'), c) for d, c in build_soxx_prefix(soxx_df, qqq_days)]
+
+
 prefix_by_ticker = {'QQQ': qqq_prefix_rows, 'QLD': qld_prefix_rows,
                     'TQQQ': tqqq_prefix_rows, 'SPY': spy_prefix_rows,
                     'SSO': sso_prefix_rows, 'SPXL': spxl_prefix_rows,
-                    'SQQQ': sqqq_prefix_rows}
+                    'SQQQ': sqqq_prefix_rows, 'GLD': gld_prefix_rows, 'SOXL': soxl_prefix_rows, 'SOXX': soxx_prefix_rows}
 real_by_ticker   = {'QQQ': qqq_df, 'QLD': qld_df, 'TQQQ': tqqq_df, 'SPY': spy_df,
-                    'SSO': sso_df, 'SPXL': spxl_df, 'SQQQ': sqqq_df}
+                    'SSO': sso_df, 'SPXL': spxl_df, 'SQQQ': sqqq_df, 'GLD': gld_df, 'SOXL': soxl_df, 'SOXX': soxx_df}
 
 data_dir = os.path.join(basedir, DATA_DIR)
 os.makedirs(data_dir, exist_ok=True)
@@ -831,12 +1357,15 @@ for ticker, filename in tickers:
         end = data.index[-1].strftime('%Y-%m-%d')
         print(f"  {filename}: {len(data)} rows, {start} to {end}")
 
+build_high_low_files(real_by_ticker, fetch_high_low_indexes())
+
 # === Write rate files =====================================================
 # Same TSV format as the price files so they're trivial to load with the same
 # parser. Daily granularity post-1954, monthly forward-filled pre-1954.
 write_rate_tsv(os.path.join(data_dir, 'fed-funds-effective.tsv'), dff_pairs)
 write_rate_tsv(os.path.join(data_dir, 't-bill-3mo.tsv'),          tbms_pairs)
 write_rate_tsv(os.path.join(data_dir, 'short-rates.tsv'),         combined_rates)
+nfci_pairs = append_new_readings(read_rate_tsv(os.path.join(data_dir, 'nfci.tsv')), nfci_pairs)
 write_rate_tsv(os.path.join(data_dir, 'nfci.tsv'),                nfci_pairs)
 print(f"  fed-funds-effective.tsv: {len(dff_pairs)} daily rows, {dff_pairs[0][0].strftime('%Y-%m-%d')} to {dff_pairs[-1][0].strftime('%Y-%m-%d')}")
 print(f"  t-bill-3mo.tsv:          {len(tbms_pairs)} monthly rows, {tbms_pairs[0][0].strftime('%Y-%m-%d')} to {tbms_pairs[-1][0].strftime('%Y-%m-%d')}")

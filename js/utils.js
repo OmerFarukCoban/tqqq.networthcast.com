@@ -1,4 +1,20 @@
 
+// The type scale for touch screens: styles.css sets --ui-scale to 1 on a
+// desktop and 1.25 on a coarse-pointer screen (phones, tablets, a folding
+// phone's inner panel), and every CSS font size is calc(Npx * var(--ui-scale)).
+// Text drawn by hand follows it through these: readUiScale() once the
+// stylesheet is in (both pages call it first thing), uiScale() wherever a
+// pixel size is written, canvasFont() for a canvas context's font string.
+let _uiScale = 1;
+function readUiScale() {
+  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'));
+  _uiScale = v > 0 ? v : 1;
+  if (typeof Chart !== 'undefined' && Chart.defaults && Chart.defaults.font) Chart.defaults.font.size = 12 * _uiScale;
+  return _uiScale;
+}
+function uiScale() { return _uiScale; }
+function canvasFont(weight, px, family) { return weight + ' ' + (px * _uiScale).toFixed(2) + 'px ' + family; }
+
 // A JS Date → "HH:MM", local time. Same zero-padding as the header's "Data
 // last fetched" stamp (js/init.js) — pulled out so any other "as of" label
 // (e.g. a custom strategy's signal-metrics panel) can show the identical
@@ -24,6 +40,12 @@ function qLabel(dateStr) {
 // in late September). Works the same way for weekly/monthly/yearly: end
 // of one period → "first day of the next".
 const _LOG_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// The key that turns a wheel into a zoom and a drag into a pan on the charts
+// (js/signal-chart.js, js/chart.js): ⌘ on a Mac, Ctrl elsewhere. A trackpad
+// pinch arrives as a Ctrl + wheel, so it zooms too.
+const MOD_KEY = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl';
+const modKeyHeld = e => e.metaKey || e.ctrlKey;
 
 // "YYYY-MM-DD" → "Sep 2012". Kept for callers that want month/year resolution.
 function fmtMonthYear(dateStr) {
@@ -182,6 +204,27 @@ function computeDayChange(todayVal, ydayVal) {
   if (typeof ydayVal !== 'number' || !isFinite(ydayVal) || ydayVal <= 0) return null;
   return { pct: (todayVal - ydayVal) / ydayVal * 100, abs: todayVal - ydayVal };
 }
+// The change between two readings of a line that can sit at or under zero
+// (the real account's Profit, a `_signed` line), where zero and a loss are
+// real values, not missing data. The dollars always; the percent against the
+// size of the starting value, so its sign is the move's direction (−$2K to
+// +$3K is +250%), and none from a start of exactly zero. From a start above
+// zero it is computeDayChange's figure.
+function computeSignedChange(endVal, startVal) {
+  if (typeof endVal !== 'number' || !isFinite(endVal)) return null;
+  if (typeof startVal !== 'number' || !isFinite(startVal)) return null;
+  const abs = endVal - startVal;
+  return { pct: startVal === 0 ? null : abs / Math.abs(startVal) * 100, abs };
+}
+// The day-change badge's figures: the percent alone, "+1.2%" (the desktop
+// widget, after its portfolio value), or with the dollars, "+1.2% · +$1.23K"
+// (js/chart.js's end labels, in parentheses).
+function fmtDayChangePct(delta) {
+  return `${delta.pct >= 0 ? '+' : ''}${delta.pct.toFixed(1)}%`;
+}
+function fmtDayChange(delta) {
+  return `${fmtDayChangePct(delta)} · ${delta.pct >= 0 ? '+' : ''}${fmtFull(delta.abs)}`;
+}
 
 // Max drawdown of a REAL account's value readings, adjusted for external
 // flows (deposits/withdrawals) — a naive peak-to-trough on raw balances
@@ -240,6 +283,69 @@ function repriceAtPrevTradingDay(holdings, cash) {
     total += sh * p;
   }
   return total;
+}
+
+// The move of the same end-state holdings from the latest close to the funds'
+// latest extended-hours prints (js/data.js's applyLiveQuotes keeps them on
+// window._liveExtended): the value at the prints over the value at the close,
+// with the prints' session. The badge names this pre-market or after-hours
+// move while the files stand at a close (the user, 2026-11-06). Null without
+// prints, and null when a held fund has no print: its close in the print's
+// place would pass off part of the move as none.
+function extendedMoveOf(holdings, cash) {
+  const live = window._liveExtended;
+  if (!live || typeof daily === 'undefined' || !daily || !daily.length) return null;
+  const row = daily[daily.length - 1];
+  let atClose = (typeof cash === 'number' && isFinite(cash)) ? cash : 0, atPrint = atClose;
+  for (const k of Object.keys(holdings || {})) {
+    const sh = holdings[k];
+    if (!(sh > 0)) continue;
+    const print = live.prints[k];
+    if (!print || !(row[k] > 0)) return null;
+    atClose += sh * row[k];
+    atPrint += sh * print.price;
+  }
+  return atClose > 0 ? { session: live.session, ratio: atPrint / atClose } : null;
+}
+
+// ===== Colour separation (OKLab) ========================================
+// How far apart two colours read, measured the way the dataviz validator
+// measures it: Euclidean distance in OKLab ×100, once as seen ("normal") and
+// once under the Machado, Oliveira and Fernandes (2009) protan and deutan
+// simulations at full severity ("cvd" is the smaller of the two). The
+// validator's floors are 15 normal and 6 cvd. The signal mini chart in
+// js/saved-configs.js uses this to keep its lines apart from the strategy's
+// own colour. Anything that is not a 6-digit hex colour reads as infinitely
+// far, so an odd colour string never changes which colours a chart gets.
+const CVD_SIMULATION = {
+  protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
+};
+function colorSeparation(hexA, hexB) {
+  const linear = (hex) => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return null;
+    return [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16) / 255)
+      .map(c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  };
+  const simulate = ([r, g, b], M) => M.map(row => Math.max(0, Math.min(1, row[0] * r + row[1] * g + row[2] * b)));
+  const oklab = ([r, g, b]) => {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [
+      0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ];
+  };
+  const a = linear(hexA), b = linear(hexB);
+  if (!a || !b) return { normal: Infinity, cvd: Infinity };
+  const distance = (x, y) => { const p = oklab(x), q = oklab(y); return 100 * Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); };
+  return {
+    normal: distance(a, b),
+    cvd: Math.min(...Object.values(CVD_SIMULATION).map(M => distance(simulate(a, M), simulate(b, M)))),
+  };
 }
 
 // Pre-render small letter-badge canvases for the Adaptive transition markers:
@@ -352,6 +458,45 @@ function downloadLogCsv(btn) {
   const stamp = new Date().toISOString().slice(0, 10);
   downloadTextFile(tableToCsv(table), `tqqq-${slug}-${stamp}.csv`, 'text/csv');
 }
+// "Strategy trades only": one checkbox above every log table that has trades
+// of the strategy's own. Ticked, it leaves the rows where the strategy bought
+// or sold by its rules (each table builder tags them LOG_TRADE_ROW) and drops
+// the snapshots, the contributions and what new money bought. The choice is
+// one for all log tables and holds across re-renders. The CSV download takes
+// the rows on screen, so it follows the checkbox.
+const LOG_TRADE_ROW = 'log-row-trade';
+let _logTradesOnly = false;
+function toggleLogTradesOnly(on) {
+  _logTradesOnly = !!on;
+  // Only a section with the checkbox is filtered: a log with no trades keeps its rows.
+  document.querySelectorAll('.log-trades-toggle').forEach(label => {
+    label.closest('.log-section').classList.toggle('trades-only', _logTradesOnly);
+    label.querySelector('input').checked = _logTradesOnly;
+  });
+}
+// The class of a log table's section wrapper, given how many of its rows are the strategy's trades.
+const logSectionClass = (tradeCount) => 'log-section' + (_logTradesOnly && tradeCount > 0 ? ' trades-only' : '');
+function logTradesToggleHtml(tradeCount) {
+  if (!(tradeCount > 0)) return '';
+  return `
+    <label class="log-contrib-toggle log-trades-toggle">
+      <input type="checkbox" onchange="toggleLogTradesOnly(this.checked)" ${_logTradesOnly ? 'checked' : ''}>
+      Strategy trades only (${tradeCount})
+    </label>`;
+}
+// The row of checkboxes above a log table.
+const logTogglesRowHtml = (...toggles) => `<div style="display:flex;gap:16px;flex-wrap:wrap">${toggles.join('')}</div>`;
+// A table row's class attribute from the classes that apply to it.
+function logRowClassAttr(...names) {
+  const classes = names.filter(Boolean).join(' ');
+  return classes ? ` class="${classes}"` : '';
+}
+// Does a row's Holding name a fund? An opening row that does is the strategy's first purchase.
+function logHoldsFund(held) {
+  const name = String(held == null ? '' : held).trim().toUpperCase();
+  return name !== '' && name !== 'CASH';
+}
+
 // Header row shared by every log table: the section title plus a small CSV
 // download button, right-aligned. The `.log-section` wrapper around title +
 // toggles + table is what lets downloadLogCsv() find "this table", not just

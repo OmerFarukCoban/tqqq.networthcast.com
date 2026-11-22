@@ -22,6 +22,51 @@ window._txSchedule = null;
 // together on confirm; only _txSchedule gets nulled by the sliders toggle.
 window._txScheduleStash = null;
 const LS_TX_KEY = 'tqqq_transactions_v1';
+// The real account's chart lines (js/saved-configs.js's
+// appendActualPortfolioDatasets), each with the state flag its sidebar eye
+// toggles. `name` is the sidebar's, `label` the chart's. Portfolio and Profit
+// need the file's value column; Invested only the transactions. `dayChange`
+// lines get the end label's day-change badge, from the strategy the account
+// follows (txFollowKey).
+const TX_LINES = [
+  { key: 'actual',   flag: 'showActual',   name: 'Portfolio', label: 'My portfolio', needsReadings: true,  dayChange: true },
+  { key: 'invested', flag: 'showInvested', name: 'Invested',  label: 'Invested',     needsReadings: false, dayChange: false },
+  { key: 'profit',   flag: 'showProfit',   name: 'Profit',    label: 'Profit',       needsReadings: true,  dayChange: true },
+];
+const TX_FOLLOW_DEFAULT = 'bh-tqqq';
+// The account's view settings, read off a stored record or an earlier state:
+// every line's shown flag (one it lacks, from a record older than that line,
+// means shown) and the strategy its day change follows.
+function txViewPrefs(src) {
+  return {
+    ...Object.fromEntries(TX_LINES.map(l => [l.flag, !src || src[l.flag] !== false])),
+    follow: (src && src.follow) || TX_FOLLOW_DEFAULT,
+  };
+}
+// What the account's day change can follow (the sidebar's "Day change like"
+// dropdown). The sheet records values but no holdings, so the day's move is
+// borrowed from a strategy: a Buy & Hold of any ticker, the 9sig or SMA panel
+// on the chart, a saved strategy (an edited library copy, the user's own
+// code), or any runnable library strategy. Keys are the analytics picker's
+// ('bh-tqqq', '9sig', 'sma', 'cfg:<id>') plus 'lib:<n>'. Invested Compounded
+// has no day move, so it is not offered.
+function txFollowGroups() {
+  // "B&H TQQQ", as the analytics picker names them: the ticker must survive
+  // the narrow sidebar's truncation.
+  const bh = [...document.getElementById('select-bh-underlying').options].map(o => ['bh-' + o.value, 'B&H ' + o.textContent.trim()]);
+  return [
+    { label: 'Buy & Hold', items: bh },
+    { label: 'On the chart', items: [['9sig', nineSigName()], ['sma', 'SMA']] },
+    { label: 'Saved', items: savedConfigs.filter(c => c.type !== 'invested').map(c => ['cfg:' + c.id, c.name]) },
+    { label: 'Library', items: STRATEGY_LIBRARY.filter(s => strategyRunnable(s) && !s.hidden).map(s => ['lib:' + s.n, s.name]) },   // hidden entries stay resolvable for a stored choice, but are not offered
+  ].filter(g => g.items.length);
+}
+// The strategy the account's day change follows: the stored choice, or Buy &
+// Hold TQQQ when that choice is gone (a deleted saved strategy).
+function txFollowKey(state) {
+  const key = state && state.follow;
+  return txFollowGroups().some(g => g.items.some(([k]) => k === key)) ? key : TX_FOLLOW_DEFAULT;
+}
 
 function persistTransactions() {
   try {
@@ -36,7 +81,7 @@ function persistTransactions() {
         dateCol: window._txScheduleStash.dateCol,
         amountCol: window._txScheduleStash.amountCol,
         actualCol: window._txScheduleStash.actualCol,
-        showActual: window._txScheduleStash.showActual !== false,
+        ...txViewPrefs(window._txScheduleStash),
         active: !!window._txSchedule,
       }));
     } else {
@@ -55,7 +100,7 @@ function loadTransactionsFromStorage() {
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.rows) || !parsed.rows.length) return null;
     return {
-      state: _txStateFromRows(parsed.rows, parsed.source || 'upload', parsed.sheetUrl || null, parsed.dateCol, parsed.amountCol, parsed.actualCol, parsed.showActual),
+      state: _txStateFromRows(parsed.rows, parsed.source || 'upload', parsed.sheetUrl || null, parsed.dateCol, parsed.amountCol, parsed.actualCol, parsed),
       active: parsed.active !== false,
     };
   } catch (e) { return null; }
@@ -287,7 +332,10 @@ function _txSnapToTradingDay(dateStr) {
   }
   return ans;
 }
-function _txStateFromRows(rows, source, sheetUrl, dateCol, amountCol, actualCol, showActual) {
+// `prefs` is whatever carries the view settings forward (txViewPrefs: a stored
+// record or the state being replaced); without one every line starts shown and
+// the day change follows Buy & Hold TQQQ.
+function _txStateFromRows(rows, source, sheetUrl, dateCol, amountCol, actualCol, prefs) {
   if (!rows || !rows.length) return null;
   const [first, ...rest] = rows;
   const byDate = new Map(), byMonth = new Map(), list = [], priceDateByMonth = new Map();
@@ -339,7 +387,7 @@ function _txStateFromRows(rows, source, sheetUrl, dateCol, amountCol, actualCol,
     dateCol: (dateCol != null ? dateCol : null),
     amountCol: (amountCol != null ? amountCol : null),
     actualCol: (actualCol != null ? actualCol : null),
-    showActual: showActual !== false,
+    ...txViewPrefs(prefs),
   };
 }
 
@@ -631,17 +679,19 @@ function _txHandlePastedText(text) {
 
 document.addEventListener('click', (e) => {
   if (e.target.closest('#tx-upload-btn')) { openTxModal(); return; }
-  // Eye toggle for the "My portfolio" line (renderTxSummary). Both the live
-  // state and the stash carry the flag so it survives the sliders toggle and
-  // persists via persistTransactions' whitelist.
-  if (e.target.closest('#tx-actual-toggle')) {
+  // Eye toggles for the real account's lines (renderTxSummary). Both the live
+  // state and the stash carry the flags so they survive the sliders toggle and
+  // persist via persistTransactions' whitelist.
+  const lineToggle = e.target.closest('[data-tx-line]');
+  if (lineToggle) {
+    const { flag } = TX_LINES.find(l => l.key === lineToggle.dataset.txLine);
     // Compute the flipped value ONCE — _txSchedule and _txScheduleStash are
     // usually the SAME object, so flipping each in a loop toggles it twice
     // (a no-op, which is exactly how v1 of this handler failed).
     const cur = window._txSchedule || window._txScheduleStash;
-    const next = cur ? cur.showActual === false : true;
-    if (window._txSchedule) window._txSchedule.showActual = next;
-    if (window._txScheduleStash) window._txScheduleStash.showActual = next;
+    const next = cur ? cur[flag] === false : true;
+    if (window._txSchedule) window._txSchedule[flag] = next;
+    if (window._txScheduleStash) window._txScheduleStash[flag] = next;
     persistTransactions();
     if (typeof render === 'function') render();
     renderTxSummary();
@@ -675,9 +725,11 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tx-cancel]')) { closeTxModal(); return; }
   if (e.target.closest('[data-tx-confirm]')) {
     if (!_txParsedPreview || !_txParsedPreview.rows.length) return;
+    // An edit keeps the replaced history's view settings (shown lines, the
+    // day-change strategy).
     const state = _txStateFromRows(_txParsedPreview.rows, _txParsedPreviewSource,
       _txParsedPreviewSource === 'sheet' ? _txParsedPreviewUrl : null,
-      _txParsedPreview.dateCol, _txParsedPreview.amountCol, _txParsedPreview.actualCol);
+      _txParsedPreview.dateCol, _txParsedPreview.amountCol, _txParsedPreview.actualCol, window._txScheduleStash);
     window._txSchedule = state;
     window._txScheduleStash = state;
     persistTransactions();
@@ -717,6 +769,16 @@ document.addEventListener('click', (e) => {
     // No-ops for an upload-sourced (pasted) history; fire-and-forget, same as
     // the startup call — it re-renders itself once the fetch resolves.
     if (window._txSchedule && typeof refreshTxFromSheet === 'function') refreshTxFromSheet();
+    return;
+  }
+  // Snap the entry date back to the first transaction. Same move the import
+  // confirm makes; here it is on demand, since the entry stays freely
+  // adjustable in transaction mode and startup restores whatever was chosen.
+  if (e.target.closest('#tx-first-date-btn')) {
+    if (!window._txSchedule) return;
+    applyTxEntryDate();
+    if (typeof saveSliders === 'function') saveSliders();
+    if (typeof render === 'function') render();
     return;
   }
   // Permanent delete — the only action that actually discards the stash.
@@ -767,6 +829,16 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  // The strategy the account's day change follows (renderTxSummary). Set on
+  // both the live state and the stash, like the eye toggles.
+  if (e.target.id === 'select-tx-follow') {
+    if (window._txSchedule) window._txSchedule.follow = e.target.value;
+    if (window._txScheduleStash) window._txScheduleStash.follow = e.target.value;
+    persistTransactions();
+    if (typeof saveSliders === 'function') saveSliders();
+    if (typeof render === 'function') render();
+    return;
+  }
   if (e.target.id === 'tx-file-input') {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -810,6 +882,24 @@ function applyTxEntryDate() {
   }
 }
 
+// While a shown custom strategy brings its own money (js/saved-configs.js's
+// ownMoneyStrategy), every line runs on its deposits: the sliders and the
+// transaction controls are off and dimmed, and a note says whose money it is
+// and how much went in. Called by render() each pass with the strategy, or
+// null to put the controls back.
+function renderOwnMoneyState(own) {
+  const block = document.getElementById('contrib-controls');
+  const note = document.getElementById('contrib-own-note');
+  if (!block || !note) return;
+  block.classList.toggle('is-own-money', !!own);
+  note.hidden = !own;
+  if (own) {
+    const deposits = ownMoneyDeposits(own.log);
+    const total = deposits.reduce((sum, d) => sum + d.amount, 0);
+    note.textContent = `${own.cfg.name} brings its own money: ${fmtFull(Math.round(total))} over ${deposits.length} deposit${deposits.length === 1 ? '' : 's'}. Every line runs on it.`;
+  }
+  for (const el of block.querySelectorAll('input, select, button')) el.disabled = !!own;
+}
 // Swaps the sidebar between the default sliders and the active-transactions
 // summary. Called on confirm/clear and once at startup (restoring from
 // localStorage/share link).
@@ -828,44 +918,49 @@ function toggleContribMode() {
   const entryPickBtn = document.getElementById('entry-date-pick');
   if (entryPickBtn) entryPickBtn.disabled = false;
 }
+let _txFollowOptionsHtml = null; // the day-change dropdown's current options (renderTxSummary)
 function renderTxSummary() {
   const el = document.getElementById('tx-summary-text');
   if (!el || !window._txSchedule) return;
   const s = window._txSchedule;
-  const n = s.rows.length;
-  // Deliberately terse: no "since <date>" (the Entry display under the chart
-  // already shows it) and no heading (the block's content is self-explaining).
-  const rows = [
-    `<span class="tx-summary-row"><b>${n}</b>&nbsp;transactions · <b>${fmtFull(Math.round(s.total))}</b>&nbsp;invested</span>`,
-  ];
-  if (s.source === 'sheet') rows.push(`<span class="tx-summary-row tx-sheet-tag">synced from Google Sheet</span>`);
-  // The "My portfolio" line (the file's actual-value column, drawn on the
-  // chart by js/saved-configs.js's appendConfigDatasets): color dot, its
-  // money-weighted CAGR + flow-adjusted DD (window._actualMetrics), and an
-  // eye toggle — same stroked SVG eye as the legend chips / saved-config
-  // pills, never an emoji glyph (renders as a jarring photorealistic eye).
-  if (s.actualPoints && s.actualPoints.length) {
-    const m = window._actualMetrics;
-    const on = s.showActual !== false;
+  // One eye toggle per line the history can draw, name only: the chart's end
+  // labels carry the values. Same stroked SVG eye as the legend chips /
+  // saved-config pills, never an emoji glyph (renders as a jarring
+  // photorealistic eye).
+  const hasReadings = !!(s.actualPoints && s.actualPoints.length);
+  el.innerHTML = TX_LINES.filter(l => hasReadings || !l.needsReadings).map(l => {
+    const on = s[l.flag] !== false;
+    const tip = `${on ? 'Hide' : 'Show'} the ${l.label} line`;
     const eyeSvg = on
       ? '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>'
       : '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-7-10-7a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>';
-    const stats = (on && m && Number.isFinite(m.cagr))
-      ? `<span class="tx-actual-stat"><b class="${m.cagr >= 0 ? 'tx-actual-pos' : 'tx-actual-neg'}">${m.cagr >= 0 ? '+' : ''}${m.cagr.toFixed(1)}%</b></span>` +
-        (Number.isFinite(m.maxDD) && m.maxDD > 0 ? `<span class="tx-actual-stat">DD <b class="tx-actual-neg">-${m.maxDD.toFixed(1)}%</b></span>` : '')
-      : '';
-    rows.push(`<span class="tx-summary-row tx-actual-row">
-      <button type="button" id="tx-actual-toggle" class="tx-actual-eye" title="${on ? 'Hide' : 'Show'} the My portfolio line" aria-label="${on ? 'Hide' : 'Show'} the My portfolio line">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${eyeSvg}</svg>
-      </button>
-      <span class="tx-actual-dot"></span><span class="tx-actual-name">My portfolio</span>${stats}</span>`);
+    return `<button type="button" class="tx-line-toggle${on ? '' : ' is-off'}" data-tx-line="${l.key}" title="${tip}" aria-label="${tip}" aria-pressed="${on}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${eyeSvg}</svg><span>${l.name}</span>
+    </button>`;
+  }).join('');
+  // The day-change dropdown, for the lines that carry a badge (Portfolio and
+  // Profit, which need the value column).
+  const followRow = document.getElementById('tx-follow-row');
+  followRow.hidden = !hasReadings;
+  if (hasReadings) {
+    const sel = document.getElementById('select-tx-follow');
+    const html = txFollowGroups().map(g => `<optgroup label="${_txEscHtml(g.label)}">${g.items.map(([k, n]) => `<option value="${_txEscHtml(k)}">${_txEscHtml(n)}</option>`).join('')}</optgroup>`).join('');
+    // Rebuilt only when the list changed: every render() lands here, and
+    // replacing the options under an open dropdown closes it.
+    if (html !== _txFollowOptionsHtml) { sel.innerHTML = html; _txFollowOptionsHtml = html; }
+    sel.value = txFollowKey(s);
   }
-  el.innerHTML = rows.join('');
   const editBtn = document.getElementById('tx-edit-btn');
   if (editBtn) {
     const label = s.source === 'sheet' ? 'Change the linked sheet' : 'Edit transactions';
     editBtn.title = label;
     editBtn.setAttribute('aria-label', label);
+  }
+  const firstBtn = document.getElementById('tx-first-date-btn');
+  if (firstBtn) {
+    const label = `Move the entry date to your first transaction (${s.entryDate})`;
+    firstBtn.title = label;
+    firstBtn.setAttribute('aria-label', label);
   }
 }
 // Single shared slider-mode <-> transaction-history toggle (index.html's
@@ -911,7 +1006,7 @@ async function refreshTxFromSheet() {
     // going back to whichever wrong column auto-detect landed on before.
     const parsed = _txParseWithCols(text, cur.dateCol, cur.amountCol, cur.actualCol);
     if (!parsed.rows.length) throw new Error('empty sheet');
-    const fresh = _txStateFromRows(parsed.rows, 'sheet', cur.sheetUrl, parsed.dateCol, parsed.amountCol, parsed.actualCol, cur.showActual);
+    const fresh = _txStateFromRows(parsed.rows, 'sheet', cur.sheetUrl, parsed.dateCol, parsed.amountCol, parsed.actualCol, cur);
     window._txScheduleStash = fresh;
     persistTransactions();
     if (wasActive) {

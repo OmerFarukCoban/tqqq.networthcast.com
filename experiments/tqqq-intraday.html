@@ -1,0 +1,1757 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TQQQ intraday — every day's % path from the open</title>
+<link rel="icon" href="../images/favicon.svg" type="image/svg+xml">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3-annotation/2.5.1/d3-annotation.min.js"></script>
+<style>
+  /* Same Orion light theme as the main page (see styles.css): Open Sans for
+     UI text, JetBrains Mono for figures, purple accent, night-blue type. */
+  @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root{
+    --bg:#fafafd; --panel:#ffffff; --border:#dbdff1; --border2:#c5c1ec;
+    --text:#383874; --muted:#8484a0; --faint:#9292c1;
+    --accent:#8676ff; --orange:#e8890b; --violet:#c64eff;
+    --mean:#0a9fbe;   /* teal: clearly apart from today's purple and the orange median */
+    --hover:#c2185b;  /* Orion pink, darkened for text: the hovered day, again apart from today */
+    --green:#067d21; --red:#c81e1f;
+    --shadow:0 3px 2px rgba(108,73,172,.02), 0 7px 5px rgba(108,73,172,.03), 0 13px 10px rgba(108,73,172,.04), 0 22px 18px rgba(108,73,172,.04), 0 42px 33px rgba(108,73,172,.05);
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Open Sans',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{width:100%;max-width:1200px;margin:0 auto;padding:16px}
+  .back-link{display:inline-block;margin:0 0 10px;font-size:12.5px;color:var(--muted);text-decoration:none}
+  .back-link:hover{color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:12px 16px 8px}
+  .toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 28px;margin:0 0 4px}
+  /* Metric filters: one block per day statistic, each a labelled brushable
+     histogram. Fixed sizes so the row never moves. */
+  /* The two histograms share the room between the toggle and the period
+     block equally; each is measured once, after layout, so bars and brush
+     match the width it got. */
+  .metric{display:flex;flex-direction:column;gap:3px;flex:1 1 0;min-width:160px;max-width:420px;padding-bottom:12px;font-family:var(--mono);font-size:11.5px}
+  .metric-head{display:flex;align-items:center;justify-content:space-between;gap:8px;height:18px;white-space:nowrap}
+  .metric-name{font-family:var(--sans);font-size:12.5px;color:var(--muted)}
+  .metric-range{color:var(--faint)}
+  .metric-hist{display:block;width:100%;overflow:visible;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+  .metric-hist .bar{fill:var(--border2)}
+  .metric-hist .bar.in{fill:var(--accent)}
+  .metric-hist .zero{stroke:var(--faint);stroke-width:1}
+  .metric-hist .selection{fill:var(--accent);fill-opacity:.12;stroke:var(--accent);stroke-width:1}
+  .metric-hist .handle{fill:var(--panel);stroke:var(--accent);stroke-width:1.5}
+  .metric-hist .overlay{cursor:crosshair}
+  .metric-hist .handle-label{font-family:var(--mono);font-size:10px;font-weight:600;fill:var(--accent);dominant-baseline:hanging}
+  /* Fixed width in mono characters, enough for the longest coverage line, so
+     the block and its slider never resize as the dates and day count change. */
+  .period{margin-left:auto;display:flex;flex-direction:column;align-items:stretch;gap:3px;flex:0 0 auto;width:42ch;font-family:var(--mono);font-size:11.5px}
+  .coverage{color:var(--faint);white-space:nowrap;text-align:right}
+  .coverage b{color:var(--muted);font-weight:500}
+  /* Two native sliders stacked on one track; only the thumbs take pointer events. */
+  .range{position:relative;width:100%;height:16px}
+  .range-track{position:absolute;left:0;right:0;top:6px;height:4px;border-radius:2px;background:var(--border2)}
+  .range-fill{position:absolute;top:6px;height:4px;border-radius:2px;background:var(--accent)}
+  .range input{position:absolute;left:0;top:0;width:100%;height:16px;margin:0;appearance:none;-webkit-appearance:none;background:none;pointer-events:none}
+  .range input::-webkit-slider-runnable-track{background:none;height:16px}
+  .range input::-moz-range-track{background:none;height:16px}
+  .range input::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;pointer-events:auto;width:14px;height:14px;margin-top:1px;border-radius:50%;background:var(--panel);border:2px solid var(--accent);cursor:grab}
+  .range input::-moz-range-thumb{pointer-events:auto;width:10px;height:10px;border-radius:50%;background:var(--panel);border:2px solid var(--accent);cursor:grab}
+  .range input:focus-visible::-webkit-slider-thumb{outline:2px solid var(--accent);outline-offset:2px}
+  .switch{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
+  .switch input{position:absolute;opacity:0;width:0;height:0}
+  .switch .track{position:relative;width:32px;height:18px;border-radius:9px;background:var(--border2);transition:background .15s;flex:none}
+  .switch .track::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--panel);transition:transform .15s}
+  .switch input:checked+.track{background:var(--accent)}
+  .switch input:checked+.track::after{transform:translateX(14px)}
+  .switch input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:2px}
+  .switch.unavailable{opacity:.5;cursor:default}
+  .switches{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px}
+  /* The ticker choice, first in the toolbar. */
+  .ticker-pick select{font:600 12.5px var(--mono);color:var(--text);background:var(--panel);border:1px solid var(--border2);border-radius:6px;padding:3px 6px;cursor:pointer}
+  .ticker-pick select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* A ticker whose history is not in the data: the note in the chart's place,
+     the chart, the bars and the filters of the ticker before it out of sight. */
+  .no-data{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:0 24px;text-align:center;font-size:13px;color:var(--muted)}
+  .no-data[hidden]{display:none}
+  .panel.no-history #chart svg,.panel.no-history .scale-toggle,.panel.no-history .weekday{display:none}
+  .panel.no-history .metric,.panel.no-history .period,.panel.no-history .switch{visibility:hidden}
+  /* Out of reach too: a brush's own rects take the pointer whatever their visibility. */
+  .panel.no-history .metric *,.panel.no-history .period *,.panel.no-history .switch *{pointer-events:none}
+  /* Embedded, the chart's box has no height of its own once the chart is hidden. */
+  .embed .no-data{position:static;height:100vh}
+  .match-window{fill:var(--violet);fill-opacity:.05;pointer-events:none}
+  #chart{position:relative}   /* its height is set to fit the window (fitChartToWindow) */
+  /* The weekday bars under the chart: a small block of five bars, one per
+     weekday, over the same days the chart draws. */
+  .weekday{display:flex;flex-direction:column;gap:2px;max-width:460px;margin:8px 0 6px;font-family:var(--mono);font-size:11.5px}
+  .weekday-head{display:flex;align-items:center;justify-content:space-between;gap:12px;height:20px}
+  #weekday-chart svg{display:block}
+  .weekday-zero{stroke:var(--faint);stroke-width:1}
+  .weekday-bar{fill:var(--faint);fill-opacity:.8}
+  .weekday-bar.up{fill:var(--green)} .weekday-bar.down{fill:var(--red)}
+  .weekday-value{font-family:var(--mono);font-size:10.5px;font-weight:600;text-anchor:middle;fill:var(--muted)}
+  .weekday-value.up{fill:var(--green)} .weekday-value.down{fill:var(--red)}
+  .weekday-day{font-family:var(--mono);font-size:11px;text-anchor:middle;fill:var(--muted)}
+  .weekday-count{font-family:var(--mono);font-size:10px;text-anchor:middle;fill:var(--faint)}
+  /* ?embed=widget (the desktop widget page, widget.html): the chart alone,
+     filling its frame. The filters and the period slider stay wired but
+     hidden, so the chart shows every loaded day as it does by default. */
+  .embed body{display:block;min-height:0;background:transparent;overflow:hidden}
+  .embed .wrap{max-width:none;padding:0}
+  .embed .back-link{display:none}
+  /* Laid out off screen rather than display:none, so the hidden histograms
+     still measure their real size when they draw. */
+  .embed .toolbar{position:absolute;left:-10000px;top:0;width:900px;visibility:hidden}
+  .embed .scale-toggle,.embed .weekday{display:none}
+  /* The widget's other two charts label at 8-9px; the embedded chart matches. */
+  .embed .axis text,.embed .now-label,.embed .annotation text{font-size:9px}
+  .embed .line-label,.embed .today-label,.embed .extended-label{font-size:9.5px}
+  .embed .panel{background:transparent;border:0;box-shadow:none;padding:0}
+  .embed #chart{min-height:0}
+  .embed *{font-weight:400 !important}   /* the desktop widget sets no bold anywhere */
+  /* Same pill as the main chart's log toggle: dim when off, purple when on. */
+  .scale-toggle{position:absolute;left:0;bottom:4px;padding:3px 7px;font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.5px;
+    color:var(--muted);background:rgba(219,223,241,.45);border:1px solid var(--border);border-radius:6px;cursor:pointer;user-select:none;opacity:.6;
+    transition:color .15s,background .15s,border-color .15s,opacity .15s}
+  .scale-toggle:hover{opacity:1}
+  .scale-toggle[aria-pressed="true"]{opacity:1;color:var(--accent);background:var(--panel);border-color:var(--accent)}
+  #chart svg{display:block}
+  .axis text{fill:var(--muted);font-family:var(--mono);font-size:11px}
+  .axis line,.axis path{stroke:var(--border2)}
+  .grid line{stroke:var(--border);stroke-dasharray:2 3}
+  .zero{stroke:var(--faint);stroke-width:1}
+  .day-path{fill:none;stroke:var(--text);stroke-width:1;opacity:.05}
+  .day-path.hover{opacity:1;stroke:var(--hover);stroke-width:1.5}
+  .day-path.reference{opacity:1;stroke:var(--violet);stroke-width:2}
+  /* Today's path: on top of every other layer, glowing, with a live pulse at
+     its last bar while the session is open. Outside the session the same
+     pulse marks the latest pre-market or after-hours print at the start. */
+  .today,.extended{pointer-events:none}
+  .today-glow{fill:none;stroke:var(--violet);stroke-width:9;stroke-linejoin:round;stroke-linecap:round;opacity:.14}
+  .today-path{fill:none;stroke:var(--violet);stroke-width:2.25;stroke-linejoin:round;stroke-linecap:round}
+  .pulse-dot{fill:var(--violet);stroke:var(--panel);stroke-width:2}
+  .pulse-ring{fill:none;stroke:var(--violet);stroke-width:2;transform-box:fill-box;transform-origin:center;animation:live-pulse 1.8s ease-out infinite}
+  .pulse-ring.second{animation-delay:.9s}
+  @keyframes live-pulse{0%{transform:scale(.5);opacity:.8}100%{transform:scale(3.2);opacity:0}}
+  .today-label,.extended-label{font-family:var(--mono);font-size:11px;font-weight:600;fill:var(--violet)}
+  .today-label .up,.extended-label .up{fill:var(--green)} .today-label .down,.extended-label .down{fill:var(--red)}
+  .mean-path{fill:none;stroke:var(--mean);stroke-width:2.5}
+  .median-path{fill:none;stroke:var(--orange);stroke-width:2;stroke-dasharray:6 4}
+  .line-label{font-family:var(--mono);font-size:10.5px;font-weight:600;dominant-baseline:middle;pointer-events:none}
+  .line-label.mean{fill:var(--mean)} .line-label.median{fill:var(--orange)}
+  .hover-rule{stroke:var(--faint);stroke-width:1;stroke-dasharray:3 3;pointer-events:none}
+  .now-line{stroke:var(--faint);stroke-width:1;stroke-dasharray:2 4;pointer-events:none}
+  .now-label{font-family:var(--mono);font-size:10.5px;fill:var(--faint);pointer-events:none}
+  .annotations{pointer-events:none}
+  .annotation path{fill:none;stroke:var(--c);stroke-width:1;stroke-opacity:.6}
+  .annotation .annotation-subject path{stroke-width:2;fill:var(--panel)}
+  .annotation .annotation-note-bg{fill:var(--panel);fill-opacity:.9;stroke:var(--border2);stroke-width:1;rx:5}
+  .annotation text{font-family:var(--mono);font-size:10px;fill:var(--muted)}
+  .annotation .annotation-note-title{font-weight:600;fill:var(--c)}
+  .annotation.buy{--c:var(--green)} .annotation.sell{--c:var(--red)}
+  /* Hover marks, drawn in the plot: a time chip on the axis, values where the
+     crosshair crosses the mean, median and hovered day, and the hovered day's
+     end. Text carries a panel-coloured halo so it reads over the fan. */
+  .hover-marks{pointer-events:none}
+  .hover-marks text{font-family:var(--mono);font-size:10.5px;font-weight:600;paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
+  .hover-time-bg{fill:var(--panel);stroke:var(--faint);stroke-width:1;rx:4}
+  .hover-time{fill:var(--text);text-anchor:middle;dominant-baseline:middle;stroke:none}
+  .hover-cross circle{stroke-width:2;fill:var(--panel)}
+  .hover-cross.mean circle{stroke:var(--mean)} .hover-cross.mean text{fill:var(--mean)}
+  .hover-cross.median circle{stroke:var(--orange)} .hover-cross.median text{fill:var(--orange)}
+  .hover-cross.day circle{stroke:var(--hover)} .hover-cross.day text{fill:var(--hover)}
+  .hover-cross text{dominant-baseline:middle}
+  text.hover-end{fill:var(--hover)}
+  text.hover-end .dim{font-weight:400;fill:var(--muted)}
+  /* A dragged range, as on the site's charts: the span shaded between two
+     dashed edges, a chord across it for today, the mean, the median and the
+     hovered day, each with a badge naming its move over the span, and a time
+     chip at each end. */
+  .range-marks{pointer-events:none}
+  .range-marks text{font-family:var(--mono);font-size:10.5px;font-weight:600;paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
+  .range-span{fill:rgba(134,118,255,.1)}
+  .range-edge{stroke:rgba(56,56,116,.35);stroke-width:1;stroke-dasharray:3 3}
+  .range-chord{fill:none;stroke-width:1.5;stroke-dasharray:4 3}
+  .range-chord.today{stroke:var(--violet)} .range-chord.mean{stroke:var(--mean)} .range-chord.median{stroke:var(--orange)} .range-chord.day{stroke:var(--hover)}
+  .range-end{stroke:var(--panel);stroke-width:1.5}
+  .range-end.today{fill:var(--violet)} .range-end.mean{fill:var(--mean)} .range-end.median{fill:var(--orange)} .range-end.day{fill:var(--hover)}
+  .range-badge rect{fill:var(--panel);stroke-width:1;rx:4}
+  .range-badge text{text-anchor:middle;dominant-baseline:middle}
+  .range-badge .name{fill:var(--muted)}
+  .range-badge.up rect{stroke:var(--green)} .range-badge.up .move{fill:var(--green)}
+  .range-badge.down rect{stroke:var(--red)} .range-badge.down .move{fill:var(--red)}
+  .range-badge.flat rect{stroke:var(--faint)} .range-badge.flat .move{fill:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="../">← Back to the backtesting platform</a>
+  <div class="panel">
+    <div class="toolbar">
+      <div class="switches">
+        <label class="ticker-pick" title="The fund whose days the chart draws.">
+          <select id="select-ticker" aria-label="Ticker"></select>
+        </label>
+        <label class="switch" id="similar-switch">
+          <input type="checkbox" id="toggle-similar">
+          <span class="track"></span>
+          <span class="switch-label">Similar days only</span>
+        </label>
+        <label class="switch" id="trend-switch">
+          <input type="checkbox" id="toggle-trend">
+          <span class="track"></span>
+          <span class="switch-label">Similar trends only</span>
+        </label>
+      </div>
+      <div class="metric" data-metric="open" title="Open vs the previous session's close. Drag across the bars to keep only days in that range. Double-click to clear.">
+        <div class="metric-head"><span class="metric-name">Open</span><span class="metric-range"></span></div>
+        <svg class="metric-hist" height="28"></svg>
+      </div>
+      <div class="metric" data-metric="close" title="Close vs the previous session's close. Drag across the bars to keep only days in that range. Double-click to clear.">
+        <div class="metric-head"><span class="metric-name">Close</span><span class="metric-range"></span></div>
+        <svg class="metric-hist" height="28"></svg>
+      </div>
+      <div class="period">
+        <div class="coverage" id="coverage"></div>
+        <div class="range" id="period-range">
+          <div class="range-track"></div>
+          <div class="range-fill" id="range-fill"></div>
+          <input type="range" id="range-start" min="0" value="0" step="1" aria-label="Period start">
+          <input type="range" id="range-end" min="0" value="0" step="1" aria-label="Period end">
+        </div>
+      </div>
+    </div>
+    <div id="chart">
+      <div class="no-data" id="no-data" hidden></div>
+      <button type="button" class="scale-toggle" id="scale-toggle" aria-pressed="true" title="Switch the vertical axis between a symmetric log scale and a linear one">log</button>
+    </div>
+    <div class="weekday" title="Each weekday's close vs the previous session's close, over the days the chart shows.">
+      <div class="weekday-head">
+        <span class="metric-name" id="weekday-name"></span>
+        <label class="switch" id="weekday-median-switch">
+          <input type="checkbox" id="toggle-weekday-median">
+          <span class="track"></span>
+          <span class="switch-label">Median</span>
+        </label>
+      </div>
+      <div id="weekday-chart"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const EMBED = new URLSearchParams(location.search).get('embed') === 'widget';
+if (EMBED) document.documentElement.classList.add('embed');
+// Embedded, the widget's settings stand in for the saved ones (similar=1|0,
+// trend=1|0, from=YYYY-MM-DD with the end at the latest day, log=1|0, linear
+// unless set) and nothing is saved back, so the widget never changes how this
+// page opens on its own.
+const EMBED_QUERY = new URLSearchParams(location.search);
+const EMBED_SIMILAR = EMBED && EMBED_QUERY.has('similar') ? EMBED_QUERY.get('similar') === '1' : null;
+const EMBED_TREND = EMBED && EMBED_QUERY.has('trend') ? EMBED_QUERY.get('trend') === '1' : null;
+const EMBED_FROM = EMBED ? EMBED_QUERY.get('from') : null;
+const EMBED_LOG = EMBED ? EMBED_QUERY.get('log') === '1' : null;
+// The desktop widget's local copy of this page reads the live site's files
+// (?data=<site root>); everywhere else the data sits one folder up.
+const DATA_ROOT = EMBED && EMBED_QUERY.get('data') ? EMBED_QUERY.get('data') : '../';
+// The ticker the page shows, one of the site's funds (the quotes worker's
+// SYMBOLS, scripts/update_intraday.py's TICKERS; tests/fund-lists.cjs holds
+// the lists to each other): the one the address names (?ticker=SOXL, which is
+// also how a page embedding this one asks for a fund), else TQQQ. The address
+// is the only place it is kept, so a link always opens the fund it names and
+// the site's "TQQQ intraday" link opens TQQQ. A name the list does not hold
+// is ignored.
+const TICKERS = ['TQQQ', 'QQQ', 'SPY', 'QLD', 'SSO', 'SPXL', 'SQQQ', 'GLD', 'SOXL', 'SOXX'];
+const DEFAULT_TICKER = TICKERS[0];
+const namedTicker = (EMBED_QUERY.get('ticker') || '').toUpperCase();
+let ticker = TICKERS.includes(namedTicker) ? namedTicker : DEFAULT_TICKER;
+let drawnTicker = null;   // the fund whose days the chart holds; null until a first load is in
+// A fund's 5-minute history, one file a fund (scripts/update_intraday.py).
+const historyUrl = fund => `${DATA_ROOT}data/intraday/${fund.toLowerCase()}-5m.tsv`;
+// Today's session at 1-minute resolution from Yahoo (scripts/update_intraday_today.py).
+// The 5-minute history comes from Alpaca, whose free plan holds back the
+// latest 15 minutes; Yahoo serves the current minute, so today is drawn from
+// this file and the history from the other. Absent until the first run of
+// the day's pipeline, and stale (the last session) outside market days.
+// With the quotes proxy's URL set (cloudflare/quotes, deployed to Cloudflare:
+// 'https://tqqq-quotes.<account>.workers.dev'), today comes from the proxy
+// instead, in the same layout, at most a minute old, polled every minute.
+const QUOTES_PROXY = 'https://tqqq-quotes.infoicy.workers.dev';
+// Without the proxy only TQQQ has a today file (scripts/update_intraday_today.py writes that one); another fund then draws no live session.
+const todayUrl = fund => QUOTES_PROXY ? `${QUOTES_PROXY}/bars/${fund}?range=1d&interval=1m&format=tsv` : `${DATA_ROOT}data/intraday/${fund.toLowerCase()}-today-1m.tsv`;
+const TODAY_BAR_MINUTES = 1;
+const SESSION_OPEN_MIN = 9 * 60 + 30;
+const SESSION_CLOSE_MIN = 16 * 60;
+const BAR_MINUTES = 5;
+// Closest two axis labels may sit, in px; only a short or narrow chart (the
+// desktop widget's frame) ever drops labels for it.
+const MIN_TICK_GAP_PX = 13;
+const MIN_HOUR_GAP_PX = 40;
+// Day lines are faint so 750 of them read as a fan; with few days shown the
+// same opacity vanishes, so it scales up: 5% for hundreds of days, 35% for
+// a dozen. The count is the days that pass the period and histogram filters,
+// before the similar-days pick, so switching that pick on does not recolour
+// the lines.
+const DAY_OPACITY_MIN = 0.05, DAY_OPACITY_MAX = 0.35, DAY_OPACITY_SCALE = 4;
+const dayOpacity = count => Math.min(DAY_OPACITY_MAX, Math.max(DAY_OPACITY_MIN, DAY_OPACITY_SCALE / Math.max(1, count)));
+// Symlog is linear inside a band around zero and logarithmic beyond it, so the
+// crowded region gets room while big days still fit. A plain log scale cannot
+// hold zero or negative moves. Ticks come from this ladder, starting at the
+// band edge where the log part begins.
+const NICE_PCT_LADDER = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50];
+
+const MARKET_TZ = 'America/New_York';
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const MINUTES_PER_DAY = 24 * 60;
+
+const parseStamp = d3.timeParse('%m/%d/%Y %H:%M:%S');
+const fmtPct = (d, decimals = 2) => (d > 0 ? '+' : '') + d.toFixed(decimals) + '%';
+const fmtAxisPct = d => (d > 0 ? '+' : '') + parseFloat(d.toFixed(2)) + '%';
+// A move's tone. One that prints as 0.00% is flat, neither up nor down.
+const FLAT_PCT = 0.005;
+const toneOf = pct => pct > FLAT_PCT ? 'up' : pct < -FLAT_PCT ? 'down' : 'flat';
+// A move and the price behind it, as the today and extended-hours labels read
+// it: "+1.3% ($51.10)", the percent toned by its sign, at one decimal like the
+// site's day-change badges and the signal chart's price rows, which show the
+// same move beside this chart in the desktop widget.
+const moveHtml = (pct, price) => {
+  const tone = pct > 0 ? 'up' : pct < 0 ? 'down' : '';
+  const priced = price > 0 ? ` ($${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
+  return `<tspan class="${tone}">${fmtPct(pct, 1)}</tspan>${priced}`;
+};
+const fmtClock = minutes => {
+  const wrapped = ((minutes % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  const h = Math.floor(wrapped / 60), m = wrapped % 60;
+  return `${h}:${String(m).padStart(2, '0')}`;
+};
+
+// Wall-clock minutes since midnight for an instant in a given zone.
+function minutesOfDayIn(timeZone, date) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(date);
+  const get = type => +parts.find(p => p.type === type).value;
+  return (get('hour') % 24) * 60 + get('minute');
+}
+
+// Minutes to add to a New York time to get the viewer's local time, measured
+// today so daylight-saving rules on both sides are the current ones.
+function localOffsetFromMarket() {
+  const now = new Date();
+  let diff = minutesOfDayIn(LOCAL_TZ, now) - minutesOfDayIn(MARKET_TZ, now);
+  if (diff > MINUTES_PER_DAY / 2) diff -= MINUTES_PER_DAY;
+  if (diff <= -MINUTES_PER_DAY / 2) diff += MINUTES_PER_DAY;
+  return diff;
+}
+
+// The current New York minute of day, or null outside a weekday session.
+// Exchange holidays are not known here, so a holiday shows as open.
+function marketMinuteNow() {
+  const now = new Date();
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: MARKET_TZ, weekday: 'short' }).format(now);
+  if (weekday === 'Sat' || weekday === 'Sun') return null;
+  const minute = minutesOfDayIn(MARKET_TZ, now);
+  return minute >= SESSION_OPEN_MIN && minute <= SESSION_CLOSE_MIN ? minute : null;
+}
+
+const NOW_REFRESH_MS = 30 * 1000;
+
+// Is this day today's session, with the market open right now? Only then is
+// it drawn on its own layer; otherwise it is one line among the others.
+const liveMarketDate = () => marketMinuteNow() !== null ? marketDateNow() : null;   // the date of the session open right now, or null
+const isLiveDay = day => fmtIsoDay(day.date) === liveMarketDate();
+const NOW_TICK_SHARE = 0.05;             // the "now" tick spans this share of the plot height, from the top
+const LINE_LABEL_MIN_GAP = 13;           // px between the mean and median end labels
+const HOVER_LABEL_GAP = 14;              // px between stacked crosshair value labels
+const HOVER_LABEL_ROOM = 150;            // px from the right edge inside which hover labels flip to the left
+const HOVER_END_HEIGHT = 26;             // px the two-line end label needs
+const RANGE_BADGE_H = 16;                // px a range badge's pill stands, and the gap between stacked ones
+const HOVER_END_CLEARANCE = 20;          // px the end label keeps from the mean / median names
+
+// Calendar date in New York, as the data's day timestamps are midnight ET.
+const marketDateNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: MARKET_TZ }).format(new Date());
+
+const shortZoneName = timeZone =>
+  new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'short' }).formatToParts(new Date())
+    .find(p => p.type === 'timeZoneName').value;
+
+// One row per 5-minute bar -> one series per trading day. Every point is the
+// % change of that bar's close against the PREVIOUS session's close, the
+// basis a quote screen uses, so a day starts at its opening gap rather than
+// at zero and the 0% line is where yesterday closed. The first day in the
+// file has no previous close and is dropped.
+function buildDays(rows) {
+  const byDay = d3.groups(rows, r => d3.timeDay.floor(parseStamp(r.Date)).getTime());
+  const sessions = d3.sort(byDay.map(([dayMs, bars]) => {
+    const sorted = d3.sort(bars, r => parseStamp(r.Date));
+    return {
+      id: dayMs,
+      date: new Date(dayMs),
+      open: +sorted[0].Open,
+      // A bar's minute is its END, so a 5-minute bar opening 09:30 lands on
+      // 09:35 and a 1-minute bar opening 09:34 on the same 09:35; the two
+      // resolutions share the minute grid the aggregates and matching use.
+      bars: sorted.map(r => { const t = parseStamp(r.Date); return { minute: t.getHours() * 60 + t.getMinutes() + (r.barMinutes || BAR_MINUTES), close: +r.Close }; }),
+    };
+  }), d => d.date);
+  return sessions.slice(1).map((day, i) => {
+    const prevClose = sessions[i].bars[sessions[i].bars.length - 1].close;
+    const pct = price => (price / prevClose - 1) * 100;
+    const points = [{ minute: SESSION_OPEN_MIN, pct: pct(day.open), close: day.open }].concat(day.bars.map(b => ({ minute: b.minute, pct: pct(b.close), close: b.close })));   // close: the price behind the point, for today's label
+    const last = points[points.length - 1];
+    return {
+      id: day.id,
+      date: day.date,
+      points,
+      openVsPrevPct: points[0].pct,
+      closeVsPrevPct: last.pct,
+      close: last.close,
+      complete: last.minute === SESSION_CLOSE_MIN,
+    };
+  });
+}
+
+// The market state a day opened in, read off the closes before it, so it is
+// known before the open:
+//   trend       'up' when the prior close is above the average of the
+//               TREND_DAYS closes before it, else 'down';
+//   volatility  the average absolute close-to-close move over the
+//               VOLATILITY_DAYS sessions before, sorted into thirds of every
+//               day in the file: 'low', 'mid' or 'high'.
+// A day without enough days before it has no state (null).
+const TREND_DAYS = 50;
+const VOLATILITY_DAYS = 20;
+function withMarketState(days) {
+  const usualMove = days.map((_, k) => k < VOLATILITY_DAYS ? null : d3.mean(days.slice(k - VOLATILITY_DAYS, k), d => Math.abs(d.closeVsPrevPct)));
+  const known = d3.sort(usualMove.filter(v => v !== null));
+  const lowUnder = d3.quantileSorted(known, 1 / 3), highFrom = d3.quantileSorted(known, 2 / 3);
+  return days.map((day, k) => ({
+    ...day,
+    marketState: k < TREND_DAYS + 1 ? null : {
+      trend: days[k - 1].close > d3.mean(days.slice(k - 1 - TREND_DAYS, k - 1), d => d.close) ? 'up' : 'down',
+      volatility: usualMove[k] >= highFrom ? 'high' : usualMove[k] < lowUnder ? 'low' : 'mid',
+    },
+  }));
+}
+
+// Same-trend filter: the days that opened in the reference day's market
+// state. The reference is the latest day, as for the similar-days filter.
+function sameTrendDays(days, reference) {
+  const { trend, volatility } = reference.marketState;
+  return days.filter(d => d === reference || (d.marketState && d.marketState.trend === trend && d.marketState.volatility === volatility));
+}
+
+// Mean and median of every day's % at each minute of the session.
+function buildAggregates(days) {
+  const minutes = d3.range(SESSION_OPEN_MIN, SESSION_CLOSE_MIN + 1, BAR_MINUTES);
+  const byMinute = days.map(d => new Map(d.points.map(p => [p.minute, p.pct])));
+  return minutes.map(minute => {
+    const values = byMinute.map(m => m.get(minute)).filter(v => v !== undefined);
+    return {
+      minute,
+      mean: d3.mean(values),
+      median: d3.median(values),
+      positiveShare: d3.mean(values, v => v > 0 ? 1 : 0),
+      n: values.length,
+    };
+  });
+}
+
+// Each rule picks one minute of the session for its own reason. Rules of the
+// same kind that land on the same minute merge into one label.
+// Label text is two tokens per rule: what was measured and its value. The
+// Buy/Sell title already says which extreme it is.
+const ANNOTATION_RULES = [
+  { kind: 'buy',  anchor: 'mean',   pick: a => d3.least(a, d => d.mean),              label: d => `mean ${fmtPct(d.mean)}` },
+  { kind: 'buy',  anchor: 'median', pick: a => d3.least(a, d => d.median),            label: d => `median ${fmtPct(d.median)}` },
+  { kind: 'sell', anchor: 'mean',   pick: a => d3.greatest(a, d => d.mean),           label: d => `mean ${fmtPct(d.mean)}` },
+  { kind: 'sell', anchor: 'median', pick: a => d3.greatest(a, d => d.median),         label: d => `median ${fmtPct(d.median)}` },
+];
+
+// Label geometry. Labels are LABEL_WIDTH wide; their height depends on how
+// many lines the text wraps to. A stacked label sits LABEL_PADDING past the
+// connector's horizontal leg ("gutter"), GUTTER_BASE from the point on the
+// first level and one label step further out per level. A side label sits
+// beside its point, centred on it, with only a horizontal leg.
+const LABEL_WIDTH = 120, LABEL_LEAD = 24, LABEL_PADDING = 6, LABEL_CLEARANCE = 6;
+const LABEL_LINE_HEIGHT = 12, LABEL_CHROME = 9, LABEL_CHARS_PER_LINE = 17;
+const GUTTER_BASE = 40, LEVEL_STEP = 60, MAX_LEVELS = 4;
+const SIDE_COST = 1.5 * LEVEL_STEP;       // beside the point: after the first stacked level, before the second
+const SIDE_FLIP_COST = 2 * LEVEL_STEP;    // the wrong side of the line costs two levels
+const ROUTE_BEND_COST = 10;               // slight preference for dropping first
+const SEARCH_CANDIDATES = 24, SEARCH_BUDGET = 20000;   // per-label spots kept for the search, and how many steps it may take
+
+// Title line plus however many lines the reasons wrap to.
+const labelHeight = p => LABEL_CHROME + LABEL_LINE_HEIGHT * (1 + Math.ceil(p.reasons.join(', ').length / LABEL_CHARS_PER_LINE));
+
+// Places every label as close to its point as it can, all at once. Each
+// label wants to sit just past its point on the first stacked level of its
+// preferred side. Candidates are: every stacked level on either side, crossed
+// with a few horizontal spots (the preferred one, the near side of the point,
+// just past each placed box); plus a side spot on either side of the point.
+// They are ranked cheapest first: levels out, then pixels sideways, then the
+// side spot, then the wrong side of the line. A spot is valid when its box
+// stays inside the plot, does not sit on the highlighted line, and neither
+// its box nor its connector touches any other label's box or connector.
+//
+// A bounded depth-first search assigns every label a valid spot, trying
+// cheaper spots first and backing up when a later label is boxed in by an
+// earlier choice. If the search runs out of budget, a greedy pass places the
+// labels one by one, relaxing the constraints in order (off the line, then
+// clear of others, then inside the plot) and taking the cheapest spot as a
+// last resort.
+function layoutLabels(points, x, yOf, sideOf, chartWidth, chartHeight, lineHits) {
+  const C = LABEL_CLEARANCE;
+  const overlaps = (a, b) => a.left < b.right + C && b.left < a.right + C && a.top < b.bottom + C && b.top < a.bottom + C;
+  const segHits = (seg, box) => seg.x1 < box.right + C && box.left - C < seg.x2 && seg.y1 < box.bottom + C && box.top - C < seg.y2;
+  // Two ways to route the L from the point to the box's near corner: drop
+  // first (down from the point, then across at the gutter) or leg first
+  // (across at the point's height, then down at the box's edge). The second
+  // gets past a box that sits directly under the point.
+  const stacked = (px, py, h, sign, level, left, route) => {
+    const gutterY = py + sign * (GUTTER_BASE + level * LEVEL_STEP);
+    const top = sign > 0 ? gutterY + LABEL_PADDING : gutterY - LABEL_PADDING - h;
+    const dropX = route === 'dropFirst' ? px : left;
+    const legY = route === 'dropFirst' ? gutterY : py;
+    return {
+      mode: 'stacked', route, dx: left - px, dy: gutterY - py,
+      box: { left, right: left + LABEL_WIDTH, top, bottom: top + h },
+      drop: { x1: dropX, x2: dropX, y1: Math.min(py, gutterY), y2: Math.max(py, gutterY) },
+      leg: { x1: Math.min(px, left), x2: Math.max(px, left), y1: legY, y2: legY },
+    };
+  };
+  const beside = (px, py, h, dir) => {
+    const left = dir > 0 ? px + LABEL_LEAD + LABEL_PADDING : px - LABEL_LEAD - LABEL_PADDING - LABEL_WIDTH;
+    return {
+      mode: 'side', dx: dir * LABEL_LEAD, dy: 0,
+      box: { left, right: left + LABEL_WIDTH, top: py - h / 2, bottom: py + h / 2 },
+      drop: { x1: px, x2: px, y1: py, y2: py },
+      leg: { x1: Math.min(px, px + dir * LABEL_LEAD), x2: Math.max(px, px + dir * LABEL_LEAD), y1: py, y2: py },
+    };
+  };
+  const clearOf = (g, others) => others.every(o =>
+    !overlaps(g.box, o.box) && !segHits(g.drop, o.box) && !segHits(g.leg, o.box) && !segHits(o.drop, g.box) && !segHits(o.leg, g.box));
+  const inside = g => g.box.top >= 0 && g.box.bottom <= chartHeight && g.box.left >= 0 && g.box.right <= chartWidth;
+  const offLine = g => !lineHits(g.box);
+
+  // Every candidate spot for a point, cheapest first. extraLefts lets the
+  // greedy pass add spots just past boxes it has already placed.
+  const candidatesFor = (p, extraLefts = []) => {
+    const px = x(p.minute), py = yOf(p), h = labelHeight(p);
+    const preferredSide = sideOf(p);
+    const preferredLeft = px + LABEL_LEAD + LABEL_WIDTH <= chartWidth ? px + LABEL_LEAD : px - LABEL_LEAD - LABEL_WIDTH;
+    const lefts = [preferredLeft, px - LABEL_LEAD - LABEL_WIDTH]
+      .concat(extraLefts)
+      .concat(d3.range(1, 4).flatMap(k => [px + LABEL_LEAD + k * (LABEL_WIDTH + C), px - LABEL_LEAD - (k + 1) * LABEL_WIDTH - k * C]))
+      .filter(l => l >= 0 && l + LABEL_WIDTH <= chartWidth);
+    const candidates = [preferredSide, -preferredSide].flatMap(sign =>
+      d3.range(MAX_LEVELS).flatMap(level => lefts.flatMap(left => ['dropFirst', 'legFirst'].map(route => ({
+        g: stacked(px, py, h, sign, level, left, route),
+        cost: level * LEVEL_STEP + Math.abs(left - preferredLeft) + (sign === preferredSide ? 0 : SIDE_FLIP_COST) + (route === 'legFirst' ? ROUTE_BEND_COST : 0),
+      })))))
+      .concat([1, -1].map(dir => ({ g: beside(px, py, h, dir), cost: SIDE_COST + (dir > 0 ? 0 : LABEL_WIDTH) })));
+    return d3.sort(candidates, c => c.cost).map(c => c.g);
+  };
+
+  // Search: valid spots only, cheapest first, backing up when stuck.
+  const valid = points.map(p => candidatesFor(p).filter(g => inside(g) && offLine(g)).slice(0, SEARCH_CANDIDATES));
+  const chosen = [];
+  let budget = SEARCH_BUDGET;
+  const search = i => {
+    if (i === points.length) return true;
+    for (const g of valid[i]) {
+      if (--budget < 0) return false;
+      if (!clearOf(g, chosen)) continue;
+      chosen.push(g);
+      if (search(i + 1)) return true;
+      chosen.pop();
+    }
+    return false;
+  };
+  if (search(0)) return points.map((p, i) => ({ p, ...chosen[i] }));
+
+  // Greedy fallback with relaxed constraints.
+  const placed = [];
+  return points.map(p => {
+    const ordered = candidatesFor(p, placed.map(o => o.box.right + C));
+    const pick = ordered.find(g => inside(g) && clearOf(g, placed) && offLine(g))
+      || ordered.find(g => inside(g) && clearOf(g, placed))
+      || ordered.find(g => inside(g))
+      || ordered[0];
+    placed.push(pick);
+    return { p, ...pick };
+  });
+}
+
+// Does the segment from a to b pass through the box? Liang–Barsky clipping
+// of the segment against the box's four edges.
+function segmentHitsBox(a, b, box) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let t0 = 0, t1 = 1;
+  const edges = [[-dx, a.x - box.left], [dx, box.right - a.x], [-dy, a.y - box.top], [dy, box.bottom - a.y]];
+  for (const [p, q] of edges) {
+    if (p === 0) { if (q < 0) return false; continue; }
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+    else { if (t < t0) return false; if (t < t1) t1 = t; }
+  }
+  return true;
+}
+
+function buildAnnotationPoints(aggregates) {
+  const picks = ANNOTATION_RULES.map(rule => ({ rule, agg: rule.pick(aggregates) }));
+  return d3.groups(picks, p => `${p.rule.kind}@${p.agg.minute}`).map(([id, group]) => ({
+    id,
+    minute: group[0].agg.minute,
+    kind: group[0].rule.kind,
+    anchor: group[0].rule.anchor,
+    agg: group[0].agg,
+    reasons: group.map(p => p.rule.label(p.agg)),
+  }));
+}
+
+// Recency-weighted distance between two equal-length % paths: the root mean
+// square gap, with weights ramping linearly so the latest bar counts
+// RECENCY_WEIGHT times the first. Small means the lines sit on top of each
+// other, which is what "looks like today" means on this chart: same level
+// above or below the open, same size of moves, same timing. Shape-only
+// measures (correlation of levels or of 5-minute changes) were tried and
+// ranked days ending 2% away from today near the top.
+const RECENCY_WEIGHT = 3;
+function weightedDistance(a, b) {
+  const n = a.length;
+  const w = a.map((_, i) => 1 + (n > 1 ? i / (n - 1) : 0) * (RECENCY_WEIGHT - 1));
+  return Math.sqrt(d3.sum(a, (v, i) => w[i] * (v - b[i]) ** 2) / d3.sum(w));
+}
+
+// Similar-days filter. The reference is the latest day, which during a
+// session is today so far. Its path is compared with every other day's over
+// the same minutes by weighted distance and the closest KEEP_SHARE of them
+// is kept (at least one day). A day missing any of those minutes (a half
+// session shorter than the reference) is left out.
+const KEEP_SHARE = 0.08;
+function similarDays(days, reference) {
+  const refByMinute = new Map(reference.points.map(p => [p.minute, p.pct]));
+  const cutoff = reference.points[reference.points.length - 1].minute;
+  const minutes = d3.range(SESSION_OPEN_MIN, cutoff + 1, BAR_MINUTES);   // the open, now a real value, takes part
+  const refSeries = minutes.map(m => refByMinute.get(m));
+  const scored = days
+    .filter(d => d !== reference)
+    .map(d => {
+      const byMinute = new Map(d.points.map(p => [p.minute, p.pct]));
+      if (!minutes.every(m => byMinute.has(m))) return null;
+      return { day: d, distance: weightedDistance(refSeries, minutes.map(m => byMinute.get(m))) };
+    })
+    .filter(Boolean);
+  const keepCount = Math.max(1, Math.round(scored.length * KEEP_SHARE));
+  const kept = d3.sort(scored, d => d.distance).slice(0, keepCount).map(d => d.day);
+  return { days: d3.sort([reference, ...kept], d => d.date), cutoff };
+}
+
+// What the page's charts share (the reusable-chart convention,
+// .claude/skills/d3-charts): one state object with a chainable getter/setter
+// per key, the _add() enter/exit/update helper, a width that follows the
+// container, and the svg with its margin-shifted plot group.
+class ChartBase {
+  constructor(attrs) {
+    this.getState = () => attrs;
+    this.setState = d => Object.assign(attrs, d);
+    Object.keys(attrs).forEach(key => {
+      this[key] = function (_) {
+        if (!arguments.length) return attrs[key];
+        attrs[key] = _;
+        return this;
+      };
+    });
+    this.initializeEnterExitUpdatePattern();
+  }
+
+  calculateProperties() {
+    const { marginLeft, marginTop, marginRight, marginBottom, svgWidth, svgHeight } = this.getState();
+    const calc = { chartLeftMargin: marginLeft, chartTopMargin: marginTop };
+    const chartWidth = svgWidth - marginRight - marginLeft;
+    const chartHeight = svgHeight - marginBottom - marginTop;
+    this.setState({ calc, chartWidth, chartHeight });
+  }
+
+  drawSvgAndWrappers() {
+    const { d3Container, svgWidth, svgHeight, defaultFont, calc } = this.getState();
+    const svg = d3Container._add('svg.svg-container')
+      .attr('width', svgWidth)
+      .attr('height', svgHeight)
+      .attr('font-family', defaultFont);
+    const chart = svg._add('g.chart')
+      .attr('transform', `translate(${calc.chartLeftMargin},${calc.chartTopMargin})`);
+    this.setState({ chart, svg });
+  }
+
+  initializeEnterExitUpdatePattern() {
+    d3.selection.prototype._add = function (classSelector, data, params) {
+      const container = this;
+      const split = classSelector.split('.');
+      const elementTag = split[0];
+      const className = split[1] || 'not-good';
+      const exitTransition = params?.exitTransition;
+      const enterTransition = params?.enterTransition;
+
+      let bindData = data;
+      if (typeof data === 'function') bindData = data(container.datum());
+      if (bindData && !Array.isArray(bindData)) bindData = [bindData];
+      if (!bindData) bindData = container.datum() ? d => [d] : [className];
+
+      let selection = container.selectAll(elementTag + '.' + className).data(bindData, (d, i) => {
+        if (typeof d === 'object' && d.id) return d.id;
+        return i;
+      });
+      if (exitTransition) exitTransition(selection); else selection.exit().remove();
+      const enterSelection = selection.enter().append(elementTag);
+      if (enterTransition) enterTransition(enterSelection);
+      selection = enterSelection.merge(selection);
+      selection.attr('class', className);
+      if (className === 'not-good') {
+        selection.attr('stroke', 'red').attr('stroke-width', 10);
+        selection.selectAll('title').data(['not-good']).join('title').text("You don't have a class set for this element!");
+      }
+      return selection;
+    };
+  }
+
+  setDynamicContainer() {
+    const attrs = this.getState();
+    const d3Container = d3.select(attrs.container);
+    const containerRect = d3Container.node().getBoundingClientRect();
+    if (containerRect.width > 0) attrs.svgWidth = containerRect.width;
+    const self = this;
+    d3.select(window).on('resize.' + attrs.id, function () {
+      const rect = d3Container.node().getBoundingClientRect();
+      if (rect.width > 0) attrs.svgWidth = rect.width;
+      self.render();
+    });
+    this.setState({ d3Container });
+  }
+}
+
+class IntradayOverlayChart extends ChartBase {
+  constructor() {
+    super({
+      id: 'ID' + Math.floor(Math.random() * 1000000),
+      svgWidth: 400,
+      svgHeight: 600,
+      marginTop: 8,
+      marginBottom: 50,         // axis labels, then a row for the log toggle beneath them
+      marginRight: 108,         // room for the mean / median labels and the hovered day's date at the line ends
+      marginLeft: 52,
+      container: 'body',
+      defaultFont: 'inherit',
+      data: null,
+      aggregates: null,
+      chartWidth: null,
+      chartHeight: null,
+      firstRender: true,
+      yScaleType: 'symlog',
+      symlogLinearPct: 0.1,
+      yLimit: null,             // fixed |%| extent of the y-axis, set once from all days so filtering never rescales
+      minuteOffset: 0,          // added to New York minutes for axis and readout labels
+      zoneLabel: 'ET',
+      referenceId: null,        // day drawn as the reference when the similar-days filter is on
+      matchCutoff: null,        // last matched minute; shades the window when set
+      todayId: null,            // the latest day in the file, drawn on its own layer on top
+      opacityCount: null,       // days the opacity is tuned for; defaults to the days drawn
+      extended: null,           // the latest pre-market or after-hours print { session, price, changePct }, pulsing at the start outside the session
+      // A dragged range (drawHover): the bar pressed on while the button is
+      // held, the span on screen { a, b, dayId } in minutes, and that span
+      // once Shift at release keeps it, redrawn by every render until it clears.
+      rangeAnchor: null,
+      rangeShown: null,
+      rangePinned: null,
+    });
+  }
+
+  render() {
+    this.setDynamicContainer();
+    this.calculateProperties();
+    this.drawSvgAndWrappers();
+    this.drawScales();
+    this.drawAxes();
+    this.drawDays();
+    this.drawAggregates();
+    this.drawNow();
+    this.drawAnnotations();
+    this.drawToday();
+    this.drawExtended();
+    this.drawHover();
+    this.setState({ firstRender: false });
+    return this;
+  }
+
+  drawScales() {
+    const { data, chartWidth, chartHeight, yScaleType, symlogLinearPct } = this.getState();
+    const allPct = data.flatMap(d => d.points.map(p => p.pct));
+    const x = d3.scaleLinear().domain([SESSION_OPEN_MIN, SESSION_CLOSE_MIN]).range([0, chartWidth]);
+    // Log: a fixed, symmetric extent from all days, so filtering never
+    // rescales. Linear: the extent of the days on screen, since on a linear
+    // axis the full three-year range would flatten a quiet selection.
+    const [lo, hi] = d3.extent(allPct);
+    const limit = this.getState().yLimit || Math.ceil(Math.max(-lo, hi));
+    const y = yScaleType === 'symlog'
+      ? d3.scaleSymlog().constant(symlogLinearPct).domain([-limit, limit]).range([chartHeight, 0])
+      : d3.scaleLinear().domain([Math.min(0, lo), Math.max(0, hi)]).nice(8).range([chartHeight, 0]);
+    const ladder = yScaleType === 'symlog'
+      ? [0].concat(NICE_PCT_LADDER.filter(t => t >= symlogLinearPct && t <= limit).flatMap(t => [t, -t]))
+      : y.ticks(8);
+    // On a short chart (the desktop widget's frame) neighbouring labels would
+    // overlap; walking out from 0, a tick too close to one already kept is dropped.
+    const yTicks = [];
+    for (const t of [...ladder].sort((a, b) => Math.abs(a) - Math.abs(b))) {
+      if (yTicks.every(k => Math.abs(y(k) - y(t)) >= MIN_TICK_GAP_PX)) yTicks.push(t);
+    }
+    const line = d3.line().x(p => x(p.minute)).y(p => y(p.pct));
+    this.setState({ x, y, yTicks, line });
+  }
+
+  drawAxes() {
+    const { chart, x, y, yTicks, chartWidth, chartHeight, minuteOffset } = this.getState();
+    const isWholeHour = m => ((m + minuteOffset) % 60 + 60) % 60 === 0;
+    const hourTicks = [SESSION_OPEN_MIN];
+    for (const m of d3.range(SESSION_OPEN_MIN + 1, SESSION_CLOSE_MIN).filter(isWholeHour).concat(SESSION_CLOSE_MIN)) {
+      if (x(m) - x(hourTicks[hourTicks.length - 1]) >= MIN_HOUR_GAP_PX) hourTicks.push(m);
+      else if (m === SESSION_CLOSE_MIN) hourTicks[hourTicks.length - 1] = m;   // the close outranks the hour before it
+    }
+    const fmtTick = m => fmtClock(m + minuteOffset);
+
+    chart._add('g.grid')
+      .call(d3.axisLeft(y).tickValues(yTicks).tickSize(-chartWidth).tickFormat(''))
+      .call(g => g.select('.domain').remove());
+
+    chart._add('g.x-axis').classed('axis', true)
+      .attr('transform', `translate(0,${chartHeight})`)
+      .call(d3.axisBottom(x).tickValues(hourTicks).tickFormat(fmtTick).tickSizeOuter(0));
+
+    chart._add('g.y-axis').classed('axis', true)
+      .call(d3.axisLeft(y).tickValues(yTicks).tickFormat(fmtAxisPct).tickSizeOuter(0));
+
+    chart._add('line.zero')
+      .attr('x1', 0).attr('x2', chartWidth)
+      .attr('y1', y(0)).attr('y2', y(0));
+  }
+
+  drawDays() {
+    const { chart, data, line, referenceId, matchCutoff, x, chartHeight } = this.getState();
+    chart._add('g.match')._add('rect.match-window')
+      .attr('x', x(SESSION_OPEN_MIN)).attr('y', 0)
+      .attr('width', matchCutoff === null ? 0 : x(matchCutoff) - x(SESSION_OPEN_MIN))
+      .attr('height', chartHeight);
+    const { todayId, opacityCount } = this.getState();
+    const today = data.find(d => d.id === todayId);
+    const live = today && isLiveDay(today);
+    const faint = live ? data.filter(d => d.id !== todayId) : data;
+    const opacity = dayOpacity(opacityCount ?? faint.length);
+    // The similar-days reference is only picked out while the session is
+    // live; after the close the latest day looks like any other.
+    const highlighted = d => live && d.id === referenceId;
+    chart._add('g.days')._add('path.day-path', faint)
+      .attr('d', d => line(d.points))
+      .classed('reference', highlighted)
+      .style('opacity', d => highlighted(d) ? 1 : opacity);
+  }
+
+  // Today's path on its own layer above the aggregates and labels. The line
+  // draws itself in on the first render; the ring pulses while the session
+  // is open, and rests as a plain dot after the close.
+  drawToday() {
+    const { chart, data, line, x, y, chartWidth, todayId, firstRender } = this.getState();
+    const today = data.find(d => d.id === todayId);
+    const live = today && isLiveDay(today);
+    const g = chart._add('g.today').style('display', live ? null : 'none');
+    if (!live) return;
+    const last = today.points[today.points.length - 1];
+    const d = line(today.points);
+    g._add('path.today-glow').attr('d', d);
+    const path = g._add('path.today-path').attr('d', d);
+    if (firstRender) {
+      const length = path.node().getTotalLength();
+      path.attr('stroke-dasharray', `${length} ${length}`).attr('stroke-dashoffset', length)
+        .transition().duration(900).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0)
+        .on('end', () => path.attr('stroke-dasharray', null).attr('stroke-dashoffset', null));
+    }
+    const cx = x(last.minute), cy = y(last.pct);
+    this.drawPulse(g, cx, cy);
+    const nearRightEdge = cx > chartWidth - 180;
+    // Today's change vs the previous close and the price itself, beside the dot.
+    const label = g._add('text.today-label').attr('text-anchor', nearRightEdge ? 'end' : 'start')
+      .html(`today ${moveHtml(last.pct, last.close)}`);
+    this.placeLabel(label, cx, cy, nearRightEdge, today.points);
+  }
+
+  // A dot with two rings pulsing out of it: today's last bar while the
+  // session is open, an extended-hours print at the start outside it. The
+  // rings group always exists and its circles are joined to two items, so an
+  // empty join never has to chain off an empty selection.
+  drawPulse(g, cx, cy) {
+    g._add('g.pulse-rings').attr('transform', `translate(${cx},${cy})`)
+      ._add('circle.pulse-ring', [0, 1]).attr('r', 5).classed('second', k => k === 1);
+    g._add('circle.pulse-dot').attr('cx', cx).attr('cy', cy).attr('r', 4);
+  }
+
+  // Sets a label beside its dot. Below it by default; when the lines run
+  // through that band over the label's width (near the right edge the label
+  // sits over the line's last stretch), above the dot instead, and past the
+  // lines when both bands are taken. `points` is the drawn line the dot ends;
+  // the mean and median count everywhere.
+  placeLabel(label, cx, cy, nearRightEdge, points) {
+    const { x, y, aggregates } = this.getState();
+    const labelW = label.node().getComputedTextLength(), lx = cx + (nearRightEdge ? -10 : 10);
+    const x0 = nearRightEdge ? lx - labelW : lx, x1 = x0 + labelW;
+    const ys = [];
+    for (const p of points) { const px = x(p.minute); if (px >= x0 - 8 && px <= x1 + 8) ys.push(y(p.pct)); }
+    for (const a of aggregates || []) { const px = x(a.minute); if (px >= x0 - 8 && px <= x1 + 8) { ys.push(y(a.mean)); ys.push(y(a.median)); } }
+    const clear = (top, bottom) => !ys.some(v => v >= top - 7 && v <= bottom + 7);   // 7px: the glow's half width and a margin
+    let ly = cy + 18;                                   // the band cy+8 .. cy+24
+    if (!clear(cy + 8, cy + 24)) {
+      if (clear(cy - 24, cy - 8)) ly = cy - 10;
+      else { const lo = Math.max(...ys), hi = Math.min(...ys); ly = lo - cy <= cy - hi ? lo + 22 : hi - 14; }
+    }
+    label.attr('x', lx).attr('y', ly);
+  }
+
+  // Outside the regular session the proxy's quote for the ticker carries the latest
+  // pre-market or after-hours print (cloudflare/quotes/README.md). Its change
+  // against the close is where the next session's line will start, so it
+  // pulses at the chart's start on the axis, its label beside it (the user,
+  // 2026-11-06). Nothing while the session runs: the chart is live then.
+  drawExtended() {
+    const { chart, extended, x, y, chartHeight } = this.getState();
+    const g = chart._add('g.extended').style('display', extended ? null : 'none');
+    if (!extended) return;
+    const cx = x(SESSION_OPEN_MIN), cy = Math.max(0, Math.min(chartHeight, y(extended.changePct)));
+    this.drawPulse(g, cx, cy);
+    const label = g._add('text.extended-label').attr('text-anchor', 'start')
+      .html(`${EXTENDED_SESSION_NAMES[extended.session]} ${moveHtml(extended.changePct, extended.price)}`);
+    this.placeLabel(label, cx, cy, false, []);
+  }
+
+  drawAggregates() {
+    const { chart, aggregates, x, y } = this.getState();
+    const meanLine = d3.line().x(a => x(a.minute)).y(a => y(a.mean));
+    const medianLine = d3.line().x(a => x(a.minute)).y(a => y(a.median));
+    const g = chart._add('g.aggregates');
+    g._add('path.median-path').attr('d', medianLine(aggregates));
+    g._add('path.mean-path').attr('d', meanLine(aggregates));
+
+    // Name each line at its right-hand end instead of a legend. When the two
+    // end within a label's height of each other, push them apart.
+    const last = aggregates[aggregates.length - 1];
+    const labels = [
+      { id: 'mean', text: 'mean', y: y(last.mean) },
+      { id: 'median', text: 'median', y: y(last.median) },
+    ];
+    const gap = labels[0].y - labels[1].y;
+    if (Math.abs(gap) < LINE_LABEL_MIN_GAP) {
+      const push = (LINE_LABEL_MIN_GAP - Math.abs(gap)) / 2;
+      labels[0].y += gap >= 0 ? push : -push;
+      labels[1].y += gap >= 0 ? -push : push;
+    }
+    g._add('text.line-label', labels)
+      .attr('class', d => `line-label ${d.id}`)
+      .attr('x', x(last.minute) + 6).attr('y', d => d.y)
+      .text(d => d.text);
+    this.setState({ lineLabelYs: labels.map(l => l.y) });   // the hover end label steers around these
+  }
+
+  drawAnnotations() {
+    const { chart, aggregates, x, y, chartWidth, minuteOffset, zoneLabel } = this.getState();
+    const KIND_TITLE = { buy: 'Buy', sell: 'Sell' };
+    const points = d3.sort(buildAnnotationPoints(aggregates), p => p.minute);
+    // Buys prefer the space below the line, sells above; layoutLabels may
+    // move one across when its own side has no room.
+    const { chartHeight } = this.getState();
+    const yOf = p => y(p.agg[p.anchor]);
+    const sideOf = p => p.kind === 'buy' ? 1 : -1;
+    const lineHits = this.highlightedLineHitTest();
+    const annotations = layoutLabels(points, x, yOf, sideOf, chartWidth, chartHeight, lineHits).map(({ p, mode, route, dx, dy }) => {
+      const px = x(p.minute), py = yOf(p);
+      const stacked = mode === 'stacked';
+      return {
+        x: px, y: py, dx, dy,
+        className: p.kind,
+        subject: { radius: 5 },
+        // Stacked: an L from the point to the label's near corner, bending
+        // at the gutter (drop first) or at the point's height (leg first).
+        // Side: the horizontal leg only. No diagonal legs either way.
+        connector: stacked
+          ? { type: 'curve', curve: d3.curveLinear, points: [route === 'dropFirst' ? [0, dy] : [dx, 0]] }
+          : { type: 'line' },
+        note: {
+          title: `${KIND_TITLE[p.kind]} ${fmtClock(p.minute + minuteOffset)}`,
+          label: p.reasons.join(', '),
+          orientation: stacked ? 'topBottom' : 'leftRight',
+          align: stacked ? 'left' : 'middle',
+          lineType: 'none',
+          wrap: LABEL_WIDTH - 14,      // text + 5px padding each side stays inside the LABEL_WIDTH box the layout assumes
+          bgPadding: { top: 3, left: 5, right: 5, bottom: 3 },
+        },
+      };
+    });
+    const g = chart._add('g.annotations');
+    g.selectAll('*').remove();          // d3-annotation owns this subtree; rebuild it each render
+    g.call(d3.annotation().type(d3.annotationCalloutCircle).notePadding(LABEL_PADDING).annotations(annotations));
+  }
+
+  // The highlighted line is the thing to read, so no label may sit on it:
+  // today's path when it is in view, else the reference day of the
+  // similar-days filter. Returns a test of a label box, padded a little,
+  // against every segment of that line.
+  highlightedLineHitTest() {
+    const { data, x, y, todayId } = this.getState();
+    const line = data.find(d => d.id === todayId);
+    if (!line || !isLiveDay(line)) return () => false;
+    const PAD = 8;
+    const pts = line.points.map(p => ({ x: x(p.minute), y: y(p.pct) }));
+    return b => {
+      const box = { left: b.left - PAD, right: b.right + PAD, top: b.top - PAD, bottom: b.bottom + PAD };
+      return pts.some((p, i) => i > 0 && segmentHitsBox(pts[i - 1], p, box));
+    };
+  }
+
+  drawNow() {
+    const { chart, x, chartHeight, minuteOffset, zoneLabel } = this.getState();
+    const minute = marketMinuteNow();
+    const g = chart._add('g.now').style('display', minute === null ? 'none' : null);
+    if (minute === null) return;
+    const px = x(minute);
+    const nearRightEdge = px > x(SESSION_CLOSE_MIN) - 90;
+    // A short tick at the top rather than a full-height rule: enough to
+    // place "now" without cutting across the paths.
+    g._add('line.now-line').attr('x1', px).attr('x2', px).attr('y1', 0).attr('y2', chartHeight * NOW_TICK_SHARE);
+    g._add('text.now-label')
+      .attr('x', px + (nearRightEdge ? -6 : 6)).attr('y', 12)
+      .attr('text-anchor', nearRightEdge ? 'end' : 'start')
+      .text(`now ${fmtClock(minute + minuteOffset)} ${zoneLabel}`);
+  }
+
+  drawHover() {
+    const { chart, d3Container, aggregates, data, x, y, chartWidth, chartHeight, minuteOffset, referenceId } = this.getState();
+    const { todayId, opacityCount } = this.getState();
+    const today = data.find(d => d.id === todayId);
+    const live = today && isLiveDay(today);
+    const opacity = dayOpacity(opacityCount ?? (live ? data.length - 1 : data.length));
+    const restOpacity = d => live && d.id === referenceId ? 1 : opacity;
+    const rule = chart._add('line.hover-rule')
+      .attr('y1', 0).attr('y2', chartHeight)
+      .style('display', 'none');
+    const marks = chart._add('g.hover-marks').style('display', 'none');
+    const range = chart._add('g.range-marks').style('display', 'none');
+    const dayPaths = chart.selectAll('path.day-path');
+    const bisectMinute = d3.bisector(a => a.minute).center;
+    const bisectPoint = d3.bisector(p => p.minute).center;
+    // The aggregate bar under a pointer, its x clamped to the plot, and the
+    // move its height reads as, from any event: the drag's handlers sit on the
+    // window, so the pointer is taken against the plot's own frame.
+    const barAt = minute => aggregates[bisectMinute(aggregates, minute)];
+    const pointerBar = event => {
+      const [px, py] = d3.pointer(event, chart.node());
+      return { agg: barAt(x.invert(Math.max(0, Math.min(chartWidth, px)))), cursorPct: y.invert(py) };
+    };
+    // The day whose path is nearest the pointer's height at a bar.
+    const nearestDay = (minute, cursorPct) => d3.least(data, d => {
+      const p = d.points[bisectPoint(d.points, minute)];
+      return p.minute === minute ? Math.abs(p.pct - cursorPct) : Infinity;
+    });
+    const highlightDay = day => dayPaths.classed('hover', d => d === day).style('opacity', d => d === day ? 1 : restOpacity(d));
+    const hideHover = () => { rule.style('display', 'none'); marks.style('display', 'none'); highlightDay(null); };
+
+    // A dragged range, as on the site's charts: press on the plot and drag,
+    // and the span between the two bars is shaded, with a chord across it for
+    // today's line (while the session is live, as far as its last bar), the
+    // mean, the median and the day nearest the pointer, a badge on each
+    // naming its move over the span, and a time chip at each end. The two
+    // readings on a line are moves from the previous close, so the move
+    // across the span is the price ratio between them. It clears on release;
+    // Shift at release keeps it until Escape or the next press.
+    const showRange = (a, b, day) => {
+      const lo = a.minute <= b.minute ? a : b, hi = a.minute <= b.minute ? b : a;
+      const xA = x(lo.minute), xB = x(hi.minute);
+      hideHover();
+      highlightDay(day);
+      range.style('display', null);
+      range._add('rect.range-span').attr('x', xA).attr('y', 0).attr('width', xB - xA).attr('height', chartHeight);
+      range._add('line.range-edge', [xA, xB]).attr('x1', d => d).attr('x2', d => d).attr('y1', 0).attr('y2', chartHeight);
+      const at = (points, minute) => points[bisectPoint(points, minute)];
+      const chords = [];
+      if (live) {
+        const p0 = at(today.points, lo.minute), p1 = at(today.points, hi.minute);
+        if (p1.minute > p0.minute) chords.push({ id: 'today', name: 'today', p0, p1 });
+      }
+      chords.push({ id: 'mean', name: 'mean', p0: { minute: lo.minute, pct: lo.mean }, p1: { minute: hi.minute, pct: hi.mean } });
+      chords.push({ id: 'median', name: 'median', p0: { minute: lo.minute, pct: lo.median }, p1: { minute: hi.minute, pct: hi.median } });
+      if (day && !(live && day.id === todayId)) chords.push({ id: 'day', name: d3.timeFormat('%b %-d')(day.date), p0: at(day.points, lo.minute), p1: at(day.points, hi.minute) });
+      for (const c of chords) {
+        c.move = ((100 + c.p1.pct) / (100 + c.p0.pct) - 1) * 100;
+        c.tone = toneOf(c.move);
+        c.x0 = x(c.p0.minute); c.x1 = x(c.p1.minute); c.y0 = y(c.p0.pct); c.y1 = y(c.p1.pct);
+      }
+      range._add('line.range-chord', chords).attr('class', c => `range-chord ${c.id}`)
+        .attr('x1', c => c.x0).attr('y1', c => c.y0).attr('x2', c => c.x1).attr('y2', c => c.y1);
+      range._add('circle.range-end', chords.flatMap(c => [{ id: c.id + '-0', line: c.id, x: c.x0, y: c.y0 }, { id: c.id + '-1', line: c.id, x: c.x1, y: c.y1 }]))
+        .attr('class', e => `range-end ${e.line}`).attr('cx', e => e.x).attr('cy', e => e.y).attr('r', 3);
+      // Badges at the chords' midpoints, pushed apart when chords run close
+      // together and kept inside the plot.
+      const badges = chords.map(c => ({ id: c.id, tone: c.tone, name: c.name, text: fmtPct(c.move), x: (c.x0 + c.x1) / 2, y: (c.y0 + c.y1) / 2 }));
+      for (const b of badges) { b.w = (b.name.length + 1 + b.text.length) * 6.6 + 12; b.x = Math.max(b.w / 2, Math.min(chartWidth - b.w / 2, b.x)); }
+      const stacked = d3.sort(badges, b => b.y);
+      for (let i = 1; i < stacked.length; i++) stacked[i].y = Math.max(stacked[i].y, stacked[i - 1].y + RANGE_BADGE_H);
+      for (let i = stacked.length - 1; i >= 0; i--) stacked[i].y = Math.min(stacked[i].y, i === stacked.length - 1 ? chartHeight - RANGE_BADGE_H / 2 : stacked[i + 1].y - RANGE_BADGE_H);
+      for (let i = 0; i < stacked.length; i++) stacked[i].y = Math.max(stacked[i].y, i === 0 ? RANGE_BADGE_H / 2 : stacked[i - 1].y + RANGE_BADGE_H);
+      const badge = range._add('g.range-badge', badges).attr('class', b => `range-badge ${b.tone}`).attr('transform', b => `translate(${b.x},${b.y})`);
+      badge._add('rect.range-badge-bg').attr('x', b => -b.w / 2).attr('y', -RANGE_BADGE_H / 2).attr('width', b => b.w).attr('height', RANGE_BADGE_H);
+      badge._add('text.range-badge-text').html(b => `<tspan class="name">${b.name} </tspan><tspan class="move">${b.text}</tspan>`);
+      // A time chip under each edge, one chip naming both when they would overlap.
+      const clock = m => fmtClock(m + minuteOffset);
+      const chipW = t => t.length * 6.6 + 12, chipH = 16;
+      const chips = xB - xA >= chipW(clock(lo.minute)) + 6
+        ? [{ id: 'a', x: xA, text: clock(lo.minute) }, { id: 'b', x: xB, text: clock(hi.minute) }]
+        : [{ id: 'a', x: (xA + xB) / 2, text: `${clock(lo.minute)}–${clock(hi.minute)}` }];
+      for (const c of chips) { c.w = chipW(c.text); c.x = Math.max(c.w / 2, Math.min(chartWidth - c.w / 2, c.x)); }
+      const chip = range._add('g.range-time-chip', chips).attr('transform', c => `translate(${c.x},${chartHeight + 10})`);
+      chip._add('rect.hover-time-bg').attr('x', c => -c.w / 2).attr('y', -chipH / 2).attr('width', c => c.w).attr('height', chipH);
+      chip._add('text.hover-time').text(c => c.text);
+    };
+    const clearRange = () => {
+      range.style('display', 'none');
+      highlightDay(null);
+      this.setState({ rangeShown: null, rangePinned: null });
+    };
+
+    chart._add('rect.hover-target')
+      .attr('width', chartWidth).attr('height', chartHeight)
+      .attr('fill', 'transparent')
+      .on('mousedown', (event) => {
+        if (event.button !== 0) return;
+        this.setState({ rangeAnchor: pointerBar(event).agg.minute });
+        event.preventDefault();   // no text selection while dragging
+      })
+      .on('mousemove', (event) => {
+        const { rangeAnchor, rangePinned } = this.getState();
+        if (rangeAnchor != null || rangePinned) return;   // a drag draws from the window's handler; a kept range holds
+        const { agg, cursorPct } = pointerBar(event);
+        rule.style('display', null).attr('x1', x(agg.minute)).attr('x2', x(agg.minute));
+
+        // The day whose path is nearest the cursor gets highlighted.
+        const nearest = nearestDay(agg.minute, cursorPct);
+        highlightDay(nearest);
+        const nearestPct = nearest.points[bisectPoint(nearest.points, agg.minute)].pct;
+
+        marks.style('display', null);
+        const hx = x(agg.minute);
+        const onRight = hx > chartWidth - HOVER_LABEL_ROOM;
+
+        // Time chip on the axis under the crosshair.
+        const timeText = fmtClock(agg.minute + minuteOffset);
+        const chipW = timeText.length * 6.6 + 12, chipH = 16;
+        const chip = marks._add('g.hover-time-chip')
+          .attr('transform', `translate(${Math.max(chipW / 2, Math.min(chartWidth - chipW / 2, hx))},${chartHeight + 10})`);
+        chip._add('rect.hover-time-bg').attr('x', -chipW / 2).attr('y', -chipH / 2).attr('width', chipW).attr('height', chipH);
+        chip._add('text.hover-time').text(timeText);
+
+        // Values where the crosshair crosses each line, pushed apart when
+        // two would sit on top of each other.
+        const crossings = [
+          { id: 'mean', text: `mean ${fmtPct(agg.mean)}`, y: y(agg.mean) },
+          { id: 'median', text: `median ${fmtPct(agg.median)}`, y: y(agg.median) },
+          { id: 'day', text: fmtPct(nearestPct), y: y(nearestPct) },
+        ];
+        const ordered = d3.sort(crossings, c => c.y);
+        ordered.forEach(c => { c.ly = c.y; });
+        for (let i = 1; i < ordered.length; i++) ordered[i].ly = Math.max(ordered[i].ly, ordered[i - 1].ly + HOVER_LABEL_GAP);
+        for (let i = ordered.length - 2; i >= 0; i--) ordered[i].ly = Math.min(ordered[i].ly, ordered[i + 1].ly - HOVER_LABEL_GAP);
+        const cross = marks._add('g.hover-cross', crossings)
+          .attr('class', c => `hover-cross ${c.id}`)
+          .attr('transform', c => `translate(${hx},0)`);
+        cross._add('circle.hover-dot').attr('cy', c => c.y).attr('r', 3.5);
+        cross._add('text.hover-value')
+          .attr('x', onRight ? -9 : 9).attr('y', c => c.ly)
+          .attr('text-anchor', onRight ? 'end' : 'start')
+          .text(c => c.text);
+
+        // The hovered day's end, in the right margin beside the plot like the
+        // mean and median names: its date, then its close vs the previous
+        // close. Two lines, placed at the line's end unless that would sit on
+        // the mean or median name, in which case it moves up or down.
+        const last = nearest.points[nearest.points.length - 1];
+        const ey = y(last.pct);
+        const { lineLabelYs = [] } = this.getState();
+        const clearOfNames = cy => lineLabelYs.every(ly => Math.abs(cy - ly) > HOVER_END_CLEARANCE);
+        const inPlot = cy => cy - HOVER_END_HEIGHT / 2 >= 0 && cy + HOVER_END_HEIGHT / 2 <= chartHeight;
+        const endY = [ey, ey - HOVER_END_HEIGHT, ey + HOVER_END_HEIGHT, ey - 2 * HOVER_END_HEIGHT, ey + 2 * HOVER_END_HEIGHT]
+          .find(cy => inPlot(cy) && clearOfNames(cy)) ?? ey;
+        const endLabel = marks._add('text.hover-end')
+          .attr('x', chartWidth + 6).attr('y', endY).attr('text-anchor', 'start')
+          .attr('class', 'hover-end');
+        endLabel.html(`<tspan x="${chartWidth + 6}" dy="-0.35em">${d3.timeFormat('%b %-d, %Y')(nearest.date)}</tspan>` +
+          `<tspan x="${chartWidth + 6}" dy="1.2em" class="dim">${fmtPct(last.pct)}</tspan>`);
+        // Wider than a narrow gutter (the widget's), the label ends at the
+        // svg's right edge instead, over the plot's last few pixels.
+        const endX = Math.min(chartWidth + 6, chartWidth + this.getState().marginRight - 2 - endLabel.node().getBBox().width);
+        endLabel.attr('x', endX).selectAll('tspan').attr('x', endX);
+      })
+      .on('mouseleave', () => {
+        const { rangeAnchor, rangePinned } = this.getState();
+        if (rangeAnchor != null || rangePinned) return;
+        hideHover();
+      });
+    // The drag follows the pointer past the plot's edges, so its handlers sit
+    // on the window; one set per chart, replaced on each render.
+    const { id } = this.getState();
+    d3.select(window)
+      // Any press dismisses a kept range; a press on the plot then starts its own drag.
+      .on('mousedown.range-' + id, () => { if (this.getState().rangePinned) clearRange(); })
+      .on('mousemove.range-' + id, (event) => {
+        const { rangeAnchor, rangePinned } = this.getState();
+        if (rangeAnchor == null || rangePinned) return;
+        const { agg, cursorPct } = pointerBar(event);
+        if (agg.minute === rangeAnchor) { range.style('display', 'none'); this.setState({ rangeShown: null }); return; }
+        const day = nearestDay(agg.minute, cursorPct);
+        showRange(barAt(rangeAnchor), agg, day);
+        this.setState({ rangeShown: { a: rangeAnchor, b: agg.minute, dayId: day ? day.id : null } });
+      })
+      .on('mouseup.range-' + id, (event) => {
+        const { rangeAnchor, rangeShown } = this.getState();
+        if (rangeAnchor == null) return;
+        this.setState({ rangeAnchor: null });
+        if (event.shiftKey && rangeShown) { this.setState({ rangePinned: rangeShown }); return; }
+        clearRange();
+      })
+      .on('keydown.range-' + id, (event) => { if (event.key === 'Escape' && this.getState().rangePinned) clearRange(); });
+    // A kept range outlives a redraw (the widget's live print each minute).
+    const pinned = this.getState().rangePinned;
+    if (pinned) showRange(barAt(pinned.a), barAt(pinned.b), data.find(d => d.id === pinned.dayId) || null);
+  }
+}
+
+// The weekday bars: each weekday's usual close vs the previous session's
+// close over the days the chart draws, as their mean or their median (the
+// user, 2026-11-22: "daily bar chart (mon, tue, wed etc) average in the
+// bottom, also a switch for median"). A session still open has no close yet
+// and is left out. The day stamps are the file's calendar dates at local
+// midnight, so getDay() is the New York weekday.
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+function buildWeekdayBars(days, useMedian) {
+  const live = liveMarketDate();   // read once, not for each day: every reading builds date formatters
+  const closesByWeekday = d3.rollup(days.filter(d => fmtIsoDay(d.date) !== live), group => group.map(d => d.closeVsPrevPct), d => d.date.getDay());
+  return WEEKDAYS.map((label, k) => {
+    const closes = closesByWeekday.get(k + 1) || [];   // getDay(): 1 is Monday
+    return { id: label, label, days: closes.length, value: closes.length ? (useMedian ? d3.median(closes) : d3.mean(closes)) : null };
+  });
+}
+
+// Five bars on a zero line, each with its value at its end, its weekday and
+// its count of days beneath. No axis: the values are on the bars.
+const WEEKDAY_VALUE_GAP = 4;             // px between a bar's end and its value
+const WEEKDAY_VALUE_CAP = 7;             // px the value's digits stand over their baseline, at 10.5px
+const WEEKDAY_VALUE_ROOM = WEEKDAY_VALUE_GAP + WEEKDAY_VALUE_CAP + 4;   // px kept at the top and the bottom of the plot for the values past the bars' ends
+const WEEKDAY_NAME_ROW = 16;             // px from the plot's bottom to the weekday names' baseline
+const WEEKDAY_COUNT_ROW = 30;            // and to the day counts' baseline
+const WEEKDAY_MIN_EXTENT_PCT = 0.05;     // least |%| the scale spans, so near-zero bars do not fill the plot
+class WeekdayBarChart extends ChartBase {
+  constructor() {
+    super({
+      id: 'ID' + Math.floor(Math.random() * 1000000),
+      svgWidth: 400,
+      svgHeight: 126,
+      marginTop: 2,
+      marginBottom: WEEKDAY_COUNT_ROW + 4,   // the weekday names, then the day counts
+      marginRight: 4,
+      marginLeft: 4,
+      container: 'body',
+      defaultFont: 'inherit',
+      data: null,               // buildWeekdayBars' rows
+      chartWidth: null,
+      chartHeight: null,
+      firstRender: true,
+    });
+  }
+
+  render() {
+    this.setDynamicContainer();
+    this.calculateProperties();
+    this.drawSvgAndWrappers();
+    this.drawBars();
+    this.setState({ firstRender: false });
+    return this;
+  }
+
+  drawBars() {
+    const { chart, data, chartWidth, chartHeight } = this.getState();
+    const x = d3.scaleBand().domain(data.map(d => d.label)).range([0, chartWidth]).padding(0.38);
+    const shown = data.filter(d => d.value !== null);
+    const [lo, hi] = d3.extent(shown, d => d.value);
+    const y = d3.scaleLinear()
+      .domain([Math.min(-WEEKDAY_MIN_EXTENT_PCT, lo ?? 0), Math.max(WEEKDAY_MIN_EXTENT_PCT, hi ?? 0)])
+      .range([chartHeight - WEEKDAY_VALUE_ROOM, WEEKDAY_VALUE_ROOM]);
+    const tone = d => toneOf(d.value);
+    const mid = d => x(d.label) + x.bandwidth() / 2;
+
+    chart._add('line.weekday-zero').attr('x1', 0).attr('x2', chartWidth).attr('y1', y(0)).attr('y2', y(0));
+    chart._add('rect.weekday-bar', shown)
+      .attr('x', d => x(d.label)).attr('width', x.bandwidth())
+      .attr('y', d => Math.min(y(0), y(d.value))).attr('height', d => Math.abs(y(d.value) - y(0)))
+      .attr('rx', 2)
+      .classed('up', d => tone(d) === 'up').classed('down', d => tone(d) === 'down');
+    // The value sits past the bar's end: above a rise, under a fall.
+    chart._add('text.weekday-value', shown)
+      .attr('x', mid).attr('y', d => d.value >= 0 ? y(d.value) - WEEKDAY_VALUE_GAP : y(d.value) + WEEKDAY_VALUE_GAP + WEEKDAY_VALUE_CAP)
+      .classed('up', d => tone(d) === 'up').classed('down', d => tone(d) === 'down')
+      .text(d => fmtPct(tone(d) === 'flat' ? 0 : d.value));
+    chart._add('text.weekday-day', data).attr('x', mid).attr('y', chartHeight + WEEKDAY_NAME_ROW).text(d => d.label);
+    chart._add('text.weekday-count', data).attr('x', mid).attr('y', chartHeight + WEEKDAY_COUNT_ROW).text(d => `${d.days} ${d.days === 1 ? 'day' : 'days'}`);
+  }
+}
+
+function renderCoverage(days) {
+  const fmtDate = d3.timeFormat('%b %-d, %Y');
+  d3.select('#coverage').html(
+    `<b>${days.length}</b> days, <b>${fmtDate(days[0].date)}</b> to <b>${fmtDate(days[days.length - 1].date)}</b>`);
+}
+
+// The slider position survives reloads. A thumb resting on an edge is saved
+// as 'edge' so it keeps following the data as days are appended; a thumb in
+// the middle is saved as its date so it lands on the same day next time.
+const PERIOD_STORAGE_KEY = 'tqqq-intraday-period';
+const fmtIsoDay = d3.timeFormat('%Y-%m-%d');
+
+// localStorage can be missing or throw (private mode, blocked storage);
+// the slider then just starts at the edges.
+function readSavedPeriod() {
+  if (EMBED && EMBED_FROM) return { start: EMBED_FROM, end: 'edge' };
+  try { return JSON.parse(localStorage.getItem(PERIOD_STORAGE_KEY)) || {}; } catch { return {}; }
+}
+function writeSavedPeriod(period) {
+  if (EMBED) return;
+  try { localStorage.setItem(PERIOD_STORAGE_KEY, JSON.stringify(period)); } catch { /* storage unavailable */ }
+}
+
+// Index of the saved thumb in allDays. 'edge' or a date outside the data
+// falls back to that thumb's own edge; a date with no exact match (a
+// holiday, or a day filtered out later) snaps inward to the nearest day.
+function restoreThumb(saved, allDays, edgeIndex, isStart) {
+  if (!saved || saved === 'edge') return edgeIndex;
+  const days = allDays.map(d => fmtIsoDay(d.date));
+  const exact = days.indexOf(saved);
+  if (exact >= 0) return exact;
+  const inward = isStart ? days.findIndex(d => d > saved) : days.findLastIndex(d => d < saved);
+  return inward >= 0 ? inward : edgeIndex;
+}
+
+// Two-thumb period slider over the loaded trading days. Each thumb is an
+// index into allDays; the thumbs cannot cross. Every move re-filters the
+// days, recomputes the aggregates and rules, and re-renders the chart.
+function setupPeriodSlider(allDays, onChange) {
+  const start = d3.select('#range-start'), end = d3.select('#range-end'), fill = d3.select('#range-fill');
+  const last = allDays.length - 1;
+  const saved = readSavedPeriod();
+  start.attr('max', last).property('value', restoreThumb(saved.start, allDays, 0, true));
+  end.attr('max', last).property('value', restoreThumb(saved.end, allDays, last, false));
+
+  // `moved`: a thumb was dragged. Only then is the period saved: a setup on a
+  // fund with a shorter history snaps a thumb to its edge, and saving that
+  // would lose the day another fund's view had.
+  const apply = (moved) => {
+    let lo = +start.property('value'), hi = +end.property('value');
+    if (lo > hi) [lo, hi] = [hi, lo];
+    start.property('value', lo);
+    end.property('value', hi);
+    fill.style('left', `${lo / last * 100}%`).style('width', `${(hi - lo) / last * 100}%`);
+    if (moved) writeSavedPeriod({
+      start: lo === 0 ? 'edge' : fmtIsoDay(allDays[lo].date),
+      end: hi === last ? 'edge' : fmtIsoDay(allDays[hi].date),
+    });
+    onChange(allDays.slice(lo, hi + 1));
+  };
+  start.on('input', () => apply(true));
+  end.on('input', () => apply(true));
+  apply(false);
+}
+
+// On/off switches whose state survives reloads, one localStorage key each.
+// With nothing saved, or when localStorage is missing or throws (private
+// mode, blocked storage), the switch takes its default.
+const SIMILAR_STORAGE_KEY = 'tqqq-intraday-similar';
+const TREND_STORAGE_KEY = 'tqqq-intraday-trend';
+const LOG_SCALE_STORAGE_KEY = 'tqqq-intraday-log-scale';
+const WEEKDAY_MEDIAN_STORAGE_KEY = 'tqqq-intraday-weekday-median';
+function readSavedSwitch(key, fallback = false) {
+  if (key === SIMILAR_STORAGE_KEY && EMBED_SIMILAR !== null) return EMBED_SIMILAR;
+  if (key === TREND_STORAGE_KEY && EMBED_TREND !== null) return EMBED_TREND;
+  if (key === LOG_SCALE_STORAGE_KEY && EMBED_LOG !== null) return EMBED_LOG;
+  try {
+    const saved = localStorage.getItem(key);
+    return saved === null ? fallback : saved === '1';
+  } catch { return fallback; }
+}
+function writeSavedSwitch(key, on) {
+  if (EMBED) return;
+  try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* storage unavailable */ }
+}
+
+// Metric filters: keep days whose open and whose close, both vs the previous
+// session's close, fall inside brushed ranges. Each metric is a
+// small histogram over all days with the same number of bins, spanning the
+// metric's full extent rounded to 0.1%. The brush starts at the full extent,
+// handles showing, so the control reads as a range from the first look; at
+// the full extent nothing is filtered. The latest day is never filtered out:
+// it is the reference the similar-days filter compares against. Each brush
+// is saved; a bound at an extreme is saved as 'edge' so it keeps following
+// the data.
+const METRICS = {
+  open: { value: d => d.openVsPrevPct },
+  close: { value: d => d.closeVsPrevPct },
+};
+const METRIC_STEP = 0.1;
+const METRIC_BINS = 30;
+const HANDLE_LABEL_GAP = 6;              // px kept between a histogram's two bound labels
+// A fund's own ranges, since the moves differ in size; TQQQ keeps the keys it had. The fund is the one the
+// histogram was set up for, so a brush moved while another fund is loading is still saved under its own.
+const metricStorageKey = (key, fund) => `tqqq-intraday-metric-${key}${fund === DEFAULT_TICKER ? '' : '-' + fund}`;
+function readSavedRange(key, fund) {
+  try { return JSON.parse(localStorage.getItem(metricStorageKey(key, fund))) || {}; } catch { return {}; }
+}
+function writeSavedRange(key, fund, range) {
+  try { localStorage.setItem(metricStorageKey(key, fund), JSON.stringify(range)); } catch { /* storage unavailable */ }
+}
+
+// One brushable histogram. Returns { pass(day) } for the current range.
+function setupMetricHistogram(key, fund, allDays, onChange) {
+  const block = d3.select(`.metric[data-metric="${key}"]`);
+  const svg = block.select('svg.metric-hist'), rangeLabel = block.select('.metric-range');
+  const round = v => +v.toFixed(1);
+  const values = allDays.map(METRICS[key].value).filter(v => v !== null);
+  const min = round(Math.floor(d3.min(values) / METRIC_STEP) * METRIC_STEP);
+  const max = round(Math.ceil(d3.max(values) / METRIC_STEP) * METRIC_STEP);
+  const state = { lo: min, hi: max };
+
+  // Measured after layout, then pinned, so the brush extent and the bars
+  // always agree with the box even if the row later reflows.
+  svg.selectAll('*').remove();                       // a data refresh rebuilds the histogram
+  const width = svg.node().clientWidth, height = svg.node().clientHeight;   // inside the frame
+  svg.style('width', `${width + 2}px`).style('flex', 'none');
+  const x = d3.scaleLinear().domain([min, max]).range([0, width]);
+  const bins = d3.bin().domain([min, max]).thresholds(d3.range(1, METRIC_BINS).map(i => min + (max - min) * i / METRIC_BINS))(values);
+  const y = d3.scaleLinear().domain([0, d3.max(bins, b => b.length)]).range([height, 2]);
+  const bars = svg.append('g').attr('class', 'bars').selectAll('rect.bar').data(bins).join('rect').attr('class', 'bar')
+    .attr('x', b => x(b.x0) + 0.5).attr('width', b => Math.max(1, x(b.x1) - x(b.x0) - 1))
+    .attr('y', b => y(b.length)).attr('height', b => height - y(b.length));
+  svg.append('line').attr('class', 'zero').attr('x1', x(0)).attr('x2', x(0)).attr('y1', 0).attr('y2', height);
+  const brush = d3.brushX().extent([[0, 0], [width, height]]).handleSize(6);
+  const brushG = svg.append('g').attr('class', 'brush').call(brush);
+  const handleLabels = svg.append('g').attr('class', 'handle-labels');
+  const fullRange = () => [x(min), x(max)];
+  svg.on('dblclick', () => brushG.call(brush.move, fullRange()));
+
+  const apply = selection => {
+    // A cleared brush (dragging it away) means the full range again.
+    if (!selection) { brushG.call(brush.move, fullRange()); return; }
+    const [a, b] = selection.map(v => round(x.invert(v)));
+    state.lo = a; state.hi = b;
+    const active = a > min || b < max;
+    bars.classed('in', bin => !active || (bin.x1 > a && bin.x0 < b));
+    rangeLabel.text(active ? '' : 'any');
+    // The bounds sit under their handles, centred, then clamped by their
+    // measured width so neither leaves the box and the two never touch: the
+    // lower label yields leftwards, the upper rightwards.
+    const labels = [{ v: a, px: x(a) }, { v: b, px: x(b) }];
+    const texts = handleLabels.selectAll('text.handle-label').data(labels).join('text').attr('class', 'handle-label')
+      .attr('y', height + 3).attr('text-anchor', 'start').text(d => fmtPct(d.v, 1));
+    const widths = texts.nodes().map(n => n.getComputedTextLength());
+    let left0 = Math.max(0, Math.min(width - widths[0], labels[0].px - widths[0] / 2));
+    let left1 = Math.max(0, Math.min(width - widths[1], labels[1].px - widths[1] / 2));
+    const overlap = left0 + widths[0] + HANDLE_LABEL_GAP - left1;
+    if (overlap > 0) {
+      left0 = Math.max(0, left0 - overlap / 2);
+      left1 = Math.min(width - widths[1], left0 + widths[0] + HANDLE_LABEL_GAP);
+      left0 = Math.max(0, Math.min(left0, left1 - widths[0] - HANDLE_LABEL_GAP));   // the upper may have hit the edge
+    }
+    texts.attr('x', (d, i) => i === 0 ? left0 : left1);
+    writeSavedRange(key, fund, { lo: a > min ? a : 'edge', hi: b < max ? b : 'edge' });
+    onChange();
+  };
+  brush.on('brush end', event => { if (event.sourceEvent || event.type === 'end') apply(event.selection); });
+
+  const saved = readSavedRange(key, fund);
+  brushG.call(brush.move, [x(typeof saved.lo === 'number' ? Math.max(min, saved.lo) : min), x(typeof saved.hi === 'number' ? Math.min(max, saved.hi) : max)]);
+
+  state.pass = d => { const v = METRICS[key].value(d); return v !== null && v >= state.lo && v <= state.hi; };
+  return state;
+}
+
+function setupMetricFilters(fund, allDays, latestId, onChange) {
+  const filters = Object.keys(METRICS).map(key => setupMetricHistogram(key, fund, allDays, onChange));
+  return { filter: days => days.filter(d => d.id === latestId || filters.every(f => f.pass(d))) };
+}
+
+// Similar-days control: just the toggle. With nothing saved it starts on
+// while a session is open, when "days like today so far" is the question,
+// and off outside market hours, when the reference would be a finished day.
+function setupSimilarFilter(onChange) {
+  const state = { on: readSavedSwitch(SIMILAR_STORAGE_KEY, marketMinuteNow() !== null) };
+  d3.select('#toggle-similar').property('checked', state.on).on('change', function () {
+    state.on = this.checked;
+    writeSavedSwitch(SIMILAR_STORAGE_KEY, state.on);
+    onChange();
+  });
+  return state;
+}
+
+// Same-trend control: the toggle, off until switched on. Its tooltip says
+// what counts as the same trend and names the latest day's. A latest day
+// with too little history before it has no state to match, so the toggle is
+// switched off and greyed.
+function setupTrendFilter(latest, onChange) {
+  const marketState = latest.marketState;
+  const state = { on: !!marketState && readSavedSwitch(TREND_STORAGE_KEY, false) };
+  d3.select('#trend-switch').classed('unavailable', !marketState).attr('title', marketState
+    ? `Days that opened like today: ${ticker} ${marketState.trend === 'up' ? 'above' : 'below'} its ${TREND_DAYS}-day average, ${marketState.volatility} volatility over the ${VOLATILITY_DAYS} days before.`
+    : `Needs ${TREND_DAYS + 1} days of history.`);
+  d3.select('#toggle-trend').property('checked', state.on).property('disabled', !marketState).on('change', function () {
+    state.on = this.checked;
+    writeSavedSwitch(TREND_STORAGE_KEY, state.on);
+    onChange();
+  });
+  return state;
+}
+
+// The weekday bars' statistic: the mean, or the median with the switch on.
+// The block's name says which.
+function setupWeekdayStat(onChange) {
+  const input = d3.select('#toggle-weekday-median');
+  // With nothing saved, or storage blocked, the switch keeps what it shows: off at first, and its own state on the page's later data refreshes.
+  const state = { median: readSavedSwitch(WEEKDAY_MEDIAN_STORAGE_KEY, input.property('checked')) };
+  const showName = () => d3.select('#weekday-name').text(`${state.median ? 'Median' : 'Average'} close by weekday`);
+  input.property('checked', state.median).on('change', function () {
+    state.median = this.checked;
+    writeSavedSwitch(WEEKDAY_MEDIAN_STORAGE_KEY, state.median);
+    showName();
+    onChange();
+  });
+  showName();
+  return state;
+}
+
+// One chart for the page's life; every load, first or refresh, rebuilds the
+// controls and data around it. The controls read their saved state on each
+// setup, so a refresh keeps the period, the brushes and the toggle as they
+// were, with edge-pinned thumbs following the new data.
+const chart = new IntradayOverlayChart().container('#chart')
+  .minuteOffset(localOffsetFromMarket()).zoneLabel(shortZoneName(LOCAL_TZ));
+// The weekday bars under it, over the days it draws. The desktop widget
+// shows the chart alone, so embedded they are neither shown nor drawn.
+const weekdayChart = new WeekdayBarChart().container('#weekday-chart');
+// Embedded, the chart is as tall as its frame (the width already follows the
+// container through setDynamicContainer), with no row under the axis for the
+// hidden scale button, a label gutter on the right just wide enough for the
+// mean / median names at the embed's 9.5px type, and its plot top level with
+// the signal chart's beside it in the widget.
+if (EMBED) {
+  chart.marginTop(12).marginBottom(20).marginRight(44).marginLeft(44);
+  chart.svgHeight(window.innerHeight);
+  window.addEventListener('resize', () => { chart.svgHeight(window.innerHeight); if (chart.data()) chart.render(); });
+}
+
+// On its own the page fits the window with no vertical scroll where it can
+// (the user, 2026-11-22: "make sure it fits 14 inch macbook vertically"): the
+// chart takes the height the rest of the page leaves, the link, the toolbar,
+// the weekday bars and the paddings, between its least and its full height.
+// In a window too short for that the chart stops at its least height and the
+// page scrolls the rest. On a phone or a tablet (a touch-first screen) the
+// chart keeps its full height and the page scrolls, as it always did: a short
+// chart that narrow crowds its notes. The window's size is the layout
+// viewport's, which a pinch zoom leaves alone.
+const CHART_FULL_HEIGHT = chart.svgHeight();
+const CHART_MIN_HEIGHT = 360;
+const TOUCH_FIRST = window.matchMedia('(pointer: coarse)').matches;
+function fitChartToWindow() {
+  const chartBox = document.getElementById('chart');
+  const rest = document.querySelector('.wrap').getBoundingClientRect().height - chartBox.getBoundingClientRect().height;
+  const room = Math.floor(document.documentElement.clientHeight - rest);
+  const height = TOUCH_FIRST ? CHART_FULL_HEIGHT : Math.max(CHART_MIN_HEIGHT, Math.min(CHART_FULL_HEIGHT, room));
+  chartBox.style.minHeight = `${height}px`;   // held before the first draw too, so the page does not jump when the chart arrives
+  chart.svgHeight(height);
+}
+if (!EMBED) {
+  // The bars' room is held before their first draw, so the first fit already counts it.
+  d3.select('#weekday-chart').style('min-height', `${weekdayChart.svgHeight()}px`);
+  fitChartToWindow();
+  // Refit when the window changes, and when the toolbar does: its controls
+  // wrap onto another row in a narrow window or once the web fonts land.
+  const refit = () => { fitChartToWindow(); if (chart.data()) chart.render(); };
+  window.addEventListener('resize', refit);
+  new ResizeObserver(refit).observe(document.querySelector('.toolbar'));
+}
+
+// Log / linear toggle for the y-axis. Log (symmetric, linear inside ±0.1%)
+// is the default; the choice is remembered.
+const scaleToggle = d3.select('#scale-toggle');
+const applyScale = log => {
+  scaleToggle.attr('aria-pressed', log ? 'true' : 'false');
+  chart.yScaleType(log ? 'symlog' : 'linear');
+};
+applyScale(readSavedSwitch(LOG_SCALE_STORAGE_KEY, true));
+scaleToggle.on('click', () => {
+  const log = scaleToggle.attr('aria-pressed') !== 'true';
+  writeSavedSwitch(LOG_SCALE_STORAGE_KEY, log);
+  applyScale(log);
+  chart.render();
+});
+const DATA_REFRESH_MS = QUOTES_PROXY ? 60 * 1000 : 10 * 60 * 1000;   // the proxy's answer is a minute old at most; the pipeline's file, an hour
+
+// Today's 1-minute rows replace that day's 5-minute rows when the file holds
+// the current session, or a day the history has not reached yet. A stale
+// file (last session, on a weekend) is ignored so history stays uniform at
+// 5 minutes. Days are compared on the Date column's own "M/D/YYYY" prefix
+// rather than parsing every one of ~90k history rows.
+const dayOf = r => r.Date.split(' ')[0];
+function mergeTodayRows(history, today) {
+  if (!today.length) return history;
+  const todayDay = dayOf(today[0]);
+  const todayDate = parseStamp(today[0].Date);
+  const lastHistoryDate = parseStamp(history[history.length - 1].Date);
+  const isCurrentSession = fmtIsoDay(todayDate) === marketDateNow();
+  if (!isCurrentSession && d3.timeDay.floor(todayDate) <= d3.timeDay.floor(lastHistoryDate)) return history;
+  return history
+    .filter(r => dayOf(r) !== todayDay)
+    .concat(today.map(r => ({ ...r, barMinutes: TODAY_BAR_MINUTES })));
+}
+
+// Outside the regular session the proxy's quote for the ticker carries `extended`, the latest
+// pre-market, after-hours or overnight print with its change against the close
+// (cloudflare/quotes/README.md): the chart pulses it at its start (drawExtended).
+// Nothing while the session runs, when the chart itself is live, or when the
+// proxy is not configured.
+// Inside the desktop widget (?embed=widget) the page around this one fetches the
+// quotes and hands them over (its tqqq-widget-quotes message, js/widget-page.js),
+// so this chart's print is the one its signal chart and its badge show, from
+// the same moment (the user, 2026-11-06: "they should be the same"); this page
+// then fetches none itself.
+const EXTENDED_SESSION_NAMES = { pre: 'pre-market', post: 'after hours', overnight: 'overnight' };
+let parentQuotes = null;
+if (EMBED) window.addEventListener('message', e => {
+  if (e.source !== window.parent || !e.data) return;
+  // The page around this one holds the keyboard (a press on a chart moves no
+  // focus): its Escape, relayed, clears a kept range here as it does on its own chart.
+  if (e.data.type === 'tqqq-widget-escape') { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); return; }
+  if (e.data.type !== 'tqqq-widget-quotes') return;
+  parentQuotes = e.data.quotes;
+  chart.extended(extendedPrint(parentQuotes));
+  if (chart.getState().data) chart.render();   // drawn already: redraw with the print; else loadData's first render takes it
+});
+function loadLiveQuote() {
+  if (EMBED) return Promise.resolve(parentQuotes);
+  if (!QUOTES_PROXY) return Promise.resolve(null);
+  return fetch(`${QUOTES_PROXY}/quotes?symbols=${ticker}`, { cache: 'no-store' })
+    .then(r => { if (!r.ok) throw new Error('The quotes proxy answered HTTP ' + r.status); return r.json(); })
+    .catch(err => { console.warn('Live quote unavailable:', err); return null; });
+}
+function extendedPrint(quotes) {
+  const q = quotes && quotes.quotes && quotes.quotes[ticker], x = q && q.extended;
+  if (!x || !(x.price > 0) || typeof x.changePct !== 'number' || !(x.session in EXTENDED_SESSION_NAMES)) return null;
+  return { session: x.session, price: x.price, changePct: x.changePct };
+}
+
+// The ticker's name where the page shows it: the tab's title, the dropdown,
+// and the address, so a copied link opens on the same fund.
+const PAGE_TITLE = document.title.replace(DEFAULT_TICKER, '').trim();   // "intraday — every day's % path from the open"
+function showTicker() {
+  document.title = `${ticker} ${PAGE_TITLE}`;
+  d3.select('#select-ticker').property('value', ticker);
+  if (EMBED) return;
+  const address = new URL(location.href);
+  if (ticker === DEFAULT_TICKER) address.searchParams.delete('ticker'); else address.searchParams.set('ticker', ticker);
+  window.history.replaceState(null, '', address);
+}
+// The dropdown: every fund of the site. A pick is named in the address and
+// loads that fund's days; the axis extent and a kept range belong to the fund
+// left, so both are dropped.
+function setupTickerPick() {
+  d3.select('#select-ticker').on('change', function () {
+    ticker = this.value;
+    showTicker();
+    chart.yLimit(null).rangePinned(null);
+    loadData();
+  }).selectAll('option').data(TICKERS).join('option').attr('value', d => d).text(d => d);
+  showTicker();
+}
+// A fund whose history file the data does not hold, or could not be read:
+// said in the chart's place, with the charts and filters of the fund before
+// it out of sight (null: the history is in, show the page).
+function showHistoryNote(text) {
+  d3.select('.panel').classed('no-history', text !== null);
+  d3.select('#no-data').property('hidden', text === null).text(text || '');
+  if (text !== null) d3.select('#coverage').text('');
+  if (!EMBED) fitChartToWindow();   // the weekday bars' room goes and comes back with the note
+}
+
+function loadData() {
+  const asked = ticker;   // a pick made while these load wins over them
+  return Promise.all([
+    d3.tsv(historyUrl(asked), { cache: 'no-cache' }),
+    // 404 until the day's first pipeline run has written it.
+    d3.tsv(todayUrl(asked), { cache: 'no-cache' }).catch(() => []),
+    loadLiveQuote(),
+  ]).then(([history, today, quotes]) => {
+    if (asked !== ticker) return;
+    drawnTicker = asked;
+    showHistoryNote(null);
+    chart.extended(extendedPrint(quotes));
+    const allDays = withMarketState(buildDays(mergeTodayRows(history, today)));
+    const allPct = allDays.flatMap(d => d.points.map(p => p.pct));
+    // The y extent only ever grows, so a refresh never rescales the plot.
+    chart.yLimit(Math.max(chart.yLimit() || 0, Math.ceil(Math.max(-d3.min(allPct), d3.max(allPct)))));
+    const latestId = allDays[allDays.length - 1].id;
+    let periodDays = allDays;
+
+    const refresh = () => {
+      const inRange = metric.filter(periodDays);
+      // The state to match is the latest day's, whatever the period and the histograms keep.
+      const filtered = trend.on ? sameTrendDays(inRange, allDays[allDays.length - 1]) : inRange;
+      let days = filtered, cutoff = null, reference = null;
+      if (similar.on) {
+        reference = filtered[filtered.length - 1];
+        ({ days, cutoff } = similarDays(filtered, reference));
+      }
+      renderCoverage(days);
+      chart.data(days).aggregates(buildAggregates(days))
+        .referenceId(reference ? reference.id : null).matchCutoff(cutoff)
+        .todayId(latestId)
+        .opacityCount(filtered.filter(d => d.id !== latestId).length)
+        .render();
+      if (!EMBED) weekdayChart.data(buildWeekdayBars(days, weekday.median)).render();
+    };
+    let ready = false;                                 // one render once every control is wired
+    const guarded = () => { if (ready) refresh(); };
+    const metric = setupMetricFilters(asked, allDays, latestId, guarded);
+    const similar = setupSimilarFilter(guarded);
+    const trend = setupTrendFilter(allDays[allDays.length - 1], guarded);
+    const weekday = setupWeekdayStat(guarded);
+    setupPeriodSlider(allDays, days => { periodDays = days; guarded(); });
+    ready = true;
+    refresh();
+  }, error => {
+    if (asked !== ticker) return;
+    // A refresh of the fund on screen that failed (a dropped connection) leaves its chart up; the next one asks again.
+    if (drawnTicker === asked) { console.warn(`${asked}'s 5-minute history did not refresh:`, error); return; }
+    // A fund the data refresh has not written a file for yet answers 404; the page's timer asks again each refresh.
+    showHistoryNote(/^404\b/.test(error.message)
+      ? `No 5-minute history for ${asked} in the data yet. It arrives with the next data refresh.`
+      : `${asked}'s 5-minute history did not load: ${error.message}`);
+  });
+}
+
+setupTickerPick();
+loadData().then(() => {
+  setInterval(() => { if (chart.data()) chart.drawNow(); }, NOW_REFRESH_MS);   // nothing to mark until a first load has drawn the chart
+  setInterval(loadData, DATA_REFRESH_MS);            // the pipeline appends bars through the day
+});
+</script>
+</body>
+</html>

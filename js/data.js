@@ -16,10 +16,170 @@ function parseDataFile(text) {
 // string (the old `?v=baked`) just pinned every browser to a stale copy.
 // `cache: 'no-cache'` revalidates on each load: a few bytes for a 304 when the
 // file is unchanged, fresh bytes the moment the cron publishes new data.
-async function loadSeries(file) {
-  const resp = await fetch('data/' + file, { cache: 'no-cache' });
+// Where the data files live: beside the page, unless the page sets
+// window.TQQQ_DATA_BASE first (the desktop widget's local copy of widget.html
+// reads the live site's files).
+const DATA_BASE = (typeof window !== 'undefined' && window.TQQQ_DATA_BASE) || '';
+async function fetchDataText(file) {
+  const resp = await fetch(DATA_BASE + 'data/' + file, { cache: 'no-cache' });
   if (!resp.ok) throw new Error('Failed to load ' + file + ' (HTTP ' + resp.status + ')');
-  return parseDataFile(await resp.text());
+  return resp.text();
+}
+async function loadSeries(file) { return parseDataFile(await fetchDataText(file)); }
+
+// When the data files were last refreshed: data/last-updated.txt, a UTC stamp
+// the update workflow writes in the same commit as the data it describes.
+async function loadDataFetchedAt() {
+  const text = (await fetchDataText('last-updated.txt')).trim();
+  const stamp = new Date(text);
+  if (Number.isNaN(stamp.getTime())) throw new Error('data/last-updated.txt holds no date: "' + text + '"');
+  return stamp;
+}
+
+// The data's latest row is a day still trading when the refresh that wrote it
+// came on that day, before the close in New York: its price is the price so
+// far, not a close. Returns the minutes from that refresh to the close, or
+// null when the row holds a close. A half day (a 1 pm close) still reads as
+// trading until the refresh after 4 pm.
+const MARKET_CLOSE_NY_MIN = 16 * 60;
+const NY_CLOCK = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+function minutesBeforeClose(lastDate, fetchedAt) {
+  if (!(fetchedAt instanceof Date)) return null;
+  const part = Object.fromEntries(NY_CLOCK.formatToParts(fetchedAt).map(p => [p.type, p.value]));
+  const nyDate = `${part.year}-${part.month}-${part.day}`, nyMin = +part.hour * 60 + +part.minute;
+  return nyDate === lastDate && nyMin < MARKET_CLOSE_NY_MIN ? MARKET_CLOSE_NY_MIN - nyMin : null;
+}
+
+// Live prices from the quotes proxy (cloudflare/quotes, a Cloudflare Worker that
+// answers this site and localhost only). The committed files carry each fund up to
+// the last hourly refresh; the proxy carries the price now, 1-2 seconds behind the
+// tape and cached a minute. applyLiveQuotes lays them over the last daily row, or
+// appends today's row when the files have none yet, and keeps the day's highs and
+// lows in step for the Monday rule. One guard per fund: Yahoo's prior close must
+// agree with the file's close before that day, or the two are on different
+// adjustment bases (a split, as SOXX on 2026-11-05) and the fund keeps the file's
+// price. The intraday page keeps its own copy of the URL (experiments/tqqq-intraday.html).
+const QUOTES_PROXY = 'https://tqqq-quotes.infoicy.workers.dev';
+const LIVE_FUNDS = ['tqqq', 'qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'];
+const LIVE_PREV_CLOSE_TOLERANCE = 0.03;
+// Outside the regular session a quote carries `extended`: the fund's latest
+// pre-market, after-hours or overnight print, its time and its change against
+// the close (the proxy's README). The names the pages give the sessions.
+const EXTENDED_SESSION_NAMES = { pre: 'pre-market', post: 'after hours', overnight: 'overnight' };
+async function loadLiveQuotes() {
+  const resp = await fetch(QUOTES_PROXY + '/quotes', { cache: 'no-store' });
+  if (!resp.ok) throw new Error('The quotes proxy answered HTTP ' + resp.status);
+  return resp.json();
+}
+// New York's regular session by the clock: a weekday, 09:30 to 16:00 (holidays
+// included; the feed's own trade time tells those apart).
+function nyInSession(now = new Date()) {
+  const part = Object.fromEntries(NY_CLOCK.formatToParts(now).map(p => [p.type, p.value]));
+  const weekday = new Date(`${part.year}-${part.month}-${part.day}T12:00:00Z`).getUTCDay();
+  const nyMin = +part.hour * 60 + +part.minute;
+  return weekday >= 1 && weekday <= 5 && nyMin >= 9 * 60 + 30 && nyMin < MARKET_CLOSE_NY_MIN;
+}
+// A live time that lags the clock by more than five minutes while New York is in
+// session: the quote feed has stalled (Yahoo froze for over an hour on 2026-11-05).
+// Outside session hours an old time is the last close and normal.
+const LIVE_STALL_MS = 5 * 60 * 1000;
+function liveStalled(asOf, now = new Date()) {
+  return nyInSession(now) && now.getTime() - asOf.getTime() > LIVE_STALL_MS;
+}
+// The New York weekday of a close, for the header's "(Friday's close)".
+const NY_WEEKDAY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+function nyDateOf(d) {
+  const part = Object.fromEntries(NY_CLOCK.formatToParts(d).map(p => [p.type, p.value]));
+  return `${part.year}-${part.month}-${part.day}`;
+}
+// Returns null when no fund took a live price; else { date, asOf, applied, skipped, appended, extended }.
+// highLowRows: the raw [date, high, low, close] rows per Monday-rule fund, updated in place.
+// extended: the funds' latest extended-hours prints, { session, time, prints: { tqqq: { session,
+// price, time, changePct }, ... } } with the latest print's session and time, for the funds whose
+// regular price applied (a fund on another basis is off in both); null when none printed. The
+// rows never take these prints: a strategy reads closes, and the print is named beside them.
+function applyLiveQuotes(dailyArr, highLowRows, live) {
+  const quotes = (live && live.quotes) || {};
+  let asOf = null;
+  for (const fund of LIVE_FUNDS) {
+    const q = quotes[fund.toUpperCase()];
+    if (q && q.price > 0 && q.time) { const t = new Date(q.time); if (!Number.isNaN(t.getTime()) && (!asOf || t > asOf)) asOf = t; }
+  }
+  if (!asOf || !dailyArr.length) return null;
+  const date = nyDateOf(asOf), last = dailyArr[dailyArr.length - 1];
+  if (date < last.date) return null;   // the files are newer than the quotes
+  const appended = date > last.date;
+  const row = appended ? { ...last, date } : last;
+  if (appended) dailyArr.push(row);
+  const prev = dailyArr[dailyArr.length - 2];
+  const applied = [], skipped = [];
+  for (const fund of LIVE_FUNDS) {
+    const q = quotes[fund.toUpperCase()];
+    if (!q || !(q.price > 0)) { skipped.push({ fund, why: 'no quote' }); continue; }
+    if (nyDateOf(new Date(q.time)) !== date) { skipped.push({ fund, why: 'its latest trade is from ' + nyDateOf(new Date(q.time)) }); continue; }
+    const fileClose = prev ? prev[fund] : 0;
+    if (!(fileClose > 0) || !(q.prevClose > 0) || Math.abs(q.prevClose / fileClose - 1) > LIVE_PREV_CLOSE_TOLERANCE) {
+      skipped.push({ fund, why: "Yahoo's prior close " + q.prevClose + " against the file's " + fileClose + ', another adjustment basis' });
+      continue;
+    }
+    row[fund] = q.price;
+    applied.push(fund);
+    const rows = highLowRows && highLowRows[fund];
+    if (rows) {
+      const hl = [date, q.high > 0 ? q.high : q.price, q.low > 0 ? q.low : q.price, q.price], k = rows.length - 1;
+      if (k >= 0 && rows[k][0] === date) rows[k] = hl; else if (k < 0 || rows[k][0] < date) rows.push(hl);
+    }
+  }
+  if (!applied.length) { if (appended) dailyArr.pop(); return null; }
+  let extended = null;
+  for (const fund of applied) {
+    const x = quotes[fund.toUpperCase()].extended;
+    if (!x || !(x.price > 0) || !x.time || !(x.session in EXTENDED_SESSION_NAMES)) continue;
+    if (!extended) extended = { session: x.session, time: x.time, prints: {} };
+    else if (Date.parse(x.time) > Date.parse(extended.time)) { extended.session = x.session; extended.time = x.time; }
+    extended.prints[fund] = { session: x.session, price: x.price, time: x.time, changePct: x.changePct };
+  }
+  return { date, asOf, applied, skipped, appended, extended };
+}
+
+// One colour per fund, wherever a fund's own series draws: the main chart's
+// Buy & Hold line, a signal chart's line named after the fund ("TQQQ price",
+// "SPY 430-day return"; js/signal-chart.js fundOfLine) on the site and in the
+// desktop widget. TQQQ keeps the red its Buy & Hold line has always had; the
+// rest were picked against the signal chart's level palette (js/signal-chart.js
+// CUSTOM_MINI_COLORS) with js/utils.js colorSeparation, so a fund's line and
+// the levels beside it stay apart as seen and in colour-blind views (OKLab ΔE
+// 15 and 6, the dataviz validator's floors), as do the funds that share a
+// panel in the library (SPY and QQQ). TQQQ beside SPY or GLD is a red/green
+// pair, told apart by the end labels.
+const FUND_COLORS = { tqqq: '#ff2d2e', qqq: '#0b6399', spy: '#00b929', qld: '#7c3aed', sso: '#c026d3', spxl: '#be185d', sqqq: '#7f1d1d', gld: '#a16207', soxl: '#e8890b', soxx: '#0ea5e9' };
+
+// Daily highs and lows (data/<fund>-hl.tsv, written by scripts/update_data.py) of the
+// funds the Turnaround Monday rule can read. A row also carries its bar's own
+// close, and a high or low goes onto the price file's close of that day as a
+// ratio to it, so a difference in dividend adjustment between the two files
+// cannot move it. NaN on days without a real bar: TQQQ before 2010-02-11, QQQ
+// before 1999-03-10, SPY before 1993-01-29.
+const HIGH_LOW_FUNDS = ['tqqq', 'qqq', 'spy'];
+let highLowDaily = null; // populated by init()
+function parseHighLowFile(text) {
+  return text.trim().split(/\r?\n/).slice(1).map(line => {
+    const [dateStr, high, low, close] = line.split('\t');
+    const [m, d, y] = dateStr.split(' ')[0].split('/');
+    return [y + '-' + m.padStart(2, '0') + '-' + d.padStart(2, '0'), +high, +low, +close];
+  });
+}
+async function loadHighLow(fund) { return parseHighLowFile(await fetchDataText(fund + '-hl.tsv')); }
+// { tqqqHigh, tqqqLow, qqqHigh, qqqLow, spyHigh, spyLow }, aligned to dailyArr.
+function buildHighLowDaily(dailyArr, rowsByFund) {
+  const out = {};
+  for (const f of HIGH_LOW_FUNDS) {
+    const byDate = new Map(rowsByFund[f].map(r => [r[0], r]));
+    const onClose = col => dailyArr.map(d => { const r = byDate.get(d.date); return r && r[3] > 0 && d[f] > 0 ? d[f] * r[col] / r[3] : NaN; });
+    out[f + 'High'] = onClose(1);
+    out[f + 'Low'] = onClose(2);
+  }
+  return out;
 }
 
 async function loadQQQDaily()  { return loadSeries('synthetic-qqq.tsv'); }
@@ -30,19 +190,25 @@ async function loadSPYDaily()  { return loadSeries('spy.tsv'); }
 async function loadSSODaily()  { return loadSeries('synthetic-sso.tsv'); }
 async function loadSPXLDaily() { return loadSeries('synthetic-spxl.tsv'); }
 async function loadSQQQDaily() { return loadSeries('synthetic-sqqq.tsv'); }
+async function loadGLDDaily()  { return loadSeries('synthetic-gld.tsv'); }
+async function loadSOXLDaily() { return loadSeries('synthetic-soxl.tsv'); }
+async function loadSOXXDaily() { return loadSeries('synthetic-soxx.tsv'); }
 
 // Merge daily TSVs by date. The synthetic TSVs already contain synthesized
-// pre-inception rows (baked by update_data.py), so this is a straight join —
+// pre-inception rows (baked by scripts/update_data.py), so this is a straight join —
 // no synthesis here. monthlyData column layout:
-//   [date, tqqq, qqq, spy, qld, sso, spxl]   (cols 0..6); sqqq rides on the
-//   daily objects only (custom strategies read it by name, not by column).
-function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily, sqqqDaily) {
+//   [date, tqqq, qqq, spy, qld, sso, spxl, sqqq, gld, soxl, soxx]   (cols
+//   0..10, the order of js/simulate.js COL_TO_DAILY_KEY).
+function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily, sqqqDaily, gldDaily, soxlDaily, soxxDaily) {
   const tqqqMap = new Map(tqqqDaily.map(d => [d[0], d[1]]));
   const spyMap  = new Map(spyDaily.map(d => [d[0], d[1]]));
   const qldMap  = qldDaily  ? new Map(qldDaily.map(d  => [d[0], d[1]])) : null;
   const ssoMap  = ssoDaily  ? new Map(ssoDaily.map(d  => [d[0], d[1]])) : null;
   const spxlMap = spxlDaily ? new Map(spxlDaily.map(d => [d[0], d[1]])) : null;
   const sqqqMap = sqqqDaily ? new Map(sqqqDaily.map(d => [d[0], d[1]])) : null;
+  const gldMap  = gldDaily  ? new Map(gldDaily.map(d  => [d[0], d[1]])) : null;
+  const soxlMap = soxlDaily ? new Map(soxlDaily.map(d => [d[0], d[1]])) : null;
+  const soxxMap = soxxDaily ? new Map(soxxDaily.map(d => [d[0], d[1]])) : null;
   const result = [];
   for (const [date, qqqPrice] of qqqDaily) {
     const tqqqPrice = tqqqMap.get(date);
@@ -56,8 +222,24 @@ function buildDaily(qqqDaily, tqqqDaily, spyDaily, qldDaily, ssoDaily, spxlDaily
         sso:  ssoMap  ? (ssoMap.get(date)  || 0) : 0,
         spxl: spxlMap ? (spxlMap.get(date) || 0) : 0,
         sqqq: sqqqMap ? (sqqqMap.get(date) || 0) : 0,
+        gld:  gldMap  ? (gldMap.get(date)  || 0) : 0,
+        soxl: soxlMap ? (soxlMap.get(date) || 0) : 0,
+        soxx: soxxMap ? (soxxMap.get(date) || 0) : 0,
       });
     }
+  }
+  // A fund with no close on a day gets the nearest one it has: the last known
+  // close after a day it lags (the hourly refresh lands one file at a time;
+  // a lagging GLD file drew it at -100% on 2026-11-04), and the first known
+  // close before its history starts (no committed file needs that since
+  // synthetic-soxl.tsv and synthetic-soxx.tsv reached 1953 on 2026-11-10;
+  // data/README.md). So a 0 reaches an engine only for a fund with no data at
+  // all, and a price before a fund's first row is flat, never 0.
+  for (const key of ['spy', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx']) {
+    let last = 0;
+    for (const row of result) { if (row[key] > 0) last = row[key]; else if (last > 0) row[key] = last; }
+    const first = result.find(row => row[key] > 0);
+    if (first) for (const row of result) { if (row[key] > 0) break; row[key] = first[key]; }
   }
   return result;
 }
@@ -105,6 +287,14 @@ function getMonth(dateStr) {
   return dateStr.substring(0, 7);
 }
 
+// Each quarter's or month's last daily row as [date, tqqq, qqq, spy, qld, sso,
+// spxl, sqqq, gld, soxl, soxx]: the page's quarterlyData and monthlyData (js/init.js), and the
+// same rows the code version of the SMA strategy rebuilds in its sandbox
+// (js/strategy-library-code.js smaStrategyCode).
+function periodRows(daily, periodFn) {
+  return lastOfPeriod(daily, periodFn).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.gld, d.soxl, d.soxx]);
+}
+
 function getYear(dateStr) {
   return dateStr.substring(0, 4);
 }
@@ -121,6 +311,22 @@ function getWeek(dateStr) {
   const week = 1 + Math.round((diff - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
   return d.getUTCFullYear() + '-W' + String(week).padStart(2, '0');
 }
+
+// The rebalance periods by the names the 9sig period setting uses.
+const PERIOD_KEY_BY_NAME = { weekly: getWeek, monthly: getMonth, quarterly: getQuarter, yearly: getYear };
+// The weekday after a date: the next trading day as far as the calendar can
+// tell, for the day past the data's end.
+function nextWeekday(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  do d.setUTCDate(d.getUTCDate() + 1); while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+  return d.toISOString().slice(0, 10);
+}
+// Whether the data's latest day closes its period (a PERIOD_KEY_BY_NAME
+// function) by the calendar. The engines take the latest day as its period's
+// end either way; when it is not, a trade there is the one the rule would
+// make if the period ended today. A period whose last weekday is a holiday
+// is closed a day late, once the next row exists.
+function closesPeriod(dateStr, periodFn) { return periodFn(nextWeekday(dateStr)) !== periodFn(dateStr); }
 
 // Period-name → trading days per period. Used both for envelope-shift sizing
 // (how many "rebalance-day-of-period" variants to render) and for the simulate
@@ -146,7 +352,7 @@ let monthlyByQuarter = null;
 // for the named period. Mirrors the existing monthlyData / quarterlyData
 // shape — same columns, same date format. Called once after `daily` loads.
 function buildPeriodData(periodFn) {
-  return lastOfPeriod(daily, periodFn).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
+  return lastOfPeriod(daily, periodFn).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.gld, d.soxl, d.soxx]);
 }
 
 // Build the months-in-period index for the given periodData. monthsInPeriod[i]
@@ -226,7 +432,7 @@ function buildEnvelopeQData(period, dayOffset, entryDate, exitDate) {
   if (entryDailyIdx == null) return [];
   const periodDays = PERIOD_DAYS[period] || 63;
   const entryD = daily[entryDailyIdx];
-  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq];
+  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.gld, d.soxl, d.soxx];
   const result = [rowFor(entryD)];
   let dailyIdx = entryDailyIdx + Math.max(1, dayOffset);
   while (dailyIdx < daily.length) {
@@ -251,7 +457,7 @@ function buildExactRangeQData(period, entryDate, exitDate) {
   const xIdx = dailyDateToIdx.get(exitDate);
   if (eIdx == null || xIdx == null || eIdx >= xIdx) return [];
   const src = (periodDataByName && periodDataByName[period]) || quarterlyData;
-  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq];
+  const rowFor = (d) => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.gld, d.soxl, d.soxx];
   const result = [rowFor(daily[eIdx])];
   for (const p of src) { if (p[0] > entryDate && p[0] < exitDate) result.push(p); }
   result.push(rowFor(daily[xIdx]));
@@ -302,12 +508,13 @@ function rollingSMA(values, window) {
   return out;
 }
 
-// Wilder-smoothed RSI. Returns array of RSI values per daily index, null
-// until enough history accumulates. Default window 10 trading days — matches
-// the "TFTLT" Reddit strategy's overheat threshold convention.
-function rollingRSI(values, window) {
-  const out = new Array(values.length).fill(null);
-  if (values.length < window + 1) return out;
+// Wilder-smoothed average gain and loss per daily index, null until enough
+// history accumulates: what rollingRSI reads its RSI from, and where the
+// signal chart's RSI level lines start (js/strategy-library-code.js's
+// rsiLevel takes yesterday's pair).
+function wilderAverages(values, window) {
+  const ag = new Array(values.length).fill(null), al = new Array(values.length).fill(null);
+  if (values.length < window + 1) return { ag, al };
   let gainSum = 0, lossSum = 0;
   for (let i = 1; i <= window; i++) {
     const d = values[i] - values[i-1];
@@ -315,7 +522,7 @@ function rollingRSI(values, window) {
   }
   let avgGain = gainSum / window;
   let avgLoss = lossSum / window;
-  out[window] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+  ag[window] = avgGain; al[window] = avgLoss;
   for (let i = window + 1; i < values.length; i++) {
     const d = values[i] - values[i-1];
     const g = d > 0 ? d : 0;
@@ -323,9 +530,16 @@ function rollingRSI(values, window) {
     // Wilder's smoothing: prior average × (window-1) + new value, all over window.
     avgGain = (avgGain * (window - 1) + g) / window;
     avgLoss = (avgLoss * (window - 1) + l) / window;
-    out[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+    ag[i] = avgGain; al[i] = avgLoss;
   }
-  return out;
+  return { ag, al };
+}
+// Wilder-smoothed RSI. Returns array of RSI values per daily index, null
+// until enough history accumulates. Default window 10 trading days — matches
+// the "TFTLT" Reddit strategy's overheat threshold convention.
+function rollingRSI(values, window) {
+  const { ag, al } = wilderAverages(values, window);
+  return ag.map((g, i) => g == null ? null : al[i] === 0 ? 100 : 100 - (100 / (1 + g / al[i])));
 }
 
 // Build a pair of LAZY, memoizing lookup objects (daily + monthly) for one
@@ -376,7 +590,8 @@ function precomputeSMASeries() {
     qqq:  daily.map(d => d.qqq),  spy:  daily.map(d => d.spy),
     tqqq: daily.map(d => d.tqqq), qld:  daily.map(d => d.qld),
     sso:  daily.map(d => d.sso),  spxl: daily.map(d => d.spxl),
-    sqqq: daily.map(d => d.sqqq),
+    sqqq: daily.map(d => d.sqqq), gld:  daily.map(d => d.gld),
+    soxl: daily.map(d => d.soxl), soxx: daily.map(d => d.soxx),
   };
 
   const sma = makeLazyIndicator(seriesByAsset, toMonthly, rollingSMA);
@@ -384,5 +599,5 @@ function precomputeSMASeries() {
   const rsi = makeLazyIndicator(seriesByAsset, toMonthly, rollingRSI);
   rsiAtDailyByKey = rsi.daily; rsiAtMonthlyByKey = rsi.monthly;
 
-  dailyRows = daily.map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
+  dailyRows = daily.map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq, d.gld, d.soxl, d.soxx]);
 }

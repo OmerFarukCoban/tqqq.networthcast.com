@@ -1,16 +1,26 @@
 // Initialize: load CSV, derive data, set slider max, restore state, render
 (async function init() {
-  let QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, NFCI_WEEKLY;
+  readUiScale();   // the touch type scale (styles.css --ui-scale), before anything draws
+  let QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, GLD_DAILY, SOXL_DAILY, SOXX_DAILY, NFCI_WEEKLY, HIGH_LOW, LIVE;
   try {
-    [QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, NFCI_WEEKLY] = await Promise.all([
+    [QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, GLD_DAILY, SOXL_DAILY, SOXX_DAILY, NFCI_WEEKLY, HIGH_LOW, LIVE] = await Promise.all([
       loadQQQDaily(), loadTQQQDaily(), loadSPYDaily(), loadQLDDaily(), loadSSODaily(), loadSPXLDaily(),
-      // SQQQ is a first-class column (0-filled on failure): every engine
-      // guards zero prices, so a fetch failure degrades SQQQ options to
-      // empty/zero lines instead of blanking the app.
+      // SQQQ, GLD, SOXL and SOXX are first-class columns (0-filled on failure):
+      // every engine guards zero prices, so a fetch failure degrades their
+      // options to empty/zero lines instead of blanking the app.
       loadSQQQDaily().catch(() => []),
+      loadGLDDaily().catch(() => []),
+      loadSOXLDaily().catch(() => []),
+      loadSOXXDaily().catch(() => []),
       // NFCI is a signal series, not a price: on failure the credit-veto
       // strategy sees NaN and the veto never fires — degraded, not broken.
       loadNFCIWeekly().catch(() => []),
+      // Highs and lows decide Turnaround Monday's trades, so like the prices
+      // a failed load stops the page instead of trading on something else.
+      Promise.all(HIGH_LOW_FUNDS.map(loadHighLow)),
+      // The live prices (js/data.js applyLiveQuotes). Without them the page
+      // runs on the files' last refresh and says so in the header's time.
+      loadLiveQuotes().catch(err => { console.error('Live prices unavailable:', err); return null; }),
     ]);
   } catch(e) {
     console.error('Failed to load data:', e);
@@ -25,40 +35,96 @@
     if (spinner) spinner.style.display = 'none';
     return;
   }
-  daily = buildDaily(QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY);
-  nfciDaily = buildNfciDaily(daily, NFCI_WEEKLY);
-  // "Last updated" freshness note in the header subtitle — the actual
-  // wall-clock time the data was last fetched (written by
-  // .github/workflows/update-data.yml into this file in the SAME commit as
-  // the data it describes), not just the most recent trading day the data
-  // covers. `cache: 'no-store'` because this specific file needs to always
-  // reflect the live repo state, unlike the ?v=-busted JS/CSS assets which
-  // only change on a real code deploy.
-  fetch('data/last-updated.txt', { cache: 'no-store' }).then(r => r.ok ? r.text() : null).then(stamp => {
+  daily = buildDaily(QQQ_DAILY, TQQQ_DAILY, SPY_DAILY, QLD_DAILY, SSO_DAILY, SPXL_DAILY, SQQQ_DAILY, GLD_DAILY, SOXL_DAILY, SOXX_DAILY);
+  // Today's live prices over the files' last row (or as a new row before the
+  // first refresh of the day); the Monday rule's highs and lows follow.
+  const highLowRows = Object.fromEntries(HIGH_LOW_FUNDS.map((f, k) => [f, HIGH_LOW[k]]));
+  let live = applyLiveQuotes(daily, highLowRows, LIVE);
+  if (live && live.skipped.length) console.warn('Live prices not applied to ' + live.skipped.map(s => s.fund.toUpperCase() + ' (' + s.why + ')').join(', '));
+  // The time the prices stand at, for the header's note, other "as of" stamps
+  // (a custom strategy's signal-metrics panel) and the signal chart's reading
+  // of a day still trading against a close (minutesBeforeClose): the latest
+  // live trade when the proxy's prices applied, else the files' refresh time
+  // (data/last-updated.txt, written by .github/workflows/update-data.yml in the
+  // same commit as the data it describes). The file is UTC ISO-8601; `new
+  // Date()` parses it and reads back in the viewer's local time zone.
+  const showDataTime = (d, isLive, extended) => {
+    window._dataFetchedAt = d;
     const wrap = document.getElementById('data-through');
     const el = document.getElementById('data-fetched-at');
-    if (!wrap || !el || !stamp) return;
-    // The file is UTC ISO-8601; `new Date()` parses that reliably and its
-    // getDate()/getHours()/etc. read back in the VIEWER'S local time zone —
-    // that conversion is the whole point of fetching a UTC stamp.
-    const d = new Date(stamp.trim());
-    if (Number.isNaN(d.getTime())) return;
+    if (!wrap || !el) return;
     const pad2 = (n) => n < 10 ? '0' + n : '' + n;
-    el.textContent = d.getDate() + ' ' + _LOG_MONTHS[d.getMonth()] + ', ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    // The note after the time: live (or stalled) while New York trades; outside
+    // the session the latest print's session, else the close the time is, by its
+    // New York weekday. The time reads in the viewer's zone, so Friday's 16:00
+    // close is "7 Nov, 01:00" in Tbilisi; "(live)" after it read as stale data
+    // on a Sunday (the user, 2026-11-08: "it's not certainly live").
+    const note = !isLive ? '' : extended ? ' (' + EXTENDED_SESSION_NAMES[extended.session] + ')' : liveStalled(d) ? ' (live, feed stalled)' : nyInSession() ? ' (live)' : ' (' + NY_WEEKDAY.format(d) + "'s close)";
+    el.textContent = d.getDate() + ' ' + _LOG_MONTHS[d.getMonth()] + ', ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + note;
     wrap.removeAttribute('hidden');
-    // Exposed so other "as of" stamps (e.g. a custom strategy's signal-metrics
-    // panel) can show the same fetch time without re-fetching or reformatting.
-    window._dataFetchedAt = d;
-  }).catch(() => {});
-  quarterlyData = lastOfPeriod(daily, getQuarter).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
-  monthlyData = lastOfPeriod(daily, getMonth).map(d => [d.date, d.tqqq, d.qqq, d.spy, d.qld, d.sso, d.spxl, d.sqqq]);
-  dailyDateToIdx = new Map(daily.map((d, i) => [d.date, i]));
-  // Pre-index monthly entries per quarter so simulate()'s hot inner loops
-  // become O(2-3) lookups instead of O(monthlyData.length) scans.
-  precomputePeriodSeries();
-  precomputeMonthlyByQuarter();
-  precomputeSMASeries();
-  recomputeEarliestQIdx();
+  };
+  // The live state the header and the signal chart's price lines read: the
+  // latest print's time, an extended-hours one (pre-market, after hours) when
+  // the proxy carries it, and the funds' extended prints (window._liveExtended).
+  const showLive = (state) => {
+    window._liveExtended = state.extended;
+    showDataTime(state.extended ? new Date(state.extended.time) : state.asOf, true, state.extended);
+  };
+  if (live) showLive(live);
+  loadDataFetchedAt().then(d => {
+    if (live) return;   // the live trade time stands
+    showDataTime(d, false);
+    redrawPanelSignalChart();   // a chart drawn before the stamp arrived is redrawn
+  }).catch(err => console.error(err));
+  // Everything the engines read off the daily rows, rebuilt whenever they change.
+  const deriveFromDaily = () => {
+    nfciDaily = buildNfciDaily(daily, NFCI_WEEKLY);
+    highLowDaily = buildHighLowDaily(daily, highLowRows);
+    quarterlyData = periodRows(daily, getQuarter);
+    monthlyData = periodRows(daily, getMonth);
+    dailyDateToIdx = new Map(daily.map((d, i) => [d.date, i]));
+    // Pre-index monthly entries per quarter so simulate()'s hot inner loops
+    // become O(2-3) lookups instead of O(monthlyData.length) scans.
+    precomputePeriodSeries();
+    precomputeMonthlyByQuarter();
+    precomputeSMASeries();
+    recomputeEarliestQIdx();
+  };
+  deriveFromDaily();
+  // Every minute while the tab is visible: the live prices again, and when one
+  // moved, the derived data, the strategy worker's copy and the chart with it.
+  const startLivePrices = () => setInterval(async () => {
+    if (document.hidden) return;
+    let quotes;
+    try { quotes = await loadLiveQuotes(); } catch (err) { console.error('Live prices unavailable:', err); return; }
+    const before = { ...daily[daily.length - 1] };
+    const next = applyLiveQuotes(daily, highLowRows, quotes);
+    if (!next) return;
+    const last = daily[daily.length - 1];
+    if (!next.appended && LIVE_FUNDS.every(f => last[f] === before[f])) {
+      // No close moved. A newer extended-hours print changes only the header,
+      // the price lines' rows and the end labels' badges: no run reads it.
+      if (JSON.stringify(next.extended) !== JSON.stringify(live.extended)) {
+        live = next;
+        showLive(live);
+        redrawPanelSignalChart();
+        if (chart) chart.update('none');
+      }
+      return;
+    }
+    live = next;
+    const quarters = quarterlyData.length;
+    deriveFromDaily();
+    if (quarterlyData.length !== quarters) {   // a new quarter opened with today's row
+      const exit = document.getElementById('slider-exit'), atEnd = +exit.value === quarters - 1;
+      window._dualRange.setMax(quarterlyData.length - 1);
+      if (atEnd) exit.value = quarterlyData.length - 1;
+    }
+    if (typeof invalidateCustomData === 'function') invalidateCustomData();
+    showLive(live);
+    render();
+    redrawPanelSignalChart();
+  }, 60 * 1000);
   const maxQIdx = quarterlyData.length - 1;
   document.getElementById('slider-exit').value = maxQIdx;
   // Default the entry to Q1 2010 (the TQQQ era — real 3× funds launched then).
@@ -69,8 +135,13 @@
   document.getElementById('slider-entry').value = defaultEntryIdx;
   window._dualRange.setMax(maxQIdx);
 
-  // Restore saved state: URL params > localStorage > defaults
+  // Restore saved state: URL params > localStorage > defaults. The saved
+  // strategies and the transaction history arrive in the fragment (see
+  // SHARE_FRAGMENT_PARAMS in js/controls.js); links made before that carry
+  // them in the query, which is read first and still works.
   const params = new URLSearchParams(window.location.search);
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  SHARE_FRAGMENT_PARAMS.filter(key => fragment.has(key)).forEach(key => params.set(key, fragment.get(key)));
   // A shared link carries the app version it was made with (`v`). Upgrade its
   // params to the current scheme before reading anything, so old links keep
   // resolving correctly. `isSharedLink` (any `v` present) also tells us this
@@ -160,6 +231,18 @@
   const asRaw = params.get('as'), abRaw = params.get('ab');
   if (asRaw && !asRaw.startsWith('cfg:')) analyticsStrategy = asRaw;
   if (abRaw && !abRaw.startsWith('cfg:')) analyticsBaseline = abRaw;
+  // The years-held window's start years; its lines (yk) may name saved
+  // strategies by position and are resolved with as/ab further below.
+  const ykRaw = params.get('yk');
+  if (Object.hasOwn(YEARS_HELD_MEASURES, params.get('ys') || '')) yearsHeldMeasure = params.get('ys');
+  if (params.get('yn')) {
+    const v = parseInt(params.get('yn'), 10);
+    if (Number.isFinite(v) && v > 0) yearsHeldYearMin = v;
+  }
+  if (params.get('yx')) {
+    const v = parseInt(params.get('yx'), 10);
+    if (Number.isFinite(v) && v > 0) yearsHeldYearMax = v;
+  }
   if (params.get('act')) {
     const v = parseAmount(params.get('act'));
     if (Number.isFinite(v) && v > 0) analyticsCustomTarget = v;
@@ -223,6 +306,10 @@
   // Restore set select values directly (no 'change' dispatch) — refresh the
   // preview-dropdown trigger labels so they show the restored values.
   if (typeof window.refreshPreviewTriggers === 'function') window.refreshPreviewTriggers();
+  // Stored custom strategies first, then the link's: both sides of the
+  // duplicate check below must hold the same generation of code (see
+  // upgradeSavedCustomCode in js/saved-configs.js).
+  upgradeSavedCustomCode();
   // Saved strategies carried in a share link (`sc`) — merged in; custom ones
   // are flagged untrusted (their code won't run until the user clicks Run).
   // `scz` is the compressed form (current links); `sc` is the older plain one.
@@ -236,7 +323,8 @@
     else if (sc) { try { json = decodeURIComponent(sc); } catch (e) { json = null; } }
     if (json) {
       try {
-        const arr = JSON.parse(json);
+        const parsed = JSON.parse(json);
+        const arr = Array.isArray(parsed) ? withCurrentCustomCode(expandLibraryShares(parsed)) : parsed;
         importSharedConfigs(arr);
         if (Array.isArray(arr)) _sharedCfgArr = arr;
       } catch (e) {}
@@ -261,6 +349,10 @@
     const resolved = resolveAnalyticsCfgKey(abRaw);
     if (resolved) analyticsBaseline = resolved;
   }
+  if (ykRaw) {
+    // Each line once: the window keys its numbers and its drawing by line.
+    yearsHeldKeys = [...new Set(ykRaw.split(',').map(k => k.startsWith('cfg:') ? resolveAnalyticsCfgKey(k) : k).filter(Boolean))];
+  }
 
   // Real transaction history (js/transactions.js) — a share link's `txz`/`tx`
   // wins over localStorage, same precedence as the `scz`/`sc` saved-configs
@@ -277,6 +369,11 @@
       // A shared link always opens with its transactions active — that's the
       // whole point of sharing it.
       const state = _txStateFromRows(txRows, 'upload');
+      // The day-change strategy the sender picked (`tf`); a saved one is a
+      // position in the shared list, resolved like the analytics keys. One
+      // that doesn't resolve falls back to the default (txFollowKey).
+      const tf = params.get('tf');
+      if (tf) state.follow = tf.startsWith('cfg:') ? resolveAnalyticsCfgKey(tf) : tf;
       window._txSchedule = state;
       window._txScheduleStash = state;
     } else if (typeof loadTransactionsFromStorage === 'function') {
@@ -360,6 +457,8 @@
     // what would have happened live anyway.
     toggleAnalytics({ skipAutoPick: !!(asRaw || abRaw) });
   }
+  // The years-held window, with the link's lines when it carried any.
+  if (params.get('ym') === '1') toggleYearsHeld();
 
   // A pinned chart range-selection (js/chart.js's drag-to-select, held with
   // Shift so it stays visible). Shared as exact dates rather than label
@@ -386,4 +485,5 @@
     const base = params.get('sp');
     if (base && typeof openPanelByKey === 'function') openPanelByKey(base);
   }
+  startLivePrices();
 })();

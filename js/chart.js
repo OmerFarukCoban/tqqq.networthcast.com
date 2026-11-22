@@ -194,11 +194,11 @@ function handleSmaMarkerHover(e) {
 // against both fills and the light background; 'cash' gets neutral gray;
 // unknown/missing held falls back to the old white outline.
 // Hues chosen for maximum pairwise separation at stroke width — vivid
-// blue / orange / purple / cyan / pink / brown / black / slate — and none
-// close to the green/red fills they wrap.
+// blue / orange / purple / cyan / pink / brown / black / gold / teal / periwinkle /
+// slate — and none close to the green/red fills they wrap.
 const ASSET_STROKE = {
   tqqq: '#0040ff', qqq: '#ff8c00', spy: '#a020f0', qld: '#00b3e6',
-  sso: '#ff1493', spxl: '#6d4c2f', sqqq: '#000000', cash: '#5a6472',
+  sso: '#ff1493', spxl: '#6d4c2f', sqqq: '#000000', gld: '#a68f00', soxl: '#00998a', soxx: '#8079d0', cash: '#5a6472',
 };
 // 'TQQQ' / 'tqqq+cash' / 'TQQQ+CASH' → the first known ticker's stroke.
 function assetStrokeFor(held) {
@@ -268,6 +268,14 @@ function chartIndexForPixel(c, px) {
   const v = (xs && typeof xs.getValueForPixel === 'function') ? xs.getValueForPixel(px) : 0;
   const i = Math.round(v);
   return Math.max(0, Math.min(labs.length - 1, Number.isFinite(i) ? i : 0));
+}
+// Trade markers on the main chart follow the signal chart's rule
+// (js/signal-chart.js's MINI_EVENT.marksWithinMs): only on a period under two
+// years. On a longer one they stack into columns over the line; the open
+// panel's signal chart shows the trades as bands there.
+function chartShowsTradeMarks(c) {
+  const labels = c.data.labels;
+  return labels.length > 1 && Date.parse(labels[labels.length - 1]) - Date.parse(labels[0]) < MINI_EVENT.marksWithinMs;
 }
 // Markers cluster wherever trades bunch up (both legs of a switch on one day,
 // or several trades within a few days at nearly the same portfolio value), so
@@ -464,6 +472,37 @@ function roundToSigFigs(v, n) {
   const magnitude = Math.pow(10, n - Math.ceil(Math.log10(Math.abs(v))));
   return Math.round(v * magnitude) / magnitude;
 }
+// Range-select label numbers: exactly three digits shown for every value —
+// "$43.6K", "$775K", "$1.10M", "+52.0%" — so the stacked labels read as one
+// table, instead of the app-wide fmt()'s four figures ("$43.58K") next to a
+// % that drops its trailing zero ("+52%"). Trailing zeros are kept on purpose:
+// the digit count is what keeps the columns lined up.
+function toSigDigits(v, sig) {
+  if (!v) return (0).toFixed(sig - 1);
+  const rounded = roundToSigFigs(v, sig);
+  const decimals = Math.max(0, sig - Math.floor(Math.log10(Math.abs(rounded))) - 1);
+  return rounded.toFixed(decimals);
+}
+const RANGE_MONEY_UNITS = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+function fmtRangeMoney(v, sig = 3) {
+  const sign = v < 0 ? '-' : '';
+  // Round first, then pick the unit: $999,600 at three digits is $1.00M, not $1000K.
+  const abs = roundToSigFigs(Math.abs(v), sig);
+  const unit = RANGE_MONEY_UNITS.find(([scale]) => abs >= scale);
+  return unit ? `${sign}$${toSigDigits(abs / unit[0], sig)}${unit[1]}` : `${sign}$${toSigDigits(abs, sig)}`;
+}
+function fmtRangePct(p, sig = 3) {
+  return toSigDigits(p, sig);
+}
+// The from → to pair gains digits only when both ends would otherwise print
+// as the same value ("$43.6K → $43.6K" says nothing; "$43.58K → $43.62K" does).
+function fmtRangeMoneyPair(v1, v2) {
+  for (let sig = 3; sig < 6; sig++) {
+    const a = fmtRangeMoney(v1, sig), b = fmtRangeMoney(v2, sig);
+    if (a !== b || v1 === v2) return [a, b];
+  }
+  return [fmtRangeMoney(v1, 5), fmtRangeMoney(v2, 5)];
+}
 // How much time a drag-selected range spans, in the coarsest units that
 // still read naturally — "1 year 2 months", "1 month", "1 week", "3 days" —
 // rather than a raw day count. Calendar-aware (years/months come from actual
@@ -491,12 +530,15 @@ function formatRangeDuration(fromDate, toDate) {
 // (nothing to show), and a line missing/non-finite/<=0 data at either
 // endpoint is skipped too (same guard computeDayChange already uses for the
 // day-change badge — reused directly here since the math is identical, just
-// start/end instead of yesterday/today).
+// start/end instead of yesterday/today). A line that can sit at or under zero
+// (`_signed`, the real account's Profit) keeps its change there too: a loss
+// at either end is a value, and it used to drop the line from the readout
+// (the user, 2026-11-11: "percentage change is not visible for profit line").
 function computeRangeChangeByIdx(c, startIdx, endIdx) {
   const out = {};
   c.data.datasets.forEach((ds, i) => {
     if (!ds || ds._isShift || !c.isDatasetVisible(i)) return;
-    const delta = computeDayChange(ds.data[endIdx], ds.data[startIdx]);
+    const delta = (ds._signed ? computeSignedChange : computeDayChange)(ds.data[endIdx], ds.data[startIdx]);
     if (delta) out[i] = delta;
   });
   return out;
@@ -643,7 +685,7 @@ function buildNineSigRulesHtml() {
         &bull; <b>Spike reset.</b> ${spikeRule}
       </div>
 
-      <div style="margin-top:14px;font-size:11px;color:var(--text-muted);line-height:1.5">
+      <div style="margin-top:14px;font-size:calc(11px * var(--ui-scale));color:var(--text-muted);line-height:1.5">
         Monthly contributions always go straight to cash (never directly into ${ul}) — the quarterly rebalance is what moves money into stock. The target rising by half of new cash keeps it honest: half of every dollar you add is "expected" to flow into ${ul} eventually.
       </div>
     </div>
@@ -860,6 +902,13 @@ function smaLogRowInfo(smaLog, i, ulName) {
   return { label, gain, ac };
 }
 
+// Is an smaLog row a trade of the strategy's own ("Strategy trades only" keeps
+// it)? The trades the chart marks, the slices of an eased buy, and an opening
+// row that buys a fund; a contribution and the closing snapshot are neither.
+function smaRowTraded(l) {
+  return l.action in SMA_EVENT_STYLE || l.action === 'DCA-ADD' || (l.action === 'START' && logHoldsFund(l.held || l.state));
+}
+
 // Event-driven log table for the SMA strategy. Shows one row per actual
 // trade (ENTER / EXIT) — not one row per quarter — because SMA only does
 // something when the signal flips. Most quarters would just be noise.
@@ -884,7 +933,7 @@ function buildSmaLogTableHtml(smaLog) {
     const cls = hasMarker ? 'log-row-mk'
               : l.action === 'CONTRIB' ? 'log-row-contrib'
               : l.action === 'DCA-ADD' ? 'log-row-dca' : '';
-    const trAttr = (cls ? ` class="${cls}"` : '') + (hasMarker ? ` data-mkey="${i}"` : '');
+    const trAttr = logRowClassAttr(cls, smaRowTraded(l) ? LOG_TRADE_ROW : '') + (hasMarker ? ` data-mkey="${i}"` : '');
     // Fee paid on this row's trade. Sub-$1 fees keep 2 decimals; $0 shows a dash.
     const feeStr = !l.fee ? '—' : l.fee >= 1 ? fmtFull(Math.round(l.fee)) : '$' + l.fee.toFixed(2);
     // Allocation mix: what % sits in the fund you hold (primary TQQQ or the backup)
@@ -927,7 +976,7 @@ function buildSmaLogTableHtml(smaLog) {
     const yrs = ms / 31557600000; // 365.25 d
     return `<span style="margin-right:16px;white-space:nowrap"><b style="color:var(--text)">${a}</b> ${(ms / holdTot * 100).toFixed(1)}% <span style="opacity:.55">(${yrs >= 1 ? yrs.toFixed(1) + 'y' : Math.round(yrs * 12) + 'mo'})</span></span>`;
   }).join('') : '';
-  const holdSummary = holdChips ? `<div style="font-size:12px;color:var(--text-muted);margin-top:10px"><span style="font-weight:600;color:var(--text);margin-right:8px">Time in each holding:</span>${holdChips}</div>` : '';
+  const holdSummary = holdChips ? `<div style="font-size:calc(12px * var(--ui-scale));color:var(--text-muted);margin-top:10px"><span style="font-weight:600;color:var(--text);margin-right:8px">Time in each holding:</span>${holdChips}</div>` : '';
   const contribToggle = contribCount > 0 ? `
     <label class="log-contrib-toggle">
       <input type="checkbox" onchange="toggleSmaLogContrib(this.checked)" ${_smaLogHideContrib ? 'checked' : ''}>
@@ -938,10 +987,11 @@ function buildSmaLogTableHtml(smaLog) {
       <input type="checkbox" onchange="toggleSmaLogEase(this.checked)" ${_smaLogHideEase ? 'checked' : ''}>
       Hide ease-in slices (${easeCount})
     </label>` : '';
+  const tradeCount = smaLog.filter(smaRowTraded).length;
   return `
-    <div class="log-section">
+    <div class="${logSectionClass(tradeCount)}">
     ${logSectionHeaderHtml('SMA Transaction Log')}
-    <div style="display:flex;gap:16px;flex-wrap:wrap">${contribToggle}${easeToggle}</div>
+    ${logTogglesRowHtml(logTradesToggleHtml(tradeCount), contribToggle, easeToggle)}
     <div class="quarter-table-wrap${_smaLogHideContrib ? ' hide-contrib' : ''}${_smaLogHideEase ? ' hide-dca' : ''}">
       <table>
         <thead>
@@ -1044,7 +1094,8 @@ function buildBuyHoldLogTableHtml(title, log, series, ulName) {
     const type = i === 0 ? 'Initial buy'
                : hasContrib ? (nm[i] > 0 ? 'Monthly investment' : 'Hold')
                : 'Latest';
-    return `<tr${i === last ? ' class="log-latest"' : ''}>
+    // Buy & hold trades once, at the start; every later purchase is new money's.
+    return `<tr${logRowClassAttr(i === last ? 'log-latest' : '', i === 0 ? LOG_TRADE_ROW : '')}>
       <td>${i}</td>
       <td>${fmtLogDate(log[i].date)}</td>
       <td>${type}${latestBadge(i === last)}</td>
@@ -1054,9 +1105,11 @@ function buildBuyHoldLogTableHtml(title, log, series, ulName) {
       <td>${fmtFull(Math.round(s.value || 0))}</td>
     </tr>`;
   }).join('');
+  const tradeCount = 1;   // the initial buy
   return `
-    <div class="log-section">
+    <div class="${logSectionClass(tradeCount)}">
     ${logSectionHeaderHtml(title)}
+    ${logTogglesRowHtml(logTradesToggleHtml(tradeCount))}
     <div class="quarter-table-wrap">
       <table>
         <thead><tr><th># <span class="info-icon" tabindex="0" data-tip="Row number in the full price history (the initial buy is 0). When there are no contributions the table collapses to just the first and last rows, so the numbers can jump.">ⓘ</span></th><th>Date</th><th>Type</th><th>New $</th><th>${ulName} Price</th><th>${ulName} Shares</th><th>Value</th></tr></thead>
@@ -1065,6 +1118,13 @@ function buildBuyHoldLogTableHtml(title, log, series, ulName) {
     </div>
     </div>
   `;
+}
+
+// Is a 9sig log row a trade of the strategy's own ("Strategy trades only"
+// keeps it)? A rebalance that sold, bought or reset after a spike, and the
+// opening purchase; a rebalance that held and the latest snapshot are neither.
+function nineSigRowTraded(l) {
+  return /^(SELL|BUY|RESET)/.test(l.action) || (l.action === 'START' && l.tqqqVal > 0);
 }
 
 function buildLogTableHtml(d) {
@@ -1079,7 +1139,7 @@ function buildLogTableHtml(d) {
     const ac = l.action.startsWith('SELL') ? 'action-sell' : l.action.startsWith('BUY') ? 'action-buy' : 'action-hold';
     const shares = l.price > 0 ? l.tqqqVal / l.price : 0;
     const type = i === 0 ? 'Initial' : 'Rebalance';
-    return `<tr${i === lastIdx ? ' class="log-latest"' : ''}>
+    return `<tr${logRowClassAttr(i === lastIdx ? 'log-latest' : '', nineSigRowTraded(l) ? LOG_TRADE_ROW : '')}>
       <td>${i}</td>
       <td>${fmtLogDate(l.date)}</td>
       <td>${type}${latestBadge(i === lastIdx)}</td>
@@ -1094,9 +1154,11 @@ function buildLogTableHtml(d) {
       <td class="${ac} log-action">${l.action}</td>
     </tr>`;
   }).join('');
+  const tradeCount = d.log.filter(nineSigRowTraded).length;
   return `
-    <div class="log-section">
+    <div class="${logSectionClass(tradeCount)}">
     ${logSectionHeaderHtml('Rebalance Log')}
+    ${logTogglesRowHtml(logTradesToggleHtml(tradeCount))}
     <div class="quarter-table-wrap">
       <table>
         <thead>
@@ -1251,6 +1313,13 @@ function renderStrategyPanelBody(idx) {
     `;
   }
   html += renderStatsGrid(idx);
+  // The signal chart, as custom strategies have one (nativeSignalChart); the
+  // eye on each of its end labels hides that line.
+  const signal = nativeSignalChart(idx);
+  if (signal) {
+    html += `<div class="strategy-panel-section-label" style="margin-top:14px">Signal chart</div>`
+      + buildCustomLinesChartHtml(signal.cfg, signal.lines, signal.log, body.clientWidth, { home: signal.home, holdings: signal.holdings });
+  }
   // 9sig-specific content: log first, then the "explained" rules block
   // (rules are reference material; the live log is what the user usually
   // wants to scan after tweaking the controls).
@@ -1269,6 +1338,9 @@ function renderStrategyPanelBody(idx) {
                    : bhKey === 'sso'  ? _logData.ssoPoints
                    : bhKey === 'spxl' ? _logData.spxlPoints
                    : bhKey === 'sqqq' ? _logData.sqqqPoints
+                   : bhKey === 'gld'  ? _logData.gldPoints
+                   : bhKey === 'soxl' ? _logData.soxlPoints
+                   : bhKey === 'soxx' ? _logData.soxxPoints
                    :                    _logData.bhPoints;
     html += buildBuyHoldLogTableHtml('Buy & Hold Log', _logData.log, bhSeries, bhKey.toUpperCase());
   }
@@ -1297,10 +1369,223 @@ function renderStrategyPanelBody(idx) {
   }
   // Restore any <select> values the DOM moves reverted.
   for (const [s, v] of _selSnap) { if (s.value !== v) s.value = v; }
+  // The Settings header above the controls, read from the restored values:
+  // Fit and Reset to default (js/saved-configs.js).
+  if (PANEL_KEY_BY_IDX[idx] != null && typeof buildNativeSettingsHeaderHtml === 'function') {
+    body.insertAdjacentHTML('afterbegin', buildNativeSettingsHeaderHtml(PANEL_KEY_BY_IDX[idx]));
+  }
   // Preview-dropdown trigger labels read the (now-correct) select values.
   if (typeof window.refreshPreviewTriggers === 'function') window.refreshPreviewTriggers();
   // Restore the pre-rebuild scroll position.
   body.scrollTop = _scrollTop;
+  // Width changes (docking, the divider) redraw the signal chart so its text
+  // stays the right size (js/signal-chart.js's _miniChartResizeObs).
+  if (_miniChartResizeObs && !body._miniObserved) {
+    _miniChartResizeObs.observe(body);
+    body._miniObserved = true;
+  }
+}
+
+// ── Signal charts for the built-in SMA and 9sig panels ─────────────────────
+// The signal chart custom strategies have (js/signal-chart.js), for the two
+// built-in engines, so every strategy in the library shows one, the presets
+// included (SMA 200, 9sig, the overfit rows). The panel's strategy is the one
+// its controls hold: the base line's, or the saved strategy being edited,
+// whose run _logData carries then.
+//   SMA: the signal ticker's daily close, its N-day average and the buffer
+//   lines around it, from the daily arrays the engine itself reads
+//   (dailyRows, smaAtDailyByKey), over the whole history. Each RSI rule is
+//   drawn as the close that would put RSI at its threshold (rsiLevel, as the
+//   library's RSI strategies draw theirs), and the bubble brake as its
+//   ticker's average plus the trigger, with that ticker's own close when it
+//   is not the signal ticker. Then the run's trades, and those of a run on
+//   $10,000 over the years before it, so zooming out shows them too. The
+//   chart rests on the main run's range.
+//   9sig: the fund holding against the signal line, daily. The holding is the
+//   shares each rebalance left times that day's close (the main chart's
+//   drawdown revalues it the same way); the line runs from each rebalance's
+//   target to the next one's. Its trades are the rebalances that bought or
+//   sold.
+// Rows follow the custom log's shape: one per day with the line values and
+// what is held, and a trade row in the chart's vocabulary (buy, sell) with
+// the portfolio value and a note wherever the engine traded.
+const NATIVE_HISTORY_MONEY = 10000;
+// The SMA panel's strategy settings, as render() hands them to the engine.
+function smaPanelOpts() {
+  return {
+    smaAsset: ((document.getElementById('select-sma-asset') || {}).value || 'qqq').toLowerCase(),
+    smaWindow: +((document.getElementById('select-sma-window') || {}).value) || 200,
+    underlyingCol: ulColFromVal((document.getElementById('select-sma-underlying') || {}).value),
+    ...readSmaBaseOpts(),
+  };
+}
+// The panel's ticker as the trade text shows it; cash stays lowercase.
+const _heldName = h => (!h || h === 'cash') ? 'cash' : String(h).toUpperCase();
+// The SMA run over the years before the main run, on $10,000 and no
+// contributions (the chart shows its trades, which follow prices, never its
+// money): its trades before the main run's first day. One run per settings
+// and start, kept until either changes.
+let _smaHistory = { key: null, trades: [] };
+function smaHistoryTrades(o, start) {
+  const key = JSON.stringify(o) + '|' + start;
+  if (_smaHistory.key === key) return _smaHistory.trades;
+  const first = dailyRows[0][0];
+  const r = first < start
+    ? simulateSMA(NATIVE_HISTORY_MONEY, 0, 0, 0, quarterlyData.length - 1, 0, { ...o, entryDateOverride: first, exitDateOverride: start })
+    : null;
+  _smaHistory = { key, trades: r && r.smaLog ? r.smaLog.filter(t => t.date < start) : [] };
+  return _smaHistory.trades;
+}
+// The close each day that would put RSI(w) of a price series at x: from the
+// day before's close and Wilder averages (data.js's wilderAverages, the
+// smoothing the engine's RSI uses). null until the RSI exists. Kept per
+// series, window and threshold, since the whole history is drawn.
+const _rsiLevelCache = new Map();
+function rsiLevelSeries(col, w, x) {
+  const key = col + '|' + w + '|' + x;
+  if (_rsiLevelCache.has(key)) return _rsiLevelCache.get(key);
+  const closes = dailyRows.map(r => r[col]);
+  const { ag, al } = wilderAverages(closes, w);
+  const out = closes.map((_, i) => i > 0 && ag[i - 1] != null ? rsiLevel(closes[i - 1], ag[i - 1], al[i - 1], w, x) : null);
+  _rsiLevelCache.set(key, out);
+  return out;
+}
+// An SMA trade in the chart's vocabulary, with what the lines say about it.
+// The engine logs no reasons, so a note is written only where the day's
+// closes show one: a buy closing over the buy line, a sell under the sell
+// line or with RSI at its overheat level, the bubble brake and its release.
+// Selling to cash is the sell leg of a move; buying the out ticker is its buy
+// leg.
+function smaChartTrade(t, o, price, c, overheat) {
+  const A = o.smaAsset.toUpperCase(), W = o.smaWindow;
+  const kind = t.action === 'ENTER' || t.action === 'BG-CLEAR' ? 'buy'
+    : t.action === 'EXIT' || t.action === 'BG-GTFO' ? (t.held === 'cash' ? 'sell' : 'buy') : null;
+  if (!kind) return null;
+  let note = '';
+  if (t.action === 'BG-GTFO') note = `Bubble brake: ${o.bgAsset.toUpperCase()} ${o.bgGtfoPct}% or more over its ${o.bgWindow || W}-day average`;
+  else if (t.action === 'BG-CLEAR') note = 'Bubble brake off';
+  else if (t.action === 'EXIT' && t.held !== 'cash') note = `Parked in ${_heldName(t.held)} while out`;
+  else if (c != null && kind === 'buy' && price > c * (1 + o.entryBufferPct / 100)) note = `${A} closed over its ${W}-day average${o.entryBufferPct > 0 ? ` +${o.entryBufferPct}%` : ''}`;
+  else if (c != null && kind === 'sell' && price < c * (1 - o.exitBufferPct / 100)) note = `${A} closed under its ${W}-day average${o.exitBufferPct > 0 ? ` -${o.exitBufferPct}%` : ''}`;
+  else if (overheat != null && kind === 'sell' && price >= overheat) note = `RSI(${o.rsiOhWindow}) of ${A} at or over ${o.rsiOverheatThreshold}`;
+  return { action: kind, held: _heldName(t.held), value: t.total, note };
+}
+function smaSignalChart() {
+  const smaLog = _logData && _logData.smaLog;
+  if (!smaLog || smaLog.length < 2 || !dailyRows || !smaAtDailyByKey) return null;
+  const o = smaPanelOpts();
+  const center = smaAtDailyByKey[o.smaAsset + '_' + o.smaWindow];
+  if (!center) return null;
+  const col = SMA_ASSET_COL[o.smaAsset] || SMA_ASSET_COL.qqq;
+  const bgCol = SMA_ASSET_COL[o.bgAsset] || SMA_ASSET_COL.qqq;
+  const bgCenter = o.bgGtfoPct > 0 ? smaAtDailyByKey[o.bgAsset + '_' + (o.bgWindow || o.smaWindow)] : null;
+  const overheat = o.rsiOverheatThreshold > 0 ? rsiLevelSeries(col, o.rsiOhWindow, o.rsiOverheatThreshold) : null;
+  const cool = o.rsiCoolThreshold > 0 ? rsiLevelSeries(col, o.rsiCoolWindow, o.rsiCoolThreshold) : null;
+  // A bubble brake read on another fund gets a panel of its own (a line's
+  // group, js/signal-chart.js): that fund's price against its bubble line.
+  const ownPanel = bgCenter && bgCol !== col;
+  const main = ownPanel ? o.smaAsset.toUpperCase() : undefined, bubble = ownPanel ? o.bgAsset.toUpperCase() : undefined;
+  const lines = [{ key: 'assetPrice', label: `${o.smaAsset.toUpperCase()} price`, group: main }, { key: 'center', label: `${o.smaWindow}-day average`, group: main }];
+  if (o.entryBufferPct > 0) lines.push({ key: 'buyLine', label: `Buy line (+${o.entryBufferPct}%)`, group: main });
+  if (o.exitBufferPct > 0) lines.push({ key: 'sellLine', label: `Sell line (-${o.exitBufferPct}%)`, group: main });
+  if (overheat) lines.push({ key: 'overheatLine', label: `RSI(${o.rsiOhWindow}) ${o.rsiOverheatThreshold}`, group: main });
+  if (cool) lines.push({ key: 'coolLine', label: `RSI(${o.rsiCoolWindow}) ${o.rsiCoolThreshold}`, group: main });
+  if (ownPanel) lines.push({ key: 'bubblePrice', label: `${o.bgAsset.toUpperCase()} price`, group: bubble });
+  if (bgCenter) lines.push({ key: 'bubbleLine', label: `${o.bgAsset.toUpperCase()} bubble line (+${o.bgGtfoPct}%)`, group: bubble });
+  const start = smaLog[0].date, end = smaLog[smaLog.length - 1].date;
+  const trades = smaHistoryTrades(o, start).concat(smaLog);
+  const rows = [];
+  let k = 0, held = 'cash';
+  for (let i = 0; i < dailyRows.length && dailyRows[i][0] <= end; i++) {
+    const date = dailyRows[i][0], price = dailyRows[i][col], c = center[i];
+    const day = {
+      date, assetPrice: price, center: c,
+      buyLine: c != null && o.entryBufferPct > 0 ? c * (1 + o.entryBufferPct / 100) : null,
+      sellLine: c != null && o.exitBufferPct > 0 ? c * (1 - o.exitBufferPct / 100) : null,
+      overheatLine: overheat ? overheat[i] : null,
+      coolLine: cool ? cool[i] : null,
+      bubblePrice: bgCenter && bgCol !== col ? dailyRows[i][bgCol] : null,
+      bubbleLine: bgCenter && bgCenter[i] != null ? bgCenter[i] * (1 + o.bgGtfoPct / 100) : null,
+    };
+    let traded = false;
+    for (; k < trades.length && trades[k].date <= date; k++) {
+      const t = trades[k];
+      held = _heldName(t.held);
+      const trade = t.date === date ? smaChartTrade(t, o, price, c, overheat && overheat[i]) : null;
+      // The bubble brake's trades are marked in its own panel when it has one.
+      if (trade) { rows.push({ ...day, ...trade, ...(bubble && /^BG-/.test(t.action) ? { firedBy: bubble } : {}) }); traded = true; }
+    }
+    if (!traded) rows.push({ ...day, held });
+  }
+  // The engine's control points (date, shares per fund, cash) are the
+  // holdings the chart's tooltip names.
+  return { lines, rows, home: { t0: Date.parse(start), t1: Date.parse(end) }, holdings: _logData.smaControls || null };
+}
+function nineSigSignalChart() {
+  const log = _logData && _logData.log;
+  if (!log || log.length < 2 || !daily || !dailyDateToIdx) return null;
+  const key = COL_TO_DAILY_KEY[ulColFromVal((document.getElementById('select-9sig-underlying') || {}).value)] || 'tqqq';
+  const UL = key.toUpperCase();
+  // Keys apart from a saved 9sig's own sub-series (CONFIG_SUB_DEFS: holding,
+  // target, cash), which share cfg.subShown with these lines' chips.
+  const lines = [{ key: 'sigHolding', label: `${UL} holding` }, { key: 'sigLine', label: 'Signal line' }];
+  const i0 = dailyDateToIdx.get(log[0].date), i1 = dailyDateToIdx.get(log[log.length - 1].date);
+  if (i0 == null || i1 == null) return null;
+  const rows = [], holdings = [];
+  let k = 0;
+  for (let i = i0; i <= i1; i++) {
+    const date = daily[i].date;
+    while (k + 1 < log.length && log[k + 1].date <= date) k++;
+    const r = log[k], next = log[k + 1];
+    const shares = r.price > 0 ? r.tqqqVal / r.price : 0, holding = shares * daily[i][key];
+    const signal = next && r.target > 0 && next.target > 0
+      ? r.target * Math.pow(next.target / r.target, (Date.parse(date) - Date.parse(r.date)) / (Date.parse(next.date) - Date.parse(r.date)))
+      : r.target;
+    // What the chart's tooltip names as the holding: the fund's shares and the
+    // cash on every day, a sell's included (its row is held 'cash' below).
+    holdings.push({ date, cash: r.cash, h: { [key]: shares } });
+    const day = { date, sigHolding: holding, sigLine: signal, held: UL };
+    // The rebalance's own words: "BUY $12.3K", "SELL $8.1K (30d expired)",
+    // "RESET $40K (spike)". A sell's row holds cash, so the trade reads
+    // "Sell TQQQ".
+    const amount = date === r.date ? (String(r.action).match(/\$[^\s)]+/) || [''])[0] : '';
+    const verb = date === r.date ? String(r.action).split(' ')[0] : '';
+    if (verb === 'BUY') rows.push({ ...day, action: 'buy', value: r.total, note: `Bought ${amount} of ${UL}: the holding was under the signal line${/\(part\)/.test(r.action) ? '; cash ran short' : ''}` });
+    else if (verb === 'SELL') rows.push({ ...day, action: 'sell', held: 'cash', value: r.total, note: `Sold ${amount} of ${UL}: the holding was over the signal line${/expired/.test(r.action) ? '; the crash rule\'s skipped sells ran out' : ''}` });
+    else if (verb === 'RESET') rows.push({ ...day, action: 'sell', held: 'cash', value: r.total, note: `Spike reset: ${UL} doubled in a quarter, sold ${amount} back to 60%` });
+    else rows.push(day);
+  }
+  // The engine's last period ends on the data's latest day. Unless the
+  // calendar says that day closes the period, a rebalance there is the one it
+  // would make if the period ended today: projected, so the signal chart
+  // offers no action for it, and its note says so.
+  const period = (document.getElementById('select-9sig-period') || {}).value || 'quarterly';
+  const last = rows[rows.length - 1];
+  if (last.action && last.date === daily[daily.length - 1].date && !closesPeriod(last.date, PERIOD_KEY_BY_NAME[period])) {
+    last.projected = true;
+    last.note += `; the rebalance if the ${period.replace(/ly$/, '')} ended today`;
+  }
+  return { lines, rows, home: null, holdings };
+}
+// Which signal lines a base line's chart shows; a saved strategy keeps its
+// own in cfg.subShown, as a custom strategy does.
+const _baseSignalShown = {};
+// The cfg a built-in panel's chart and its line chips read: the saved
+// strategy being edited, or the base line's stand-in, keyed 'base-sma' /
+// 'base-9sig' (the chips' click handler in js/saved-configs.js finds either).
+function nativeSignalCfg(idx) {
+  const saved = window._editingConfigId && typeof getSavedConfigs === 'function' ? getSavedConfigs().find(c => c.id === window._editingConfigId) : null;
+  if (saved) { saved.subShown = saved.subShown || {}; return saved; }
+  const id = 'base-' + PANEL_KEY_BY_IDX[idx];
+  const ds = chart && chart.data.datasets[idx];
+  return { id, color: ds && typeof ds.borderColor === 'string' ? ds.borderColor : null, subShown: _baseSignalShown[id] = _baseSignalShown[id] || {} };
+}
+// The open built-in panel's signal chart: its cfg, lines, rows and home view;
+// null for a panel without one.
+function nativeSignalChart(idx) {
+  const built = idx === 8 ? smaSignalChart() : idx === 0 ? nineSigSignalChart() : null;
+  if (!built) return null;
+  return { cfg: nativeSignalCfg(idx), lines: built.lines, log: built.rows, home: built.home, holdings: built.holdings || null };
 }
 
 // Strategy detail side panel — opens when a legend chip's more-button is
@@ -1341,6 +1626,12 @@ function applyPanelEmphasis(doUpdate) {
   const ds = chart.data.datasets;
   const activeIdx = activePanelDatasetIdx();
   const active = activeIdx >= 0;
+  // The open strategy's own extra lines (a saved or code strategy's Holding /
+  // Target / Cash and other series, the base 9sig's datasets 1/5/6) belong to
+  // it, so they keep full strength while everyone else's lines dim (the user,
+  // 2026-11-04: "these lines are visible, but they are faded").
+  const activeCfgId = active && ds[activeIdx] ? ds[activeIdx]._configId : null;
+  const ownLines = new Set(active && typeof SUB_LEGEND !== 'undefined' && SUB_LEGEND[activeIdx] ? SUB_LEGEND[activeIdx] : []);
   ds.forEach((d, i) => {
     if (!d) return;
     // Refresh the canonical colour whenever the line isn't currently dimmed, so
@@ -1349,7 +1640,8 @@ function applyPanelEmphasis(doUpdate) {
     if (!d._emphDimmed && typeof d.borderColor === 'string') d._emphBaseC = d.borderColor;
     if (d._emphBaseW == null) d._emphBaseW = (d.borderWidth != null ? d.borderWidth : 1);
     const isActive = active && i === activeIdx;
-    const isDim = active && !isActive;
+    const isOwn = (activeCfgId != null && d._configSub && d._configId === activeCfgId) || ownLines.has(i);
+    const isDim = active && !isActive && !isOwn;
     // The active SMA line, while the SMA panel is open, is fully replaced by the
     // detailed quarter+transaction overlay drawn in the marker plugin — so hide
     // its coarse smooth Chart.js line (0 width). The overlay draws at 2× itself.
@@ -1391,6 +1683,7 @@ function openStrategyPanel(idx) {
   renderStrategyPanelBody(idx);
   panel.classList.add('is-open');
   panel.setAttribute('aria-hidden', 'false');
+  syncPanelDock();
   applyPanelEmphasis();
 }
 // Open the custom-strategy editor panel (code + generated controls + log).
@@ -1406,6 +1699,7 @@ function openCustomPanel(cfgId) {
   if (typeof renderCustomPanelBody === 'function') renderCustomPanelBody(cfgId);
   panel.classList.add('is-open');
   panel.setAttribute('aria-hidden', 'false');
+  syncPanelDock();
   applyPanelEmphasis();
 }
 function closeStrategyPanel() {
@@ -1423,9 +1717,54 @@ function closeStrategyPanel() {
   _currentPanelIdx = null;
   panel.classList.remove('is-open');
   panel.setAttribute('aria-hidden', 'true');
+  syncPanelDock();
   if (openKey && typeof render === 'function') render();
   applyPanelEmphasis(); // restore all lines to full width/opacity
 }
+// From 680px wide the open panel docks: it moves into .layout as the first
+// column, beside the chart, instead of floating over the page, so its signal
+// chart and the main chart can be read and used together (styles.css,
+// body.panel-docked). The controls card it replaces hides, and the card's
+// contribution controls move into the header's free space so the money stays
+// adjustable. The line was 901px until 2026-11-11: on a fold phone's inner
+// screen (700 to 900px wide) the panel then covered the whole page with
+// nothing to drag. Under 680px, a phone, the panel stays a full-width
+// overlay: a split would leave neither side readable. Each moved element
+// leaves a comment node in its usual spot, and undocking puts it back there.
+const PANEL_DOCK_MQ = window.matchMedia('(min-width: 680px)');
+const _panelDockSpots = new Map();
+function _dockMove(el, parent, before) {
+  const spot = document.createComment(`#${el.id} sits here while the strategy panel is not docked`);
+  el.replaceWith(spot);
+  _panelDockSpots.set(el, spot);
+  parent.insertBefore(el, before);
+}
+function _dockReturn(el) {
+  _panelDockSpots.get(el).replaceWith(el);
+  _panelDockSpots.delete(el);
+}
+function syncPanelDock() {
+  const panel = document.getElementById('strategy-panel');
+  if (!panel) return;
+  const dock = panel.classList.contains('is-open') && PANEL_DOCK_MQ.matches;
+  if (dock === document.body.classList.contains('panel-docked')) return;
+  const layout = document.querySelector('.layout');
+  const header = document.querySelector('.header');
+  const contrib = document.getElementById('contrib-controls');
+  if (dock) {
+    _dockMove(panel, layout, layout.firstChild);
+    _dockMove(contrib, header, header.querySelector('.header-actions'));
+  } else {
+    _dockReturn(panel);
+    _dockReturn(contrib);
+  }
+  document.body.classList.toggle('panel-docked', dock);
+  // The docked width is clamped against the layout; the header's height
+  // changed with the controls moving in or out.
+  if (typeof applyPanelWidth === 'function') applyPanelWidth();
+  fitChartHeight();
+}
+PANEL_DOCK_MQ.addEventListener('change', syncPanelDock);
 // Gated close: when a BASE panel has edits that differ from canonical defaults,
 // closing would silently reset them — so warn first. Editing a saved strategy
 // auto-syncs live, so no warning is needed there.
@@ -1462,8 +1801,13 @@ function openPanelByKey(key) {
 // toggle — main legend always; the side panel's nested chips when open.
 function refreshAllLegends() {
   renderChartLegend();
-  if (_currentPanelIdx !== null) renderStrategyPanelBody(_currentPanelIdx);
-  if (window._openCustomCfgId && typeof renderCustomPanelBody === 'function') renderCustomPanelBody(window._openCustomCfgId);
+  // While a zoom or pan gesture re-runs the period every frame, the open panel
+  // waits: rebuilding it each frame (its log, its signal chart) would make the
+  // gesture crawl. The gesture's end renders it once (endZoomGesture).
+  if (!_zoomGesture) {
+    if (_currentPanelIdx !== null) renderStrategyPanelBody(_currentPanelIdx);
+    if (window._openCustomCfgId && typeof renderCustomPanelBody === 'function') renderCustomPanelBody(window._openCustomCfgId);
+  }
   if (typeof renderSavedConfigPills === 'function') renderSavedConfigPills();
 }
 
@@ -1507,20 +1851,211 @@ function chartDisplayPeriod(livePeriod, spanYears) {
   const floor = (spanYears != null && spanYears < 10) ? 'weekly' : 'quarterly';
   return _finerPeriod(p || livePeriod || floor, floor);
 }
+
+// Zoom and pan on the main chart move Entry and Exit, with the signal chart's
+// gestures (js/signal-chart.js): ⌘/Ctrl + scroll narrows or widens the period
+// around the date under the cursor (near the right edge that edge stays put),
+// out as far as the visible strategies' history goes; ⌘/Ctrl + drag slides
+// it; a double-click or Reset zoom brings back the Entry and Exit from before
+// the zoom; Latest → slides the period to end on the latest day. Each step
+// re-runs the strategies for the new period, as moving the slider does, so
+// every line restarts at the initial investment on the new Entry and the
+// legend's figures cover the new period. A plain drag still measures a range.
+const CHART_ZOOM = { minSpanMs: 90 * 86400000, wheelK: 0.002, rightAnchorPx: 200, uiGapPx: 30, settleMs: 250 };
+// The window (ms) the zoom last set, kept exact so trackpad-sized wheel steps
+// add up between the trading days it snaps to, and `range`, the 'entry|exit'
+// it became. render() drops it, with _zoomHome, once Entry or Exit changes
+// some other way.
+let _zoomWindow = null;
+// The Entry/Exit inputs from before the zoom began; Reset puts them back.
+let _zoomHome = null;
+const ZOOM_INPUT_IDS = ['slider-entry', 'slider-exit', 'entry-exact-date', 'exit-exact-date'];
+// Set while a ⌘/Ctrl + drag slides the period: where it started.
+let _chartPan = null;
+// True while a wheel or drag gesture changes the period every frame: the open
+// strategy panel waits until the gesture ends (refreshAllLegends).
+let _zoomGesture = false, _zoomSettleTimer = null, _zoomRenderRaf = null;
+// The widest period: the earliest Entry the slider allows for the visible
+// strategies (effectiveEntryMinQIdx; the sim enters at the end of the quarter
+// before it) to the latest day.
+function zoomBounds() {
+  const floorIdx = typeof effectiveEntryMinQIdx === 'function' ? effectiveEntryMinQIdx() : 0;
+  return { T0: Date.parse(quarterlyData[Math.max(0, floorIdx - 1)][0]), T1: Date.parse(daily[daily.length - 1].date) };
+}
+// The window a gesture starts from: the zoom's own, or the period on the chart.
+function currentZoomWindow() {
+  return _zoomWindow || { t0: Date.parse(chart._periodDates[0]), t1: Date.parse(chart._periodDates[1]) };
+}
+// The first trading day on or after time t.
+function _firstDayFrom(t) {
+  let lo = 0, hi = daily.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (Date.parse(daily[m].date) < t) lo = m + 1; else hi = m; }
+  return lo;
+}
+// Set Entry and Exit to the window t0..t1 (ms) the way the date picker sets an
+// exact day: snapped to trading days, the slider thumbs moved to their
+// quarters. An Exit on the latest day clears its exact date instead, so the
+// period keeps ending on the latest day as new data arrives. Rendered on the
+// next frame, so a burst of wheel or drag events costs one run.
+function setPeriodFromZoom(t0, t1) {
+  if (!_zoomHome) _zoomHome = Object.fromEntries(ZOOM_INPUT_IDS.map(id => [id, document.getElementById(id).value]));
+  const last = daily.length - 1;
+  const entry = daily[_firstDayFrom(t0)].date;
+  let x = _firstDayFrom(t1);
+  if (Date.parse(daily[x].date) > t1) x--;
+  const exit = daily[x].date;
+  _zoomWindow = { t0, t1, range: entry + '|' + exit };
+  document.getElementById('entry-exact-date').value = entry;
+  document.getElementById('slider-entry').value = quarterIdxForDate(entry);
+  document.getElementById('exit-exact-date').value = x === last ? '' : exit;
+  document.getElementById('slider-exit').value = x === last ? quarterlyData.length - 1 : quarterIdxForDate(exit);
+  if (!_zoomRenderRaf) _zoomRenderRaf = requestAnimationFrame(() => { _zoomRenderRaf = null; render(); });
+}
+// A wheel gesture ends once the wheel has been still for settleMs, a drag on
+// mouseup. Then the period is saved and the open panel catches up.
+function zoomGestureStep() {
+  _zoomGesture = true;
+  clearTimeout(_zoomSettleTimer);
+  _zoomSettleTimer = setTimeout(endZoomGesture, CHART_ZOOM.settleMs);
+}
+function endZoomGesture() {
+  clearTimeout(_zoomSettleTimer);
+  if (_zoomRenderRaf) { cancelAnimationFrame(_zoomRenderRaf); _zoomRenderRaf = null; }
+  _zoomGesture = false;
+  saveSliders();
+  render();
+}
+// Reset zoom and a double-click: the Entry and Exit from before the zoom.
+function resetChartZoom() {
+  if (!_zoomHome) return;
+  for (const id of ZOOM_INPUT_IDS) document.getElementById(id).value = _zoomHome[id];
+  _zoomHome = null;
+  _zoomWindow = null;
+  endZoomGesture();
+}
+// Latest →: the same length of period, ending on the latest day.
+function zoomToLatest() {
+  const { T1 } = zoomBounds(), cur = currentZoomWindow();
+  setPeriodFromZoom(T1 - (cur.t1 - cur.t0), T1);
+  endZoomGesture();
+}
+// The controls in the chart's bottom-right corner (index.html #chart-zoom-ui):
+// a hint, and Latest → and Reset zoom after a zoom. The hint's wordings,
+// longest first, go on to fitChartZoomUi, which shows the first that fits.
+function renderChartZoomUi() {
+  const hint = document.getElementById('chart-zoom-hint');
+  const latest = document.getElementById('chart-zoom-latest');
+  const reset = document.getElementById('chart-zoom-reset');
+  if (!hint || !latest || !reset) return;
+  reset.hidden = !_zoomHome;
+  latest.hidden = !_zoomHome || chart._periodDates[1] === daily[daily.length - 1].date;
+  hint._wordings = [_zoomHome ? `${MOD_KEY} + drag to pan` : `${MOD_KEY} + scroll to zoom`];
+}
+// The width the visible zoom buttons take, which the end-label margin keeps
+// for them (endLabelPlugin); 0 when none shows.
+function chartZoomButtonsWidth() {
+  const ui = document.getElementById('chart-zoom-ui');
+  if (!_zoomHome || !ui) return 0;
+  const shown = [...ui.querySelectorAll('.chart-zoom-btn')].filter(b => !b.hidden);
+  return shown.reduce((w, b) => w + b.offsetWidth, 0) + Math.max(0, shown.length - 1) * parseFloat(getComputedStyle(ui).columnGap);
+}
+// The controls get the room right of the last x-axis label; the hint takes
+// the longest wording that fits there, or is dropped (the buttons' tooltips
+// carry the instructions). Measured only when the wordings or the room
+// changed, not on every hover redraw.
+function fitChartZoomUi(c) {
+  const ui = document.getElementById('chart-zoom-ui'), hint = document.getElementById('chart-zoom-hint');
+  if (!ui || !hint || !hint._wordings || !c.chartArea) return;
+  const room = Math.round(c.width - c.chartArea.right - CHART_ZOOM.uiGapPx);
+  const key = [hint._wordings.join('/'), room, document.getElementById('chart-zoom-latest').hidden, document.getElementById('chart-zoom-reset').hidden].join('|');
+  if (ui._fitKey === key) return;
+  ui._fitKey = key;
+  hint.hidden = false;
+  for (const wording of hint._wordings) {
+    hint.textContent = wording;
+    if (ui.offsetWidth <= room) return;
+  }
+  hint.hidden = true;
+}
 // The chart's minimum plottable value is 1. Values below 1 (e.g. a strategy fully
 // out of cash → Cash = 0) are raised to 1 so they always render: on a log axis 0
 // can't be plotted (log of 0 is undefined) and the line would vanish; 1 keeps it
 // continuous at the very bottom ("simulate zero"). Real gaps (null) are left alone.
+// A line that can go below zero (the real account's Profit, flagged `_signed`)
+// keeps its values. On the linear axis, which then starts at its lowest value
+// instead of 0 (an unset minimum rounds down to a whole tick step: -$50K for a
+// -$6K dip). On the log axis, which has no place under $1, they switch it to
+// the signed log axis (registerSignedLogScale) for as long as one is there.
 const CHART_MIN = 1;
 function clampChartMin(chart) {
   if (!chart || !chart.data) return;
+  const y = chart.options.scales.y, log = y.type !== 'linear';
+  let lowest = 0, signedUnder = false;
   for (const ds of chart.data.datasets) {
     const d = ds.data;
     if (!d) continue;
     for (let i = 0; i < d.length; i++) {
-      if (typeof d[i] === 'number' && d[i] < CHART_MIN) d[i] = CHART_MIN;
+      if (typeof d[i] !== 'number' || d[i] >= CHART_MIN) continue;
+      if (!ds._signed) d[i] = CHART_MIN;
+      else { signedUnder = true; lowest = Math.min(lowest, d[i]); }
     }
   }
+  if (log) y.type = signedUnder ? 'signedLogarithmic' : 'logarithmic';
+  else y.min = lowest;
+}
+// The log axis with room for a loss. A value v sits at
+// sign(v) · log10(1 + |v| / c), where c is the largest loss on screen rounded
+// up to a 1-2-5 step ($500 for a -$340 dip). Far above c, where the
+// strategies' balances are, that is the log axis's shape; from -c to c it is
+// close to linear, so a profit crossing zero draws as one unbroken line
+// instead of diving through every decade between $1,000 and $1. With no loss
+// on screen (Profit hidden from the legend until the next render) c is 1 and
+// the axis is a log one.
+// Registered when the chart is first built: the desktop widget's page loads
+// this file without Chart.js.
+function registerSignedLogScale() {
+  const stepOf = v => Math.pow(10, Math.floor(Math.log10(v) + 1e-9));
+  const roundUp = v => Math.ceil(v / stepOf(v) - 1e-9) * stepOf(v);     // 57K → 60K
+  const roundDown = v => Math.floor(v / stepOf(v) + 1e-9) * stepOf(v);  // 340 → 300
+  const step125 = v => [1, 2, 5, 10].map(m => m * stepOf(v)).find(s => s >= v * (1 - 1e-9));   // 340 → 500
+  const next125 = v => { const m = Math.round(v / stepOf(v)); return (m === 1 ? 2 : m === 2 ? 5 : 10) * stepOf(v); };
+  class SignedLogScale extends Chart.LinearScale {
+    static id = 'signedLogarithmic';
+    _toAxis(v) { return Math.sign(v) * Math.log10(1 + Math.abs(v) / this._c); }
+    _fromAxis(a) { return Math.sign(a) * this._c * (Math.pow(10, Math.abs(a)) - 1); }
+    determineDataLimits() {
+      super.determineDataLimits();
+      this._c = this.min < 0 ? step125(-this.min) : 1;
+    }
+    // Bounds as the log axis rounds them: -c under a loss, else the lowest
+    // value rounded down; the highest rounded up. Ticks at -c and zero, then
+    // the 1-2-5 steps from c (or the first one over the lower bound) up,
+    // thinned evenly to Y_TICKS in all with both ends kept.
+    buildTicks() {
+      const lo = this.min < 0 ? -this._c : this.min > 0 ? roundDown(this.min) : 0;
+      const hi = roundUp(Math.max(this.max, this._c));
+      const fixed = lo < 0 ? [lo, 0] : lo === 0 ? [0] : [];
+      const steps = [];
+      for (let v = step125(lo > 0 ? lo : this._c); v <= hi * (1 + 1e-9); v = next125(v)) steps.push(v);
+      const room = Y_TICKS - fixed.length;
+      const kept = steps.length <= room ? steps : Array.from({ length: room }, (_, i) => steps[Math.round(i * (steps.length - 1) / (room - 1))]);
+      this.min = this.start = lo;
+      this.max = this.end = hi;
+      return fixed.concat([...new Set(kept)]).map(value => ({ value }));
+    }
+    configure() {
+      super.configure();
+      this._axisStart = this._toAxis(this.min);
+      this._axisRange = this._toAxis(this.max) - this._axisStart;
+    }
+    getPixelForValue(value) {
+      return value === null || isNaN(value) ? NaN : this.getPixelForDecimal((this._toAxis(value) - this._axisStart) / this._axisRange);
+    }
+    getValueForPixel(pixel) {
+      return this._fromAxis(this._axisStart + this.getDecimalForPixel(pixel) * this._axisRange);
+    }
+  }
+  Chart.register(SignedLogScale);
 }
 // Single delegated click handler — the legend HTML gets replaced on every
 // render, so attaching here once on document avoids leaks/duplicate
@@ -1661,7 +2196,7 @@ window.addEventListener('resize', fitChartHeight);
 // (those three differ by caller — see below). Both the main chart's live SMA
 // line (render(), this file) and the analytics heatmap's SMA runs
 // (js/analytics.js's _smaParamsForAnalytics) read this same set with the same
-// defaults — shared here so a newly-added select-sma-* control (see CLAUDE.md's
+// defaults — shared here so a newly-added select-sma-* control (see .claude/CLAUDE.md's
 // "Adding a new configurable control" checklist) only needs updating in one
 // place, not two independently-typed copies that can quietly drift apart —
 // the same failure shape this session already found and fixed three times
@@ -1795,10 +2330,19 @@ function render() {
   // mid-history → the portfolio's actual value at the cutoff (or the
   // Invested-Compounded balance when no actual column) becomes the initial
   // lump and only later transactions remain as flows. The underlying data
-  // never changes. Stashed on window so appendActualPortfolioDataset (the
+  // never changes. Stashed on window so appendActualPortfolioDatasets (the
   // "My portfolio" line) reads the SAME view this render simulated with.
   window._txEffective = null;
-  if (window._txSchedule && typeof txEffectiveForEntry === 'function') {
+  // A shown custom strategy that brings its own money funds every line with
+  // its deposits, ahead of a transaction history (ownMoneyStrategy). The
+  // sliders' values stay as they are, unused, until it is hidden.
+  const sliderInitial = initial;
+  const ownMoney = typeof ownMoneyStrategy === 'function' ? ownMoneyStrategy() : null;
+  if (ownMoney) {
+    const m = ownMoneyCtx({ rate }, ownMoney.log, entryDateForSim);
+    initial = m.initial;
+    contribSchedule = m.contribSchedule;
+  } else if (window._txSchedule && typeof txEffectiveForEntry === 'function') {
     const eff = txEffectiveForEntry(window._txSchedule, entryDateForSim, rate);
     if (eff) {
       initial = eff.initial;
@@ -1806,6 +2350,8 @@ function render() {
       window._txEffective = eff;
     }
   }
+  window._ownMoneyCfgId = ownMoney ? ownMoney.cfg.id : null;
+  if (typeof renderOwnMoneyState === 'function') renderOwnMoneyState(ownMoney);
   // Day-over-day change badge (endLabelPlugin) only makes sense when the chart
   // is actually showing the most recent data — a historical exit date has no
   // "since yesterday" to speak of. prevTradingDayDate stays null (and the
@@ -1823,7 +2369,7 @@ function render() {
   if (entryPickBtn) entryPickBtn.classList.toggle('is-active', !!entryOverride);
   if (exitPickBtn)  exitPickBtn.classList.toggle('is-active', !!exitOverride);
 
-  document.getElementById('disp-initial').textContent = fmtFull(initial);
+  document.getElementById('disp-initial').textContent = fmtFull(ownMoney ? sliderInitial : initial);
   document.getElementById('disp-monthly').textContent = fmtFull(monthly);
   // Annual increase is now a dropdown that shows its own value — no separate display.
   const _dispRaise = document.getElementById('disp-raise');
@@ -1858,6 +2404,9 @@ function render() {
   //     coarser line is step-resampled onto it (identity when the grains match).
   const mainPeriod   = window._editingConfigId ? 'quarterly' : _livePeriod;
   const displayGrain = chartDisplayPeriod(_livePeriod, _yearsSpan(entryDateForSim, exitDateForSim));
+  // A zoom's session (Reset, the exact window) ends once Entry or Exit is
+  // changed some other way (setPeriodFromZoom).
+  if (_zoomWindow && _zoomWindow.range !== entryDateForSim + '|' + exitDateForSim) { _zoomWindow = null; _zoomHome = null; }
 
   // Rebalance point: % of the way through each period where the check happens
   // (0 = start, 100 = end). Maps to a trading-day offset and shifts the schedule
@@ -1898,8 +2447,8 @@ function render() {
     // rate; the 9sig parked cash uses its own rate (passed as the 3rd arg).
     baselineRate: rate,
   };
-  const { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, totalContributed,
-          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
+  const { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, gldPoints, soxlPoints, soxxPoints, totalContributed,
+          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample, gldSample, soxlSample, soxxSample } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
   // For each line, the points fed to the chart: the quarter-end snapshots when
   // the run is coarser than the axis (yearly), else the rebalance-grain points.
   // Driven by the SAME sampleQuarterly/sampleWeekly flags passed to simulate()
@@ -1916,6 +2465,9 @@ function render() {
   const ssoPtsD = pick(ssoSample, ssoPoints);
   const spxlPtsD = pick(spxlSample, spxlPoints);
   const sqqqPtsD = pick(sqqqSample, sqqqPoints);
+  const gldPtsD = pick(gldSample, gldPoints);
+  const soxlPtsD = pick(soxlSample, soxlPoints);
+  const soxxPtsD = pick(soxxSample, soxxPoints);
 
   // Shared x-axis. When the display grain matches the main's own period (the
   // common case) the labels ARE the main log's dates and every series maps 1:1
@@ -1976,6 +2528,9 @@ function render() {
   const finalSSO  = ssoPoints  && ssoPoints.length  ? ssoPoints[ssoPoints.length - 1].value   : 0;
   const finalSPXL = spxlPoints && spxlPoints.length ? spxlPoints[spxlPoints.length - 1].value : 0;
   const finalSQQQ = sqqqPoints && sqqqPoints.length ? sqqqPoints[sqqqPoints.length - 1].value : 0;
+  const finalGLD  = gldPoints  && gldPoints.length  ? gldPoints[gldPoints.length - 1].value   : 0;
+  const finalSOXL = soxlPoints && soxlPoints.length ? soxlPoints[soxlPoints.length - 1].value : 0;
+  const finalSOXX = soxxPoints && soxxPoints.length ? soxxPoints[soxxPoints.length - 1].value : 0;
   const finalSMA  = smaPoints  && smaPoints.length  ? smaPoints[smaPoints.length - 1].value   : 0;
   const years = log.length > 1 ? (new Date(log[log.length-1].date) - new Date(log[0].date)) / (365.25*86400000) : 1;
   // Simple end/start growth — kept for the sub-series fallback (their CAGR is the
@@ -1989,6 +2544,9 @@ function render() {
     initial, monthly, annualRaise, log[0].date, finalLog.date,
     years, finalValue, (typeof monthlyData !== 'undefined' ? monthlyData : null), totalContributed,
     contribSchedule);
+  // The same CAGR for any final value on this window and money: the Fit
+  // search's result line for the 9sig and SMA panels (js/saved-configs.js).
+  window._mwCagrOfFinal = _mw;
   const ret9 = _mw(finalLog.total);
   const retBH = _mw(finalBH);
   const retQQQ = _mw(finalQQQ);
@@ -1997,6 +2555,9 @@ function render() {
   const retSSO  = _mw(finalSSO);
   const retSPXL = _mw(finalSPXL);
   const retSQQQ = _mw(finalSQQQ);
+  const retGLD  = _mw(finalGLD);
+  const retSOXL = _mw(finalSOXL);
+  const retSOXX = _mw(finalSOXX);
   const retSMA  = _mw(finalSMA);
   const retInv = _mw(finalLog.investedCompounded);
 
@@ -2015,6 +2576,9 @@ function render() {
     bhKey === 'sso'  ? { series: ssoPoints || [],   ret: retSSO }  :
     bhKey === 'spxl' ? { series: spxlPoints || [],  ret: retSPXL } :
     bhKey === 'sqqq' ? { series: sqqqPoints || [],  ret: retSQQQ } :
+    bhKey === 'gld'  ? { series: gldPoints || [],   ret: retGLD }  :
+    bhKey === 'soxl' ? { series: soxlPoints || [],  ret: retSOXL } :
+    bhKey === 'soxx' ? { series: soxxPoints || [],  ret: retSOXX } :
                        { series: bhPoints,          ret: retBH }   ;
 
   // Static, plain strategy labels — they don't encode (or change with) the
@@ -2047,12 +2611,20 @@ function render() {
   // yesterday VALUES (deflated to real $ when the inflation toggle is on) —
   // endLabelPlugin's dayChangeFor diffs each against whatever TODAY value
   // the chart is actually drawing, so both sides are always in the same
-  // (nominal or deflated) units. Invested Compounded gets no badge: it's a
-  // monthly-stepped synthetic baseline with no meaningful close-to-close
-  // daily change.
+  // (nominal or deflated) units. The holdings themselves are kept too
+  // (window._endHoldingsByIdx): outside the session the badge names their
+  // move to the funds' extended-hours prints instead (extendedMoveOf).
+  // Invested Compounded gets no badge: it's a monthly-stepped synthetic
+  // baseline with no meaningful close-to-close daily change.
   window._ydayValueByIdx = {};
+  window._endHoldingsByIdx = {};
   if (isLatestDaySelected) {
     const defl = inflationOn() ? inflFactor(prevTradingDayDate, labels[0]) : 1;
+    const recordEndState = (idx, h, cash) => {
+      window._endHoldingsByIdx[idx] = { h, cash };
+      const yday = repriceAtPrevTradingDay(h, cash);
+      if (yday != null) window._ydayValueByIdx[idx] = yday * defl;
+    };
     const _ulKeys = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl' };
     const _todayRow = daily[daily.length - 1];
     // 9sig: shares from the final snapshot row; park side is either plain
@@ -2061,30 +2633,22 @@ function render() {
     const sigUlKey = _ulKeys[sigUlCol] || 'tqqq';
     const sigShares = finalLog.price > 0 ? finalLog.tqqqVal / finalLog.price : 0;
     const parkKey = (_sig9Base.parkAsset || 'cash').toLowerCase();
-    let y9 = null;
     if (parkKey === 'cash') {
-      y9 = repriceAtPrevTradingDay({ [sigUlKey]: sigShares }, finalLog.cash);
+      recordEndState(0, { [sigUlKey]: sigShares }, finalLog.cash);
     } else if (_todayRow[parkKey] > 0) {
       const h = { [sigUlKey]: sigShares };
       h[parkKey] = (h[parkKey] || 0) + finalLog.cash / _todayRow[parkKey];
-      y9 = repriceAtPrevTradingDay(h, 0);
+      recordEndState(0, h, 0);
     }
-    if (y9 != null) window._ydayValueByIdx[0] = y9 * defl;
     // Consolidated Buy & Hold: pure shares, no cash. (bhKeyName is declared
     // further below — normalize bhKey locally instead of reordering.)
-    const _bhK = ['qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq'].includes(bhKey) ? bhKey : 'tqqq';
+    const _bhK = ['qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'].includes(bhKey) ? bhKey : 'tqqq';
     const bhLast = bhPicked.series[bhPicked.series.length - 1];
-    if (bhLast && bhLast.shares > 0) {
-      const yBh = repriceAtPrevTradingDay({ [_bhK]: bhLast.shares }, 0);
-      if (yBh != null) window._ydayValueByIdx[2] = yBh * defl;
-    }
+    if (bhLast && bhLast.shares > 0) recordEndState(2, { [_bhK]: bhLast.shares }, 0);
     // SMA: full multi-asset end state from the drawdown control points
     // (emitDD is always on for the main SMA line).
     const smaCtlLast = smaDdControls && smaDdControls.length ? smaDdControls[smaDdControls.length - 1] : null;
-    if (smaCtlLast) {
-      const ySma = repriceAtPrevTradingDay(smaCtlLast.h, smaCtlLast.cash);
-      if (ySma != null) window._ydayValueByIdx[8] = ySma * defl;
-    }
+    if (smaCtlLast) recordEndState(8, smaCtlLast.h, smaCtlLast.cash);
   }
 
   // Chart. Series come from the display points (quarter snapshots for a yearly
@@ -2117,7 +2681,7 @@ function render() {
   // Data fed into the consolidated B&H slot (dataset 2) — display points for the
   // selected underlying (quarter snapshots for a yearly run, else rebalance grain).
   const bhActiveD = onLabels(
-    bhKey === 'qqq' ? qqqPtsD : bhKey === 'spy' ? spyPtsD : bhKey === 'qld' ? qldPtsD : bhKey === 'sso' ? ssoPtsD : bhKey === 'spxl' ? spxlPtsD : bhKey === 'sqqq' ? sqqqPtsD : bhPtsD,
+    bhKey === 'qqq' ? qqqPtsD : bhKey === 'spy' ? spyPtsD : bhKey === 'qld' ? qldPtsD : bhKey === 'sso' ? ssoPtsD : bhKey === 'spxl' ? spxlPtsD : bhKey === 'sqqq' ? sqqqPtsD : bhKey === 'gld' ? gldPtsD : bhKey === 'soxl' ? soxlPtsD : bhKey === 'soxx' ? soxxPtsD : bhPtsD,
     p => p.value);
 
   // Per-dataset stats shown inside the strategy side panel (CAGR / starting
@@ -2135,13 +2699,12 @@ function render() {
   // them. Step series (Target/Cash) and the deterministic Invested baseline
   // keep their rebalance-grain drawdown — they don't move between rebalances.
   const dailyRows = (typeof daily !== 'undefined' && daily) ? daily : null;
-  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq' };
+  const UL_KEY = { 1: 'tqqq', 2: 'qqq', 3: 'spy', 4: 'qld', 5: 'sso', 6: 'spxl', 7: 'sqqq', 8: 'gld', 9: 'soxl', 10: 'soxx' };
   const sigKey = UL_KEY[sigUlCol] || 'tqqq';
-  const bhKeyName = bhKey === 'qqq' ? 'qqq' : bhKey === 'spy' ? 'spy' : bhKey === 'qld' ? 'qld' : bhKey === 'sso' ? 'sso' : bhKey === 'spxl' ? 'spxl' : bhKey === 'sqqq' ? 'sqqq' : 'tqqq';
+  const bhKeyName = bhKey === 'qqq' ? 'qqq' : bhKey === 'spy' ? 'spy' : bhKey === 'qld' ? 'qld' : bhKey === 'sso' ? 'sso' : bhKey === 'spxl' ? 'spxl' : bhKey === 'sqqq' ? 'sqqq' : bhKey === 'gld' ? 'gld' : bhKey === 'soxl' ? 'soxl' : bhKey === 'soxx' ? 'soxx' : 'tqqq';
   const dailyDDByIdx = {};
   if (dailyRows) {
-    const sigCtl = log.map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash }));
-    dailyDDByIdx[0] = computeDailyMaxDrawdown(sigCtl, dailyRows, sigKey);
+    dailyDDByIdx[0] = computeDailyMaxDrawdown(nineSigDDControls(log), dailyRows, sigKey);
     dailyDDByIdx[1] = computeDailyMaxDrawdown(
       log.map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: 0 })), dailyRows, sigKey);
     if (bhPicked.series && bhPicked.series.length && bhPicked.series[0].shares != null) {
@@ -2184,7 +2747,9 @@ function render() {
   // needed fixing for custom strategies to see the same entry date the main
   // chart already does.
   const cfgCtx = {
-    initial, monthly, annualRaise, simEntryIdx, exitIdx, labels, years, totalContributed,
+    // rate: the Invested Compounded baseline, for re-deriving a transaction
+    // history at another entry date (js/saved-configs.js's ownMoneyCtx).
+    initial, monthly, annualRaise, rate, simEntryIdx, exitIdx, labels, years, totalContributed,
     ...((entryOverride || exitOverride) ? { entryDateOverride: entryDateForSim, exitDateOverride: exitDateForSim } : {}),
     contribSchedule,
     // The chart's shared x-axis grain (js/chart.js's chartDisplayPeriod) — a
@@ -2209,6 +2774,8 @@ function render() {
     // _displayGrain above — endLabelPlugin reads these fresh each draw.
     chart._isLatestDaySelected = isLatestDaySelected;
     chart._prevTradingDayDate = prevTradingDayDate;
+    // The period on screen, where a zoom gesture starts from (currentZoomWindow).
+    chart._periodDates = [entryDateForSim, exitDateForSim];
     // Strip saved-config datasets up front so the envelope length math below
     // (which assumes datasets end at the envelope block) stays correct.
     if (typeof removeConfigDatasets === 'function') removeConfigDatasets(chart);
@@ -2225,6 +2792,7 @@ function render() {
     chart.data.datasets[0].data = totalD;
     chart.data.datasets[1].data = tqqqValD;
     chart.data.datasets[2].data = bhActiveD;
+    chart.data.datasets[2].borderColor = FUND_COLORS[bhKey];   // the picked fund's colour; a session override (applyBaseColorOverrides below) still wins
     // Datasets 3 (B&H QQQ), 4 (B&H SPY), 9 (B&H QLD), 10 (B&H SSO) are kept
     // zeroed and hidden — dataset 2 above serves as the consolidated B&H slot now.
     chart.data.datasets[3].data = []; chart.data.datasets[3].hidden = true;
@@ -2249,24 +2817,28 @@ function render() {
     chart.options.scales.y.min = logScale ? undefined : 0;
     clampChartMin(chart);
     applyPanelEmphasis(false); // keep the open panel's line emphasized across re-renders
+    renderChartZoomUi();
     chart.update('none');
   } else {
   const ctx = document.getElementById('mainChart').getContext('2d');
 
-  // Hue map — Orion light theme (each chosen for contrast on a white plot area):
+  // Hue map — Orion light theme (each chosen for contrast on a white plot area).
+  // The Buy & Hold slots wear their fund's colour (js/data.js FUND_COLORS, the
+  // same colour the fund's line has on a signal chart); slot 2 follows the
+  // fund picked in #select-bh-underlying at render.
   //   0  9sig          teal        #45818e
   //   1  9sig Holding  deep blue   #023aff
-  //   2  B&H TQQQ      red         #ff2d2e
-  //   3  B&H QQQ       green       #00b929
-  //   4  B&H SPY       pink        #ff708b
+  //   2  B&H (picked)  the fund's  FUND_COLORS[bhKey]
+  //   3  B&H QQQ       blue        FUND_COLORS.qqq
+  //   4  B&H SPY       green       FUND_COLORS.spy
   //   5  9sig Target   orange      #d9631a
   //   6  9sig Cash     dark amber  #b06000
   //   7  Invested Comp faint navy  rgba(56,56,116,0.35)
   //   8  SMA           purple-deep #c64eff
-  //  10  B&H QLD       teal        #0891b2
-  //  11  B&H SSO       violet      #7c3aed
-  //  12  B&H SPXL      rose        #e11d48
-  const lineColors = ["#45818e", "#023aff", "#ff2d2e", "#00b929", "#ff708b", "#d9631a", "#b06000", "#bf9000", "#c64eff", "#0891b2", "#7c3aed", "#e11d48"];
+  //   9  B&H QLD       violet      FUND_COLORS.qld
+  //  10  B&H SSO       fuchsia     FUND_COLORS.sso
+  //  11  B&H SPXL      pink        FUND_COLORS.spxl
+  const lineColors = ["#45818e", "#023aff", FUND_COLORS[bhKey], FUND_COLORS.qqq, FUND_COLORS.spy, "#d9631a", "#b06000", "#bf9000", "#c64eff", FUND_COLORS.qld, FUND_COLORS.sso, FUND_COLORS.spxl];
   // Day-over-day change badge colors — mirror styles.css's --green-text/
   // --red-text. Hardcoded to match this file's existing convention for canvas
   // colors (lineColors above); there's no CSS-custom-property-reading idiom
@@ -2276,8 +2848,8 @@ function render() {
   // Range-select midpoint label (rangeSelectPlugin below) — the % draws
   // bigger than the "(from → to)" part, since it's the number that actually
   // answers "how much did this move."
-  const RANGE_PCT_FONT = '700 10px "JetBrains Mono", monospace';
-  const RANGE_REST_FONT = '600 8px "JetBrains Mono", monospace';
+  const RANGE_PCT_FONT = canvasFont(700, 10, '"JetBrains Mono", monospace');
+  const RANGE_REST_FONT = canvasFont(600, 8, '"JetBrains Mono", monospace');
   const _sub = nineSigSubLabels();
   const lineNames  = [LBL_9SIG, _sub.holding, LBL_BH, 'B&H QQQ', 'B&H SPY', _sub.target, _sub.cash, LBL_INV, LBL_SMA, 'B&H QLD', 'B&H SSO', 'B&H SPXL'];
   // Match the borderDash on the corresponding chart dataset; null = solid.
@@ -2349,6 +2921,8 @@ function render() {
     // overlay + legend-chip readout would visually collide with the normal
     // hover tooltip otherwise.
     if (rangeSelectDragging || hasRangeSelection()) { el.style.display = 'none'; return; }
+    // Nor while a ⌘/Ctrl + drag pans the chart.
+    if (_chartPan) { el.style.display = 'none'; return; }
     if (tooltip.opacity === 0) {
       if (isTouchChart && chartTooltipPinned) return; // stay open until dismissed
       el.style.display = 'none';
@@ -2381,66 +2955,95 @@ function render() {
       .sort((a, b) => b.v - a.v);
     const maxV = Math.max(0, ...items.map(it => it.v));
 
-    const rows = items.map(({ n, v, col, dash }) => {
+    // One card per visible line, each anchored at its own point on the
+    // hovered date. Every card gets the same width, so the tinted fill
+    // (value / max) reads as a bar chart across cards, the way the rows did
+    // in the old single box. The width is the widest card's natural width,
+    // capped at TT_CARD_MAX; longer names ellipsize.
+    const TT_CARD_MAX = 320, TT_CARD_GAP = 4, TT_CARD_LEAD = 16;
+    const panelRect = c.canvas.closest('.panel').getBoundingClientRect();
+    const canvasRect = c.canvas.getBoundingClientRect();
+    const toPanelX = x => x + canvasRect.left - panelRect.left;
+    const toPanelY = y => y + canvasRect.top - panelRect.top;
+    const hoverX = toPanelX(tooltip.caretX);
+    const areaTop = toPanelY(c.chartArea.top), areaBottom = toPanelY(c.chartArea.bottom);
+
+    const cards = items.map(({ i, n, v, col, dash }) => {
       const pct = maxV > 0 ? Math.max(0, (v / maxV) * 100) : 0;
       const dashAttr = dash ? `stroke-dasharray="${dash.join(',')}"` : '';
       const sample = `<svg width="20" height="4" style="flex-shrink:0;overflow:visible">
         <line x1="0" y1="2" x2="20" y2="2" stroke="${col}" stroke-width="2" stroke-linecap="round" ${dashAttr}/>
       </svg>`;
-      return `
-        <div class="tt-row" style="position:relative">
-          <div style="position:absolute;left:0;top:2px;bottom:2px;width:${pct}%;background:${rgba(col, 0.20)};border-radius:3px;pointer-events:none"></div>
-          <div class="tt-row-left" style="position:relative;z-index:1">
-            ${sample}
-            <span class="tt-name">${n}</span>
+      const pointY = toPanelY(c.getDatasetMeta(i).data[idx].y);
+      const html = `
+        <div class="tt-card">
+          <div class="tt-fill" style="width:${pct}%;background:${rgba(col, 0.20)}"></div>
+          <div class="tt-row">
+            <div class="tt-row-left">${sample}<span class="tt-name" title="${n}">${n}</span></div>
+            <span class="tt-val">${fmtFull(Math.round(v))}</span>
           </div>
-          <span class="tt-val" style="position:relative;z-index:1">${fmtFull(Math.round(v))}</span>
-        </div>
-      `;
-    }).join('');
+        </div>`;
+      return { html, pointY, col };
+    });
 
-    // A quarter label collapses every weekly (or monthly) point in the same
-    // quarter down to the same "Q# YYYY" text, hiding exactly the date detail
-    // the finer axis exists to show — use the real date whenever the shared
-    // axis is finer than quarterly; qLabel stays for the genuinely
-    // quarter-grain case, where each point really is a quarter boundary.
-    // Reads c._displayGrain (stashed fresh each render), NOT the displayGrain
-    // closed over at chart-creation time — externalTooltip itself is only
-    // ever defined once, so a closed-over value would stay frozen at
-    // whatever it was on the very first render.
+    // See the ttDateLabel note in git history: quarter labels collapse finer
+    // points, so use the real date unless the shared axis really is quarterly.
+    // Reads c._displayGrain (stashed fresh each render), not a closed-over one.
     const ttDateLabel = c._displayGrain === 'quarterly' ? qLabel(date) : fmtDayMonthYear(date);
-    el.innerHTML = `<button class="tt-close" type="button" aria-label="Close" data-tt-close>&times;</button><div class="tt-date">${ttDateLabel}</div>${rows}`;
-
+    el.innerHTML = `
+      <svg class="tt-leaders" width="${panelRect.width}" height="${panelRect.height}"></svg>
+      <div class="tt-date-chip">${ttDateLabel}<button class="tt-close" type="button" aria-label="Close" data-tt-close>&times;</button></div>
+      ${cards.map(card => card.html).join('')}`;
     el.style.display = 'block';
-    const panelRect = c.canvas.closest('.panel').getBoundingClientRect();
-    const canvasRect = c.canvas.getBoundingClientRect();
-    // Measured, not assumed: the box has no max-width and a long strategy
-    // name (e.g. "Median overextension (250d) — SQQQ park") can render wider
-    // than the 240px this math used to assume, so the "does it overflow"
-    // check was sometimes wrong on its own terms even before the missing
-    // left-edge clamp below.
-    const ttWidth = el.offsetWidth || 240;
-    const ttHeight = el.offsetHeight || 0;
-    let left = tooltip.caretX + canvasRect.left - panelRect.left + 14;
-    let top = tooltip.caretY + canvasRect.top - panelRect.top - 40;
-    if (left + ttWidth > panelRect.width) left = tooltip.caretX + canvasRect.left - panelRect.left - ttWidth - 14;
-    // The flip above assumes there's room to the LEFT of the tap point too —
-    // on a narrow mobile panel there often isn't, and this had no floor, so
-    // the box could render with a chunk of itself past the left edge of the
-    // screen (this is what "tooltip goes outside of screen" was: not
-    // clipped/scrollable, just genuinely positioned off-viewport).
-    if (left < 10) left = 10;
-    if (top < 0) top = 10;
-    // Same idea vertically: with many visible lines the row list can get tall
-    // enough that the tooltip's bottom edge lands past the viewport — and
-    // since it's absolutely positioned (not clipped), that grows the PAGE's
-    // scrollable height instead of just being an offscreen tooltip. Clamp
-    // against the viewport (converted into panel-relative coords, since
-    // `top` is measured from the panel), not just the panel's own bounds.
-    const viewportBottomInPanel = window.innerHeight - panelRect.top - 10;
-    if (top + ttHeight > viewportBottomInPanel) top = Math.max(10, viewportBottomInPanel - ttHeight);
-    el.style.left = left + 'px';
-    el.style.top = top + 'px';
+
+    // Shared width from the widest natural card, then lay the cards out.
+    const cardEls = Array.from(el.querySelectorAll('.tt-card'));
+    // Fractional width, rounded up: offsetWidth truncates, and a card set
+    // half a pixel narrower than its text ellipsizes the last letter.
+    const naturalWidth = Math.ceil(Math.max(...cardEls.map(card => card.getBoundingClientRect().width)));
+    const cardWidth = Math.min(TT_CARD_MAX, naturalWidth);
+    cardEls.forEach(card => { card.style.width = cardWidth + 'px'; });
+    const cardHeight = cardEls[0]?.offsetHeight || 0;
+
+    // Cards go right of the hover line, or left when that would overflow.
+    let cardLeft = hoverX + TT_CARD_LEAD;
+    if (cardLeft + cardWidth > panelRect.width - 8) cardLeft = hoverX - TT_CARD_LEAD - cardWidth;
+    if (cardLeft < 8) cardLeft = 8;
+
+    // Each card wants to centre on its point. Sort by that, push overlapping
+    // cards down, then pull the stack back up if it runs past the plot's
+    // bottom edge. Points near each other end up as a tidy stack with leader
+    // lines back to their dots.
+    const order = cards.map((card, k) => ({ k, top: card.pointY - cardHeight / 2 })).sort((a, b) => a.top - b.top);
+    order.forEach((o, j) => { if (j) o.top = Math.max(o.top, order[j - 1].top + cardHeight + TT_CARD_GAP); });
+    for (let j = order.length - 1; j >= 0; j--) {
+      const bound = j === order.length - 1 ? areaBottom - cardHeight : order[j + 1].top - cardHeight - TT_CARD_GAP;
+      order[j].top = Math.min(order[j].top, bound);
+    }
+    if (order.length && order[0].top < areaTop) {
+      const shift = areaTop - order[0].top;
+      order.forEach(o => { o.top += shift; });
+    }
+
+    const leaders = el.querySelector('.tt-leaders');
+    const attachX = cardLeft > hoverX ? cardLeft : cardLeft + cardWidth;
+    order.forEach(({ k, top }) => {
+      cardEls[k].style.left = cardLeft + 'px';
+      cardEls[k].style.top = top + 'px';
+      const cardMidY = top + cardHeight / 2;
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', hoverX); line.setAttribute('y1', cards[k].pointY);
+      line.setAttribute('x2', attachX); line.setAttribute('y2', cardMidY);
+      line.setAttribute('stroke', cards[k].col);
+      leaders.appendChild(line);
+    });
+
+    // Date chip sits just below the plot, over the x-axis labels and centred
+    // on the hover line like a crosshair readout, kept inside the panel.
+    const chip = el.querySelector('.tt-date-chip');
+    const chipWidth = chip.offsetWidth;
+    chip.style.left = Math.max(8, Math.min(panelRect.width - chipWidth - 8, hoverX - chipWidth / 2)) + 'px';
+    chip.style.top = (areaBottom + 4) + 'px';
   };
 
   // Wire the tooltip's close button and outside-tap dismissal once. The
@@ -2481,7 +3084,31 @@ function render() {
   // nominal and real dollars), and a today-value change between the
   // yesterday-fetch and this draw self-corrects instead of showing a stale
   // pairing.
-  const dayChangeFor = (i, ds, todayVal) => {
+  //
+  // Outside the regular session the same end-state holdings (cached beside
+  // the yesterday values: window._endHoldingsByIdx, window._configEndHoldings,
+  // a custom run's endHoldings) are marked at the funds' latest pre-market or
+  // after-hours prints instead (extendedMoveOf, js/utils.js), and the badge
+  // names that session's move, "(after hours +1.3% · +$74.8K)" (the user,
+  // 2026-11-06: not the previous day's change, the after-hours change). The
+  // session's own change stands while there are no prints, and for a line
+  // holding a fund without one.
+  const endHoldingsFor = (i, ds) => {
+    if (window._endHoldingsByIdx && (i in window._endHoldingsByIdx)) return window._endHoldingsByIdx[i];
+    if (ds && ds._configSub) return null;
+    const cfgId = ds && ds._configId;
+    if (!cfgId) return null;
+    if (window._configEndHoldings && (cfgId in window._configEndHoldings)) return window._configEndHoldings[cfgId];
+    const cr = window._customResults && window._customResults[cfgId];
+    return cr && !cr.error ? cr.endHoldings : null;
+  };
+  const withSession = (delta, session) => delta ? { ...delta, session } : null;
+  const extendedChangeFor = (i, ds, todayVal) => {
+    const end = endHoldingsFor(i, ds);
+    const move = end ? extendedMoveOf(end.h, end.cash) : null;
+    return move ? withSession(computeDayChange(todayVal * move.ratio, todayVal), move.session) : null;
+  };
+  const sessionChangeFor = (i, ds, todayVal) => {
     if (window._ydayValueByIdx && (i in window._ydayValueByIdx)) {
       return computeDayChange(todayVal, window._ydayValueByIdx[i]);
     }
@@ -2498,10 +3125,52 @@ function render() {
     if (cy && !cy.error) return computeDayChange(todayVal, cy.value);
     return null;
   };
-  const deltaLabelText = (delta) => {
-    const sign = delta.pct >= 0 ? '+' : '';
-    return `(${sign}${delta.pct.toFixed(1)}% · ${sign}${fmtFull(delta.abs)})`;
+  const dayChangeFor = (i, ds, todayVal) => {
+    if (ds && ds._txDay) return txLineDayChange(ds._txDay, todayVal);
+    return extendedChangeFor(i, ds, todayVal) || sessionChangeFor(i, ds, todayVal);
   };
+  // The real account's sheet records values but no holdings, so its day move
+  // is borrowed from the strategy it follows (window._txDay.move, see
+  // js/saved-configs.js's txFollowMove): that strategy's own badge percent,
+  // or a Buy & Hold's fixed one. { pct, session }, the session set when the
+  // move is to an extended-hours print; null without a move.
+  const txFollowPct = () => {
+    const move = window._txDay.move;
+    if ('pct' in move) {
+      const ext = move.holdings ? extendedMoveOf(move.holdings, 0) : null;
+      return ext ? { pct: (ext.ratio - 1) * 100, session: ext.session } : { pct: move.pct };
+    }
+    const last = chart.data.labels.length - 1;
+    const i = 'idx' in move ? move.idx : chart.data.datasets.findIndex(d => d._configId === move.cfgId && !d._configSub);
+    const delta = i >= 0
+      ? dayChangeFor(i, chart.data.datasets[i], chart.data.datasets[i].data[last])
+      : dayChangeFor(-1, { _configId: move.cfgId }, move.today); // a library strategy: no line, its run's value
+    return delta ? { pct: delta.pct, session: delta.session } : null;
+  };
+  // Portfolio's and Profit's day change: the followed move applied to the
+  // latest reading less today's deposit gives yesterday's portfolio, and
+  // yesterday's profit is that less what was in by yesterday. An
+  // extended-hours move runs the other way, forward from the reading, which
+  // stands at the close. Scaled into the chart's units (real $ when the
+  // inflation toggle is on) through todayVal.
+  const txLineDayChange = (line, todayVal) => {
+    const day = window._txDay;
+    const move = day && txFollowPct();
+    if (!move || move.pct == null) return null;
+    if (move.session) {
+      const printed = day.portfolio * (1 + move.pct / 100);
+      const [today, next] = line === 'actual'
+        ? [day.portfolio, printed]
+        : [day.portfolio - day.invested, printed - day.invested];
+      return withSession(computeDayChange(todayVal * next / today, todayVal), move.session);
+    }
+    const ydayPortfolio = (day.portfolio - day.flowToday) / (1 + move.pct / 100);
+    const [today, yday] = line === 'actual'
+      ? [day.portfolio, ydayPortfolio]
+      : [day.portfolio - day.invested, ydayPortfolio - (day.invested - day.flowToday)];
+    return computeDayChange(todayVal, todayVal * yday / today);
+  };
+  const deltaLabelText = (delta) => `(${delta.session ? EXTENDED_SESSION_NAMES[delta.session] + ' ' : ''}${fmtDayChange(delta)})`;
   const endLabelPlugin = {
     id: 'endLabels',
     // Size the reserved right margin to whatever the widest current label
@@ -2527,17 +3196,17 @@ function render() {
         if (ds._isShift || !c.isDatasetVisible(i)) return;
         const val = ds.data[lastIdx];
         if (typeof val !== 'number' || !isFinite(val)) return;
-        cx.font = compact ? '600 8px "Open Sans", sans-serif' : '600 9px "Open Sans", sans-serif';
+        cx.font = compact ? canvasFont(600, 8, '"Open Sans", sans-serif') : canvasFont(600, 9, '"Open Sans", sans-serif');
         maxW = Math.max(maxW, cx.measureText((ds.label || lineNames[i] || '').toUpperCase()).width);
         if (!compact) {
-          cx.font = '500 11px "JetBrains Mono", monospace';
+          cx.font = canvasFont(500, 11, '"JetBrains Mono", monospace');
           let rowW = cx.measureText(fmtFull(Math.round(val))).width;
           // Delta badge draws inline right after the value on the same row —
           // its width adds to that row's total instead of getting its own line.
           if (c._isLatestDaySelected) {
             const delta = dayChangeFor(i, ds, val);
             if (delta) {
-              cx.font = '600 9px "JetBrains Mono", monospace';
+              cx.font = canvasFont(600, 9, '"JetBrains Mono", monospace');
               rowW += 5 + cx.measureText(deltaLabelText(delta)).width;
             }
           }
@@ -2552,9 +3221,11 @@ function render() {
       // "INVESTED COMPOUNDED" (the longest built-in name) at the smaller 8px
       // font without silently clipping it against the canvas edge the same
       // way an under-sized fixed margin did before this whole plugin existed.
-      c.options.layout.padding.right = compact
+      // After a zoom the margin also keeps room under the labels for its buttons.
+      const zoomW = _zoomHome ? Math.ceil(chartZoomButtonsWidth()) + CHART_ZOOM.uiGapPx : 0;
+      c.options.layout.padding.right = Math.max(zoomW, compact
         ? Math.max(40, Math.min(130, Math.round(maxW) + 12))
-        : Math.max(100, Math.min(260, Math.round(maxW) + 16));
+        : Math.max(100, Math.min(260, Math.round(maxW) + 16)));
     },
     afterDraw(c) {
       const { ctx: cx, chartArea: area } = c;
@@ -2569,6 +3240,7 @@ function render() {
           inflBtn._lx = bx; inflBtn._ly = by;
         }
       }
+      fitChartZoomUi(c);
       // Compact mode below — see the matching comment in beforeLayout.
       const compact = window.innerWidth <= 600;
       const lastIdx = c.data.labels.length - 1;
@@ -2655,7 +3327,7 @@ function render() {
         if (compact) {
           // Name only, vertically centered on the line — there's no value
           // line underneath to share the row with.
-          cx.font = '600 8px "Open Sans", sans-serif';
+          cx.font = canvasFont(600, 8, '"Open Sans", sans-serif');
           cx.fillStyle = it.color;
           cx.globalAlpha = 0.88;
           cx.textBaseline = 'middle';
@@ -2665,7 +3337,7 @@ function render() {
         }
 
         // Label name
-        cx.font = '600 9px "Open Sans", sans-serif';
+        cx.font = canvasFont(600, 9, '"Open Sans", sans-serif');
         cx.fillStyle = it.color;
         cx.globalAlpha = 0.88;   // light theme: 0.7 washed labels out on white
         cx.textBaseline = 'bottom';
@@ -2673,7 +3345,7 @@ function render() {
         cx.globalAlpha = 1;
 
         // Value
-        cx.font = '500 11px "JetBrains Mono", monospace';
+        cx.font = canvasFont(500, 11, '"JetBrains Mono", monospace');
         cx.fillStyle = it.color;
         cx.textBaseline = 'top';
         const valStr = fmtFull(Math.round(it.val));
@@ -2686,7 +3358,7 @@ function render() {
           const delta = dayChangeFor(it.i, c.data.datasets[it.i], it.val);
           if (delta) {
             const valW = cx.measureText(valStr).width;
-            cx.font = '600 9px "JetBrains Mono", monospace';
+            cx.font = canvasFont(600, 9, '"JetBrains Mono", monospace');
             cx.fillStyle = delta.pct >= 0 ? DELTA_POS_COLOR : DELTA_NEG_COLOR;
             cx.globalAlpha = 0.95;
             cx.fillText(deltaLabelText(delta), x + valW + 5, it.y + 2);
@@ -2749,6 +3421,7 @@ function render() {
         }
       }
 
+      if (!chartShowsTradeMarks(c)) { cx.restore(); return; }
       const hoveredKey = _smaHoverKey;
       // Markers cluster wherever trades bunch up — a switch's two legs on one day,
       // or several trades within a few days at nearly the same portfolio value —
@@ -2847,6 +3520,7 @@ function render() {
         cx.stroke();
       }
 
+      if (!chartShowsTradeMarks(c)) { cx.restore(); return; }
       const hoveredKey = _smaHoverKey;
       const placed = [];
       let hovered = null; // the highlighted marker draws last, on top of its cluster
@@ -2904,7 +3578,7 @@ function render() {
       // detected and, if so, spread symmetrically around the range's
       // midpoint with a fixed gap instead of letting them overlap.
       cx.save();
-      cx.font = '600 9px "JetBrains Mono", monospace';
+      cx.font = canvasFont(600, 9, '"JetBrains Mono", monospace');
       const rH = 15, rY = area.top + 8, rPadX = 5, rGap = 4;
       const startLabel = fmtDayMonthYear(c.data.labels[lo]);
       const endLabel = fmtDayMonthYear(c.data.labels[hi]);
@@ -2936,7 +3610,7 @@ function render() {
       // centered under the two date pills, its own row so it never has to
       // compete with them for horizontal room on a narrow selection.
       const durLabel = formatRangeDuration(c.data.labels[lo], c.data.labels[hi]);
-      cx.font = '600 9px "JetBrains Mono", monospace';
+      cx.font = canvasFont(600, 9, '"JetBrains Mono", monospace');
       const durMidX = (x1 + x2) / 2;
       const durTw = cx.measureText(durLabel).width;
       const durY = rY + rH + 8;
@@ -3012,23 +3686,27 @@ function render() {
           cx.stroke();
         });
 
-        // Label text — leads with the % change at 3 significant figures
-        // (roundToSigFigs above — a plain toFixed(1) either shows false
-        // decimal precision on a big move like 1578.466% or rounds a small
-        // one to nothing; this reads as a clean "1580%"), then the actual
-        // from/to values in brackets, e.g. "+1580% ($205K → $3.4M)". The %
-        // draws in a bigger font than the from/to part — it's the number
-        // that actually answers "how much did this move," the bracket is
-        // supporting detail.
-        const pctSign = delta.pct >= 0 ? '+' : '-';
-        const pctStr = roundToSigFigs(Math.abs(delta.pct), 3);
-        const pctText = `${pctSign}${pctStr}%`;
-        const restText = ` (${fmtFull(v1)} → ${fmtFull(v2)})`;
+        // Label text — leads with the % change, then the from/to values and
+        // the signed difference in brackets, e.g. "+52.0% ($43.6K → $66.3K,
+        // +$22.7K)". Every number shows three digits (fmtRangeMoney/
+        // fmtRangePct: 168.3 → 168, 57.2 stays) so stacked labels line up
+        // digit for digit; the from/to pair only gains digits when it would
+        // otherwise print as the same value.
+        // The % draws in a bigger font than the bracket part — it's the
+        // number that actually answers "how much did this move," the bracket
+        // is supporting detail.
+        // The sign is the move's direction. A line that started at exactly $0
+        // (the real account's Profit on its first day) has no percent, so its
+        // pill shows the bracket alone, in the same column as the others'.
+        const up = delta.abs >= 0, pctSign = up ? '+' : '-';
+        const pctText = delta.pct == null ? '' : `${pctSign}${fmtRangePct(Math.abs(delta.pct))}%`;
+        const [fromStr, toStr] = fmtRangeMoneyPair(v1, v2);
+        const restText = ` (${fromStr} → ${toStr}, ${pctSign}${fmtRangeMoney(Math.abs(delta.abs))})`;
         cx.font = RANGE_PCT_FONT;
         const pctW = cx.measureText(pctText).width;
         cx.font = RANGE_REST_FONT;
         const restW = cx.measureText(restText).width;
-        items.push({ my: (py1 + py2) / 2, pctText, pctW, restText, restW, tw: pctW + restW, color, pos: delta.pct >= 0 });
+        items.push({ my: (py1 + py2) / 2, pctText, pctW, restText, restW, tw: pctW + restW, color, pos: up });
       }
 
       // Pass 2: de-overlap the label Y positions, then draw the pills.
@@ -3041,9 +3719,16 @@ function render() {
         const maxY = area.bottom - 5 - (items.length - 1 - k) * LABEL_GAP;
         if (items[k].my > maxY) items[k].my = maxY;
       }
+      // Every pill takes the same width and the same two columns — the % is
+      // right-aligned in the first column, the bracket starts at one shared x
+      // in the second — so the stack reads top-down like a table: same
+      // position, same meaning, on every line.
       const padX = 4;
+      const pctColW = Math.max(...items.map(it => it.pctW));
+      const restColW = Math.max(...items.map(it => it.restW));
+      const tableW = pctColW + restColW;
       items.forEach(it => {
-        const rx = mx - it.tw / 2 - padX, ry = it.my - LABEL_H / 2, rw = it.tw + padX * 2;
+        const rx = mx - tableW / 2 - padX, ry = it.my - LABEL_H / 2, rw = tableW + padX * 2;
         cx.fillStyle = 'rgba(255,255,255,0.92)';
         cx.strokeStyle = it.color;
         cx.lineWidth = 1;
@@ -3057,18 +3742,20 @@ function render() {
         // it's still clear which line a label belongs to when several are
         // stacked close together.
         cx.fillStyle = it.pos ? DELTA_POS_COLOR : DELTA_NEG_COLOR;
-        cx.textAlign = 'left';
         cx.textBaseline = 'middle';
-        const segStartX = mx - it.tw / 2;
+        const tableStartX = mx - tableW / 2;
+        cx.textAlign = 'right';
         cx.font = RANGE_PCT_FONT;
-        cx.fillText(it.pctText, segStartX, it.my + 1);
+        cx.fillText(it.pctText, tableStartX + pctColW, it.my + 1);
+        cx.textAlign = 'left';
         cx.font = RANGE_REST_FONT;
-        cx.fillText(it.restText, segStartX + it.pctW, it.my + 1);
+        cx.fillText(it.restText, tableStartX + pctColW, it.my + 1);
       });
       cx.restore(); // also resets textAlign/textBaseline for whatever draws next
     }
   };
 
+  registerSignedLogScale();
   chart = new Chart(ctx, {
     type: 'line',
     plugins: [endLabelPlugin, smaMarkerPlugin, customMarkerPlugin, rangeSelectPlugin],
@@ -3101,11 +3788,11 @@ function render() {
           hidden: true
         },
         {
-          // Consolidated Buy & Hold slot — label + data swap based on
+          // Consolidated Buy & Hold slot — label, data and colour swap based on
           // #select-bh-underlying. Default = TQQQ.
           label: bhPicked.label,
           data: bhActiveD,
-          borderColor: "#ff2d2e",
+          borderColor: FUND_COLORS[bhKey],
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3117,7 +3804,7 @@ function render() {
         {
           label: 'B&H QQQ',
           data: [],
-          borderColor: "#00b929",
+          borderColor: FUND_COLORS.qqq,
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3130,7 +3817,7 @@ function render() {
         {
           label: 'B&H SPY',
           data: [],
-          borderColor: "#ff708b",
+          borderColor: FUND_COLORS.spy,
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3193,7 +3880,7 @@ function render() {
         {
           label: 'B&H QLD',
           data: [],
-          borderColor: '#06b6d4',
+          borderColor: FUND_COLORS.qld,
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3206,7 +3893,7 @@ function render() {
         {
           label: 'B&H SSO',
           data: [],
-          borderColor: '#c084fc',
+          borderColor: FUND_COLORS.sso,
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3219,7 +3906,7 @@ function render() {
         {
           label: 'B&H SPXL',
           data: [],
-          borderColor: '#f43f5e',
+          borderColor: FUND_COLORS.spxl,
           backgroundColor: 'transparent',
           fill: false,
           tension: 0.3,
@@ -3267,15 +3954,20 @@ function render() {
         x: {
           ticks: {
             color: '#383874',
-            font: { size: 10 },
+            font: { size: 10 * uiScale() },
             // Fewer ticks on narrow viewports: 10 labels across a ~350px-wide
             // mobile plot forces a steep rotation, and the resulting label
             // height ate into the LOG toggle's fixed bottom-left position
             // (they sit only a few px apart — see .chart-log-toggle CSS).
             maxTicksLimit: window.innerWidth <= 600 ? 6 : 10,
+            // Year and month; a window under about a year (a zoom, or a short
+            // Entry → Exit) gets whole dates, since its weekly ticks would
+            // repeat months.
             callback: function(val) {
               const d = this.getLabelForValue(val);
-              return d ? d.substring(0, 7) : '';
+              if (!d) return '';
+              const days = (Date.parse(this.getLabelForValue(this.max)) - Date.parse(this.getLabelForValue(this.min))) / 86400000;
+              return days < 400 ? d : d.substring(0, 7);
             }
           },
           grid: { color: "rgba(197,193,236,0.3)" }, border: { color: "#c5c1ec" }
@@ -3286,7 +3978,7 @@ function render() {
           min: logScale ? undefined : 0, // linear anchored at 0; log auto-scales
           ticks: {
             color: '#383874',
-            font: { family: 'JetBrains Mono', size: 10 },
+            font: { family: 'JetBrains Mono', size: 10 * uiScale() },
             // Four gridlines is enough to read a level off; eleven turned the
             // axis into a ruler competing with the lines it's measuring.
             maxTicksLimit: Y_TICKS,
@@ -3294,9 +3986,9 @@ function render() {
           },
           // On log scale, Chart.js generates a tick at every 1..9 × 10^n which
           // is way too dense. Keep only "nice" ticks (1, 2, 5 × 10^n) so the
-          // axis stays readable.
+          // axis stays readable. The signed log axis makes its own.
           afterBuildTicks: (scale) => {
-            if (document.getElementById('chart-log-toggle').getAttribute('aria-pressed') !== 'true') return;
+            if (scale.type !== 'logarithmic') return;
             scale.ticks = scale.ticks.filter(t => {
               const v = t.value;
               if (v <= 0) return false;
@@ -3325,6 +4017,7 @@ function render() {
   chart._displayGrain = displayGrain;
   chart._isLatestDaySelected = isLatestDaySelected;
   chart._prevTradingDayDate = prevTradingDayDate;
+  chart._periodDates = [entryDateForSim, exitDateForSim];
   // First successful chart creation — the loading overlay (index.html) has
   // done its job. This branch only runs once per page load (subsequent
   // render() calls take the `if (chart)` update path above), so no separate
@@ -3335,6 +4028,7 @@ function render() {
   if (typeof applyNineSigFamily === 'function') applyNineSigFamily(chart);
   applyInflationToChart(chart); // deflate all lines to real $ when the toggle is on
   clampChartMin(chart);
+  renderChartZoomUi();
   chart.update('none');
   // SMA action-marker hover (chart is created exactly once, so attach here).
   chart.canvas.addEventListener('mousemove', handleSmaMarkerHover);
@@ -3355,7 +4049,8 @@ function render() {
   // pointer leaves the canvas mid-gesture, and definitely finish on mouseup
   // wherever that lands.
   chart.canvas.addEventListener('mousedown', (e) => {
-    if (isTouchChart || !chart.chartArea) return;
+    // With ⌘/Ctrl held the drag pans a zoom instead (the handlers below).
+    if (isTouchChart || !chart.chartArea || modKeyHeld(e)) return;
     const rect = chart.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const area = chart.chartArea;
@@ -3429,9 +4124,67 @@ function render() {
   // it must not simultaneously dismiss it.
   document.addEventListener('click', (e) => {
     if (!hasRangeSelection()) return;
-    if (e.target && e.target.closest && (e.target.closest('#mainChart') || e.target.closest('#share-btn') || e.target.closest('#analytics-share'))) return;
+    if (e.target && e.target.closest && (e.target.closest('#mainChart') || e.target.closest('#chart-zoom-ui') || e.target.closest('#share-btn') || e.target.closest('#analytics-share'))) return;
     clearRangeSelection();
   });
+
+  // Zoom and pan move Entry and Exit (setPeriodFromZoom). ⌘/Ctrl + wheel over
+  // the chart scales the period by 2^(-deltaY × wheelK) around the date under
+  // the cursor, never under minSpanMs or past zoomBounds; within
+  // rightAnchorPx of the plot's right edge the pivot is that edge, so zooming
+  // near the latest value keeps Exit in place. passive: false so the page
+  // neither scrolls nor zooms itself. A pinned range is dismissed: its dates
+  // belong to the period being left.
+  chart.canvas.addEventListener('wheel', (e) => {
+    if (!modKeyHeld(e) || !chart.chartArea) return;
+    e.preventDefault();
+    const { T0, T1 } = zoomBounds(), full = T1 - T0;
+    const cur = currentZoomWindow(), span = cur.t1 - cur.t0;
+    const scale = Math.pow(2, -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : CHART_ZOOM.wheelK));
+    const next = Math.max(Math.min(CHART_ZOOM.minSpanMs, full), Math.min(full, span / scale));
+    if (next === span) return;
+    clearRangeSelection();
+    const area = chart.chartArea, x = e.clientX - chart.canvas.getBoundingClientRect().left;
+    const nearRight = area.right - x <= Math.min(CHART_ZOOM.rightAnchorPx, (area.right - area.left) / 2);
+    // Where the cursor sits along the period; near the right edge, the edge.
+    const frac = nearRight ? 1 : Math.max(0, Math.min(1, (x - area.left) / (area.right - area.left)));
+    const pivot = cur.t0 + frac * span;
+    let n0 = pivot - frac * next, n1 = pivot + (1 - frac) * next;
+    if (n0 < T0) { n0 = T0; n1 = T0 + next; }
+    if (n1 > T1) { n1 = T1; n0 = T1 - next; }
+    zoomGestureStep();
+    setPeriodFromZoom(n0, n1);
+  }, { passive: false });
+  // ⌘/Ctrl + drag slides the period, following the cursor pixel for pixel and
+  // stopping at either end of zoomBounds (the whole history has nowhere to go).
+  chart.canvas.addEventListener('mousedown', (e) => {
+    if (!modKeyHeld(e) || !chart.chartArea) return;
+    const { T0, T1 } = zoomBounds(), cur = currentZoomWindow(), area = chart.chartArea;
+    if (cur.t1 - cur.t0 >= T1 - T0) return;
+    e.preventDefault();
+    clearRangeSelection();
+    _chartPan = { clientX: e.clientX, t0: cur.t0, t1: cur.t1, msPerPx: (cur.t1 - cur.t0) / (area.right - area.left) };
+    _zoomGesture = true;
+    document.body.classList.add('chart-panning');
+    document.getElementById('custom-tooltip').style.display = 'none';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!_chartPan) return;
+    const { T0, T1 } = zoomBounds();
+    const shift = Math.max(T0 - _chartPan.t0, Math.min(T1 - _chartPan.t1, (_chartPan.clientX - e.clientX) * _chartPan.msPerPx));
+    setPeriodFromZoom(_chartPan.t0 + shift, _chartPan.t1 + shift);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!_chartPan) return;
+    _chartPan = null;
+    document.body.classList.remove('chart-panning');
+    endZoomGesture();
+  });
+  chart.canvas.addEventListener('dblclick', resetChartZoom);
+  const zoomReset = document.getElementById('chart-zoom-reset');
+  zoomReset.title = `Back to the Entry and Exit from before the zoom. ${MOD_KEY} + scroll zooms, ${MOD_KEY} + drag pans.`;
+  zoomReset.addEventListener('click', resetChartZoom);
+  document.getElementById('chart-zoom-latest').addEventListener('click', zoomToLatest);
 
   // Reverse link: hovering a transaction-log row highlights that trade's action
   // point on the chart. Rows carry data-mkey = their smaLog index, which is the
@@ -3466,7 +4219,7 @@ function render() {
   // Stash latest data for the side-panel log tables. Normally this is the
   // canonical base simulation; but when a saved strategy is open for editing the
   // panel describes THAT strategy, so swap in its (separately computed) sim.
-  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, smaLog };
+  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, gldPoints, soxlPoints, soxxPoints, smaLog, smaControls: smaDdControls };
   if (window._editingConfigId && window._editingConfigSim) {
     const cs = window._editingConfigSim;
     _logData = {
@@ -3478,7 +4231,11 @@ function render() {
       ssoPoints:  cs.ssoPoints  || ssoPoints,
       spxlPoints: cs.spxlPoints || spxlPoints,
       sqqqPoints: cs.sqqqPoints || sqqqPoints,
+      gldPoints:  cs.gldPoints  || gldPoints,
+      soxlPoints: cs.soxlPoints || soxlPoints,
+      soxxPoints: cs.soxxPoints || soxxPoints,
       smaLog:     cs.smaLog     || smaLog,
+      smaControls: cs.ddControls || smaDdControls,
     };
   }
   // The marker plugin reads _logData.smaLog, which is only finalized here —
@@ -3501,6 +4258,7 @@ function render() {
   refreshAllLegends();
 
   if (typeof refreshAnalytics === 'function') refreshAnalytics();
+  if (typeof refreshYearsHeld === 'function') refreshYearsHeld();
 
   fitChartHeight();
 }
