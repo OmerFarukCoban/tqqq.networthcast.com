@@ -37,3 +37,4 @@ Two flags cover the rest:
 - **Overlapping runs**: a `concurrency` group with `cancel-in-progress: false` queues a delayed run instead of killing it, and the push step rebases first, since two runs writing `data/*.tsv` would otherwise race.
 - **Rate limits**: yfinance throttles shared CI IPs, and nine runs a day each pull `period="max"` for seven tickers. The refresh step retries once after 120s so a transient 429 lands as a later refresh rather than a failed run.
 - **Permissions**: the workflow uses the default `GITHUB_TOKEN` with `contents: write`. If org-level settings block workflow pushes, flip *Settings → Actions → General → Workflow permissions* to "Read and write".
+
