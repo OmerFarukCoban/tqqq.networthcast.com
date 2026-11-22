@@ -381,5 +381,5 @@
   }
   refresh();
   setInterval(refresh, REFRESH_MS);
-  setInterval(pollQuotes, QUOTES_MS);
+  if (QUOTES_PROXY) setInterval(pollQuotes, QUOTES_MS);
 })();

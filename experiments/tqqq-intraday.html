@@ -280,7 +280,9 @@ const historyUrl = fund => `${DATA_ROOT}data/intraday/${fund.toLowerCase()}-5m.t
 // With the quotes proxy's URL set (cloudflare/quotes, deployed to Cloudflare:
 // 'https://tqqq-quotes.<account>.workers.dev'), today comes from the proxy
 // instead, in the same layout, at most a minute old, polled every minute.
-const QUOTES_PROXY = 'https://tqqq-quotes.infoicy.workers.dev';
+// Fork safeguard: upstream's proxy returns HTTP 403 on other origins; empty
+// falls back cleanly to data/intraday/tqqq-today-1m.tsv refreshed by Actions.
+const QUOTES_PROXY = '';
 // Without the proxy only TQQQ has a today file (scripts/update_intraday_today.py writes that one); another fund then draws no live session.
 const todayUrl = fund => QUOTES_PROXY ? `${QUOTES_PROXY}/bars/${fund}?range=1d&interval=1m&format=tsv` : `${DATA_ROOT}data/intraday/${fund.toLowerCase()}-today-1m.tsv`;
 const TODAY_BAR_MINUTES = 1;

@@ -59,7 +59,11 @@ function minutesBeforeClose(lastDate, fetchedAt) {
 // agree with the file's close before that day, or the two are on different
 // adjustment bases (a split, as SOXX on 2026-11-05) and the fund keeps the file's
 // price. The intraday page keeps its own copy of the URL (experiments/tqqq-intraday.html).
-const QUOTES_PROXY = 'https://tqqq-quotes.infoicy.workers.dev';
+// Fork safeguard: upstream's Cloudflare Worker only allows tqqq.networthcast.com
+// and localhost (returns HTTP 403 elsewhere). Leave empty to run cleanly off
+// this fork's hourly GitHub Actions data without 403 console errors, or set
+// your own Cloudflare Worker URL here if you deploy one.
+const QUOTES_PROXY = '';
 const LIVE_FUNDS = ['tqqq', 'qqq', 'spy', 'qld', 'sso', 'spxl', 'sqqq', 'gld', 'soxl', 'soxx'];
 const LIVE_PREV_CLOSE_TOLERANCE = 0.03;
 // Outside the regular session a quote carries `extended`: the fund's latest
@@ -67,6 +71,7 @@ const LIVE_PREV_CLOSE_TOLERANCE = 0.03;
 // the close (the proxy's README). The names the pages give the sessions.
 const EXTENDED_SESSION_NAMES = { pre: 'pre-market', post: 'after hours', overnight: 'overnight' };
 async function loadLiveQuotes() {
+  if (!QUOTES_PROXY) return null;
   const resp = await fetch(QUOTES_PROXY + '/quotes', { cache: 'no-store' });
   if (!resp.ok) throw new Error('The quotes proxy answered HTTP ' + resp.status);
   return resp.json();

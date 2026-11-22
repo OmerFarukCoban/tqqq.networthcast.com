@@ -93,10 +93,13 @@
   deriveFromDaily();
   // Every minute while the tab is visible: the live prices again, and when one
   // moved, the derived data, the strategy worker's copy and the chart with it.
-  const startLivePrices = () => setInterval(async () => {
+  const startLivePrices = () => {
+    if (!QUOTES_PROXY) return;
+    setInterval(async () => {
     if (document.hidden) return;
     let quotes;
     try { quotes = await loadLiveQuotes(); } catch (err) { console.error('Live prices unavailable:', err); return; }
+    if (!quotes) return;
     const before = { ...daily[daily.length - 1] };
     const next = applyLiveQuotes(daily, highLowRows, quotes);
     if (!next) return;
@@ -125,6 +128,7 @@
     render();
     redrawPanelSignalChart();
   }, 60 * 1000);
+  };
   const maxQIdx = quarterlyData.length - 1;
   document.getElementById('slider-exit').value = maxQIdx;
   // Default the entry to Q1 2010 (the TQQQ era — real 3× funds launched then).

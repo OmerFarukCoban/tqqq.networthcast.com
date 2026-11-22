@@ -70,7 +70,12 @@ jobs:
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
-        run: python3 scripts/update_intraday.py --incremental
+        run: |
+          if [ -z "$ALPACA_API_KEY" ] || [ -z "$ALPACA_API_SECRET" ]; then
+            echo "ALPACA_API_KEY / ALPACA_API_SECRET not set — skipping 5-minute Alpaca refresh."
+            exit 0
+          fi
+          python3 scripts/update_intraday.py --incremental
 
       # One yfinance request for today's 1-minute bars. Alpaca's free plan
       # holds back the latest 15 minutes, Yahoo serves the current minute, so
