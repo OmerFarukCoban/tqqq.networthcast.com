@@ -3545,10 +3545,8 @@ ${turnaroundMondayRuleSnippet("p.startIdx")}
   if (!t.endsWith('\n  }\n}')) throw new Error(`withTurnaroundMonday(${spec.name}): the base must end with its run method`);
   return t.slice(0, -'\n  }\n}'.length) + '\n    })(data, p);\n' + dashboard + '    return res;\n  }\n}';
 }
-CODE[48] = withTurnaroundMonday(CODE[44], { name: "NFCI veto + Turnaround Monday", signal: "tqqq", levels: "close", hooks: [
-  ['        if (vetoOn) want = "cash";\n', '        if (vetoOn) want = "cash";\n        want = tmHold(i, want);\n', 'the credit-veto line'],
-  ['note = vetoOn ? "NFCI "', 'note = tmWhy ? tmWhy : vetoOn ? "NFCI "', 'the trade note'],
-  ['fired = vetoMoved && (vetoOn || !nfAbove) ? CREDIT : null;', 'fired = tmPanel(vetoMoved && (vetoOn || !nfAbove) ? CREDIT : null);', 'the trade panel'] ] });
+// #48 is defined directly below (after withBigDay) with configurable SQQQ cap
+// and Turnaround Monday entry/exit levels, keeping CODE[44] strictly untouched.
 CODE[49] = withTurnaroundMonday(CODE[45], { name: "Buy-back + Turnaround Monday", signal: "spy", levels: "close", hooks: [
   ['          : (_frac > 0 ? p.asset : crashAsset);\n', '          : (_frac > 0 ? p.asset : crashAsset);\n        want = tmHold(i, want);\n        if (tmActive) _frac = 1;\n        if (tmWhy && !why) why = tmWhy;\n', 'the holding decision'] ] });
 // #50's floor holds cash, like #47's, and the Monday rule trades it (the user,
@@ -4107,9 +4105,894 @@ function withBigDay(base, spec) {
 // The stretch engines (#50, #53): the holding, the trade's panel and its reason.
 const BIG_DAY_STRETCH = { fund: '"tqqq"', fundText: 'TQQQ', long: 'want === "tqqq" || want === "soxl"' };
 const BIG_DAY_REASON = ['const reason = (i, w) => ', 'const reason = (i, w) => bigWhy ? bigWhy : (bigAfter(i) ? bigAfter(i) + "; " : "") + ownReason(i, w);\n    const ownReason = (i, w) => ', 'the trade reason'];
-CODE[48] = withBigDay(CODE[48], { name: "NFCI veto + Turnaround Monday", rise: 15, drop: 15, fund: 'p.asset', fundText: 'the fund', long: 'want === p.asset', hooks: [
-  ['        want = tmHold(i, want);\n', '        want = tmHold(i, want);\n        want = bigDay(i, want);\n', 'the holding decision'],
-  ['            fired = tmPanel(vetoMoved && (vetoOn || !nfAbove) ? CREDIT : null);\n', '            fired = tmPanel(vetoMoved && (vetoOn || !nfAbove) ? CREDIT : null);\n            if (bigWhy) note = bigWhy; else if (bigAfter(i)) note = bigAfter(i) + "; " + note;\n            fired = bigPanel(i, fired);\n', 'the trade panel'] ] });
+// #48 — NFCI veto + Turnaround Monday (fork custom edition: adds configurable
+// sqqqMaxDays safety cap, tmEnabled toggle, and independent tmEntryLevel /
+// tmExitLevel low/high/close selectors alongside Big days ±15%; CODE[44] stays
+// strictly untouched).
+CODE[48] = `{
+  name: "NFCI veto + Turnaround Monday",
+  params: [
+    { section: "Fund & signal" },
+    {
+      id: "asset",
+      label: "Fund traded",
+      text: "Hold {} as the main fund.",
+      default: "tqqq",
+      options: [
+        { value: "tqqq", label: "TQQQ" }, { value: "qld", label: "QLD" }, { value: "spxl", label: "SPXL" },
+        { value: "sso", label: "SSO" }, { value: "qqq", label: "QQQ" }, { value: "spy", label: "SPY" }
+      ]
+    },
+    {
+      id: "stat",
+      label: "Center line",
+      text: "Compare its close with its {}.",
+      default: "median",
+      options: [
+        { value: "median", label: "Median" }, { value: "sma", label: "Moving average" },
+        { value: "rsi", label: "RSI (vs its 50 midline)" }
+      ]
+    },
+    {
+      id: "window",
+      label: "Window (days)",
+      text: "The line covers the last {} days.",
+      default: 250,
+      options: [5, 7, 10, 14].concat(Array.from({ length: 6 }, (_, k) => 20 + 10 * k), [75], Array.from({ length: 10 }, (_, k) => 80 + 10 * k), [175, 180, 190, 200], Array.from({ length: 82 }, (_, k) => 209 + k), Array.from({ length: 21 }, (_, k) => 300 + 10 * k))
+    },
+    { section: "Overextended — sell the melt-up" },
+    {
+      id: "overPct",
+      label: "Above line (%)",
+      text: "Switch out when it closes {} above the line.",
+      unit: "%",
+      default: 55,
+      options: [2, 4, 5].concat(Array.from({ length: 4 }, (_, k) => 6 + 2 * k), [15, 18, 20, 22, 25, 28, 30, 32], Array.from({ length: 82 }, (_, k) => +(34.5 + 0.5 * k).toFixed(1)), Array.from({ length: 45 }, (_, k) => 80 + 5 * k))
+    },
+    {
+      id: "park",
+      label: "Then hold",
+      text: "Then hold {} until it closes back under the line.",
+      default: "sqqq",
+      options: [
+        { value: "sqqq", label: "SQQQ" }, { value: "cash", label: "Cash" }, { value: "qqq", label: "QQQ" },
+        { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" }
+      ]
+    },
+    {
+      id: "sqqqMaxDays",
+      label: "SQQQ at most (days in a row)",
+      tip: "After this many trading days in a row in SQQQ, move to cash until the rules want something else. Prevents severe losses during prolonged melt-ups.",
+      text: "Hold SQQQ at most {} days in a row, then cash.",
+      default: 40,
+      options: [{ value: 0, label: "No limit" }].concat(
+        Array.from({ length: 50 }, (_, k) => 1 + k),
+        Array.from({ length: 15 }, (_, k) => 55 + 5 * k),
+        [126],
+        Array.from({ length: 12 }, (_, k) => 130 + 5 * k),
+        [189],
+        Array.from({ length: 13 }, (_, k) => 190 + 5 * k),
+        [252]
+      )
+    },
+    { section: "Crash signal — the exit measures against this" },
+    {
+      id: "crashStat",
+      label: "Center line",
+      text: "The crash exit measures against {}.",
+      default: "same",
+      options: [
+        { value: "same", label: "Same as main" }, { value: "median", label: "Median" },
+        { value: "sma", label: "Moving average" }, { value: "rsi", label: "RSI (vs its 50 midline)" }
+      ]
+    },
+    {
+      id: "crashWindow",
+      label: "Window (days)",
+      text: "That line covers {}.",
+      unit: " days",
+      default: 0,
+      options: [{ value: 0, label: "Same as main" }].concat(Array.from({ length: 28 }, (_, k) => 5 + k), Array.from({ length: 4 }, (_, k) => 40 + 10 * k), [75], Array.from({ length: 10 }, (_, k) => 80 + 10 * k), [175], Array.from({ length: 4 }, (_, k) => 180 + 10 * k), Array.from({ length: 96 }, (_, k) => 217 + k), Array.from({ length: 19 }, (_, k) => 320 + 10 * k))
+    },
+    { section: "Crash exit — leave when it breaks down" },
+    {
+      id: "exitPct",
+      label: "Below line (%)",
+      text: "Sell on the first close under a level {} from that line.",
+      unit: "%",
+      default: -28,
+      options: Array.from({ length: 201 }, (_, k) => +(20 - 0.5 * k).toFixed(1))
+    },
+    {
+      id: "crashAsset",
+      label: "Then hold",
+      text: "Then hold {} until the price recovers above that level.",
+      default: "cash",
+      options: [
+        { value: "cash", label: "Cash" }, { value: "sqqq", label: "SQQQ" }, { value: "qqq", label: "QQQ" },
+        { value: "spy", label: "SPY" }, { value: "sso", label: "SSO" }, { value: "qld", label: "QLD" },
+        { value: "tqqq", label: "TQQQ" }, { value: "spxl", label: "SPXL" }
+      ]
+    },
+    {
+      id: "slopeGate",
+      label: "Only if line slope below (%/yr)",
+      text: "Only while the line rises less than {} a year.",
+      unit: "%",
+      default: 20,
+      options: [{ value: 999, label: "Off" }].concat(Array.from({ length: 201 }, (_, k) => -50 + k))
+    },
+    {
+      id: "belowGate",
+      label: "Only after days below line",
+      text: "And only after {} closes in a row under the line.",
+      default: 10,
+      options: [{ value: 0, label: "Off" }].concat(Array.from({ length: 100 }, (_, k) => 1 + k))
+    },
+    { section: "Credit veto — NFCI (Chicago Fed)" },
+    {
+      id: "nfciTh",
+      label: "Go to cash when NFCI above",
+      text: "Go to cash while the NFCI is above {}.",
+      default: 0.4,
+      options: [{ value: 999, label: "Off" }].concat(Array.from({ length: 101 }, (_, k) => +(0.02 * k).toFixed(2)))
+    },
+    {
+      id: "vetoEnd",
+      label: "Veto lifts when",
+      text: "The veto lifts when {}.",
+      default: "cycle",
+      options: [
+        { value: "cycle", label: "NFCI calms OR a crash exit→recovery completes" },
+        { value: "nfci", label: "NFCI calms only" }
+      ]
+    },
+    { section: "Turnaround Monday" },
+    {
+      id: "tmEnabled",
+      label: "Turnaround Monday",
+      text: "Trade idle cash with Turnaround Monday: {}.",
+      tip: "Turn off to disable the Turnaround Monday overlay while keeping the rest of the strategy active.",
+      type: "bool",
+      default: true,
+      options: [
+        { value: true, label: "On" },
+        { value: false, label: "Off" }
+      ]
+    },
+    {
+      id: "tmEntryLevel",
+      label: "Monday entry level",
+      text: "Buy TQQQ when Monday closes below the previous trading day's {}.",
+      tip: "Choose the previous trading day's low or close. A low entry requires daily lows. The comparison is strictly below; equality does not buy.",
+      default: "low",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "close", label: "Close" }
+      ]
+    },
+    {
+      id: "tmExitLevel",
+      label: "Monday exit level",
+      text: "Exit the Monday trade at the first close above the previous trading day's {}.",
+      tip: "Choose the previous trading day's high or close. The threshold updates each trading day. A high exit requires daily highs. The comparison is strictly above; equality does not sell.",
+      default: "high",
+      options: [
+        { value: "high", label: "High" },
+        { value: "close", label: "Close" }
+      ]
+    },
+    { section: "Big days" },
+    {
+      id: "bigRise",
+      label: "Sell for a day after a rise of (%)",
+      tip: "At the close of such a day the fund held is sold, and the rules' choice is bought back at the next close. TQQQ fell the day after 7 of its 9 rises of 15% or more since 2010, five of them in March 2020.",
+      text: "After TQQQ rises {} or more in a day, sell and buy back at the next close.",
+      unit: "%",
+      default: 15,
+      options: [{ value: 0, label: "Off" }].concat(Array.from({ length: 111 }, (_, k) => +(5 + 0.5 * k).toFixed(1)))
+    },
+    {
+      id: "bigDrop",
+      label: "In cash, buy for a day after a fall of (%)",
+      tip: "Only while the rules hold cash: the fund is bought at the close of such a day and sold at the next close. TQQQ rose the day after 7 of its 9 falls of 15% or more since 2010.",
+      text: "In cash, buy the fund after TQQQ falls {} or more in a day, and sell at the next close.",
+      unit: "%",
+      default: 15,
+      options: [{ value: 0, label: "Off" }].concat(Array.from({ length: 111 }, (_, k) => +(5 + 0.5 * k).toFixed(1)))
+    },
+    { section: "Execution & costs" },
+    {
+      id: "splitDays",
+      fit: false,
+      label: "One trade per day",
+      text: "Spread each switch over two days, selling at one close and buying at the next: {}.",
+      type: "bool",
+      default: true,
+      options: [
+        { value: true, label: "Yes" }, { value: false, label: "No" }
+      ]
+    },
+    {
+      id: "cashRate",
+      fit: false,
+      label: "Cash interest (%/yr)",
+      text: "Cash earns {} a year.",
+      unit: "%",
+      default: 4,
+      options: [
+        0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 10, 11, 12
+      ]
+    },
+    {
+      id: "tradeCost",
+      fit: false,
+      label: "Trading cost (%)",
+      text: "Each buy and sell costs {} of the amount traded.",
+      unit: "%",
+      default: 0.02,
+      options: [
+        0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1
+      ]
+    }
+  ],
+  columns: [
+    { key: "bigDay", label: "Big day", tip: "TQQQ's move on a day the Big days rule sold or bought for one day. Blank on other days." },
+    { key: "tmTrade", label: "Monday trade", tip: "The day an open Turnaround Monday trade was bought. Blank when none is open." },
+    { key: "assetPrice", label: "Fund", tip: "Closing price of the traded fund." },
+    { key: "medianPrice", label: "Center", tip: "The main center line in price dollars — median or moving average of the last N closes, or the RSI-implied center (price x 50 / RSI) when the signal is RSI." },
+    { key: "abovePct", label: "vs line", tip: "How far the main signal sits above (+) or below (−) its center, in percent." },
+    { key: "nfci", label: "NFCI", tip: "Chicago Fed National Financial Conditions Index (weekly, 7-day publication lag). Above 0 = tighter-than-average conditions; above the veto threshold = credit crunch, everything to cash." },
+    { key: "zone", label: "Band", tip: "Which band the close landed in — or CREDIT VETO while the NFCI override holds everything in cash." },
+    { key: "sqqqRun", label: "SQQQ days", tip: "Days in a row the rules have wanted SQQQ. Past the limit the money sits in cash." },
+    { key: "fee", label: "Fee", tip: "Trading cost paid on this row's trade." }
+  ],
+  run(data, p) {
+    const tmEnabled = p.tmEnabled !== false && p.tmEnabled !== "false";
+    const res = (function(data, p) {
+      const log = [];
+      const px = data[p.asset] || data.tqqq;
+      const W = Math.max(2, p.window || 250);
+      // Memory before the entry: run the rules unlogged over WARM days prior
+      // so entry-day state matches a continuously running account.
+      const entryIdx = p.startIdx,
+        entryInitial = p.initial,
+        WARM = 3 * W;
+      p = Object.assign({}, p, { startIdx: Math.max(0, entryIdx - WARM), initial: entryInitial > 0 ? entryInitial : 1 });
+      const over = (p.overPct || 0) / 100;
+      const exitB = (p.exitPct || 0) / 100;
+      const cost = (p.tradeCost || 0) / 100;
+      const dayRate = Math.pow(1 + (p.cashRate || 0) / 100, 1 / 252) - 1;
+      const priceOf = (id, i) => (id === "cash" || !data[id]) ? 0 : (data[id][i] || 0);
+      const crashAsset = p.crashAsset || "cash";
+      const sqMax = +p.sqqqMaxDays || 0;
+      const nfciTh = p.nfciTh == null ? 0.4 : +p.nfciTh,
+        CREDIT = "Credit stress (NFCI)";
+      const nfciArr = data.nfci || null;
+      const vetoCycle = (p.vetoEnd || "cycle") !== "nfci";
+      let vetoActive = false,
+        cycleExit = false,
+        prevAbove = false;
+
+      const useMed = p.stat !== "sma";
+      const mainRsi = p.stat === "rsi";
+      const crashSame = p.crashStat === "same" || p.crashStat == null;
+      const crashRsi = crashSame ? mainRsi : p.crashStat === "rsi";
+      const W2raw = +p.crashWindow || 0;
+      const W2 = W2raw > 0 ? Math.max(2, W2raw) : W;
+      const useMedC = crashSame ? useMed : p.crashStat !== "sma";
+      const sameLine = W2 === W && crashRsi === mainRsi && (crashRsi || useMedC === useMed);
+
+      const mkRoll = (Wn) => {
+        const win = [];
+        let sum = 0;
+        const lb = (v) => {
+          let lo = 0,
+            hi = win.length;
+          while (lo < hi) {
+            const m = (lo + hi) >> 1;
+            if (win[m] < v) lo = m + 1;
+            else hi = m;
+          }
+          return lo;
+        };
+        const warmFrom = Math.max(0, p.startIdx - Wn + 1);
+        return {
+          warmFrom,
+          Wn,
+          ins(v) {
+            win.splice(lb(v), 0, v);
+            sum += v;
+          },
+          rem(v) {
+            const k = lb(v);
+            if (k < win.length && win[k] === v) {
+              win.splice(k, 1);
+              sum -= v;
+            }
+          },
+          center(m) { const n = win.length; return n === 0 ? 0 : (m ? (n % 2 ? win[(n - 1) >> 1] : (win[n / 2 - 1] + win[n / 2]) / 2) : sum / n); }
+        };
+      };
+      const mkRsi = (Wn) => {
+        let ag = 0,
+          al = 0,
+          cnt = 0;
+        const upd = (i) => {
+          if (!(px[i] > 0 && px[i - 1] > 0)) return;
+          const d = px[i] - px[i - 1],
+            g = d > 0 ? d : 0,
+            l = d < 0 ? -d : 0;
+          if (cnt < Wn) {
+            ag += g;
+            al += l;
+            cnt++;
+            if (cnt === Wn) {
+              ag /= Wn;
+              al /= Wn;
+            }
+          } else {
+            ag = (ag * (Wn - 1) + g) / Wn;
+            al = (al * (Wn - 1) + l) / Wn;
+          }
+        };
+        for (let k = Math.max(1, p.startIdx - 4 * Wn); k < p.startIdx; k++) upd(k);
+        return { step: upd, val() { return cnt < Wn ? 0 : (al === 0 ? 100 : 100 - 100 / (1 + ag / al)); } };
+      };
+      const rollM = mainRsi ? null : mkRoll(W);
+      const rollC = crashRsi ? null : (sameLine ? rollM : mkRoll(W2));
+      const rsiM = mainRsi ? mkRsi(W) : null;
+      const rsiC = crashRsi ? (mainRsi && W2 === W ? rsiM : mkRsi(W2)) : null;
+      if (rollM)
+        for (let k = rollM.warmFrom; k < p.startIdx; k++)
+          if (px[k] > 0) rollM.ins(px[k]);
+      if (rollC && rollC !== rollM)
+        for (let k = rollC.warmFrom; k < p.startIdx; k++)
+          if (px[k] > 0) rollC.ins(px[k]);
+
+      const slopeGate = p.slopeGate == null ? 999 : +p.slopeGate;
+      const belowGate = +p.belowGate || 0;
+      const preC = new Float64Array(63);
+      if (!crashRsi && slopeGate !== 999) {
+        const pre = mkRoll(W2);
+        const pf = Math.max(0, p.startIdx - 63 - W2 + 1);
+        for (let k = pf; k < p.startIdx - 63; k++)
+          if (px[k] > 0) pre.ins(px[k]);
+        for (let j = 0; j < 63; j++) {
+          const k = p.startIdx - 63 + j;
+          if (k >= 0 && px[k] > 0) pre.ins(px[k]);
+          const dropK = k - W2;
+          if (dropK >= pf && px[dropK] > 0) pre.rem(px[dropK]);
+          preC[j] = k >= 0 ? pre.center(useMedC) : 0;
+        }
+      }
+      const histC = new Float64Array(64);
+      let belowC = 0,
+        slopeC = 0;
+
+      let cash = p.initial,
+        shares = 0,
+        held = "cash";
+      let state = "normal",
+        invested = p.initial,
+        feeTotal = 0;
+      let statePrev = "normal",
+        stateIdx = p.startIdx;
+      let med = 0,
+        medC = 0,
+        above = 0,
+        aboveC = 0,
+        zone = "normal";
+      let sigM = 0,
+        sigC = 0;
+      let minAC = Infinity,
+        maxAC = -Infinity;
+      let stints = [],
+        inCrash = false,
+        stintLen = 0;
+      let peakPx = 0,
+        peakDate = "",
+        ddNow = 0,
+        maxDdSeen = 0;
+      let nfNow = NaN,
+        vetoOn = false,
+        vetoDays = 0,
+        vetoWindows = 0,
+        wasVeto = false;
+      let sqRun = 0,
+        sqCapped = false;
+
+      // Turnaround Monday on TQQQ with configurable entry (low/close) and exit (high/close) levels.
+      const tmFund = "tqqq",
+        tmSig = "tqqq",
+        tmSigName = "TQQQ";
+      const tmEntry = p.tmEntryLevel === "close" ? "close" : "low",
+        tmExit = p.tmExitLevel === "close" ? "close" : "high",
+        tmHigh = data[tmSig + "High"],
+        tmLow = data[tmSig + "Low"];
+      if (tmEnabled && tmEntry === "low" && !tmLow) throw new Error("Turnaround Monday low entry needs data." + tmSig + "Low");
+      if (tmEnabled && tmExit === "high" && !tmHigh) throw new Error("Turnaround Monday high exit needs data." + tmSig + "High");
+      const tmLevel = (kind, i) => {
+        const arr = kind === "low" ? tmLow : kind === "high" ? tmHigh : data[tmSig];
+        const value = i >= 0 && arr ? arr[i] : NaN;
+        return Number.isFinite(value) && value > 0 ? value : NaN;
+      };
+      const tmLevelName = kind => "the previous trading day's " + kind;
+      const tmIn = new Uint8Array(p.endIdx + 1); // 1 = the rule is in a trade at that close
+      const tmMonday = new Uint8Array(p.endIdx + 1); // 1 = a Monday close under the entry level
+      if (tmEnabled) {
+        for (let i = p.startIdx, inT = false; i <= p.endIdx; i++) {
+          const c = data[tmSig][i],
+            prev = i > 0 ? data[tmSig][i - 1] : 0;
+          const wd = ((Math.floor(Date.parse(data.dates[i]) / 86400000) + 4) % 7 + 7) % 7; // 1 = Monday
+          if (c > 0 && prev > 0) {
+            const entryLvl = tmLevel(tmEntry, i - 1);
+            const exitLvl = tmLevel(tmExit, i - 1);
+            if (inT) {
+              if (c > exitLvl) inT = false;
+            } else if (wd === 1 && c < entryLvl) inT = true;
+            tmMonday[i] = wd === 1 && c < entryLvl ? 1 : 0;
+          }
+          tmIn[i] = inT ? 1 : 0;
+        }
+      }
+      let tmActive = false,
+        tmSince = "",
+        tmWhy = "",
+        tmKept = false;
+      const tmHold = (i, want) => {
+        tmWhy = "";
+        tmKept = false;
+        if (!tmEnabled) { tmActive = false; return want; }
+        if (want !== "cash") { tmActive = false; return want; }
+        if (tmActive && !tmIn[i]) {
+          tmActive = false;
+          tmWhy = "Turnaround Monday exit, " + tmSigName + " closed above " + tmLevelName(tmExit);
+        } else if (!tmActive && (held === "cash" || held === tmFund) && tmIn[i] && (tmMonday[i] === 1 || !(i > p.startIdx && tmIn[i - 1]))) {
+          tmActive = true;
+          tmSince = data.dates[i];
+          tmKept = held === tmFund;
+          const under = tmLevelName(tmEntry);
+          tmWhy = tmKept ? "Kept " + tmFund.toUpperCase() + ": the rules sold, but " + tmSigName + " closed a Monday under " + under :
+            "Turnaround Monday, " + tmSigName + " closed a Monday under " + under;
+        }
+        return tmActive ? tmFund : "cash";
+      };
+      const TM_PANEL = "Turnaround Monday";
+      const tmPanel = (t) => (tmWhy ? TM_PANEL : t);
+
+      // Big days (stateless 1-day override on TQQQ's daily close-to-close move).
+      const bigUp = +p.bigRise || 0,
+        bigDown = +p.bigDrop || 0;
+      const bigMoveAt = (i) => i > 0 && data.tqqq[i - 1] > 0 && data.tqqq[i] > 0 ? (data.tqqq[i] / data.tqqq[i - 1] - 1) * 100 : null;
+      let bigWhy = "",
+        bigAt = -1,
+        bigWas = "",
+        bigBought = false;
+      const bigDay = (i, want) => {
+        const m = bigMoveAt(i);
+        bigWhy = "";
+        bigBought = false;
+        if (m === null) return want;
+        const sells = bigUp > 0 && m >= bigUp && (want === p.asset),
+          buys = bigDown > 0 && -m >= bigDown && want === "cash";
+        if (!sells && !buys) return want;
+        bigAt = i;
+        bigWas = (m >= 0 ? "+" : "−") + Math.abs(m).toFixed(1) + "%";
+        bigBought = buys;
+        bigWhy = sells ? "TQQQ rose " + m.toFixed(1) + "% today (" + bigUp + "% or more): out until the next close" :
+          "TQQQ fell " + (-m).toFixed(1) + "% today (" + bigDown + "% or more): in " + String(p.asset).toUpperCase() + " until the next close";
+        return sells ? "cash" : p.asset;
+      };
+      const bigAfter = (i) => (bigAt === i - 1 && !bigWhy ? "the day after TQQQ's " + bigWas + " day" : "");
+      const BIG_PANEL = "Big days";
+      const bigPanel = (i, t) => (bigWhy || bigAfter(i) ? BIG_PANEL : t);
+      const bigChartRow = (i) => {
+        const prior = i > 0 && data.tqqq[i - 1] > 0 ? data.tqqq[i - 1] : null;
+        return {
+          bigMove: bigMoveAt(i),
+          bigClose: data.tqqq[i] > 0 ? data.tqqq[i] : null,
+          bigRiseLine: bigUp > 0 ? bigUp : null,
+          bigRisePx: bigUp > 0 && prior ? prior * (1 + bigUp / 100) : null,
+          bigDropLine: bigDown > 0 ? -bigDown : null,
+          bigDropPx: bigDown > 0 && prior ? prior * (1 - bigDown / 100) : null
+        };
+      };
+
+      for (let i = p.startIdx; i <= p.endIdx; i++) {
+        if (px[i] > 0) {
+          if (rollM) rollM.ins(px[i]);
+          if (rollC && rollC !== rollM) rollC.ins(px[i]);
+        }
+        if (rollM) { const drop = i - W; if (drop >= rollM.warmFrom && px[drop] > 0) rollM.rem(px[drop]); }
+        if (rollC && rollC !== rollM) { const dropC = i - W2; if (dropC >= rollC.warmFrom && px[dropC] > 0) rollC.rem(px[dropC]); }
+        if (rsiM && i > 0) rsiM.step(i);
+        if (rsiC && rsiC !== rsiM && i > 0) rsiC.step(i);
+        med = mainRsi ? 50 : rollM.center(useMed);
+        sigM = mainRsi ? rsiM.val() : px[i];
+        medC = sameLine ? med : (crashRsi ? 50 : rollC.center(useMedC));
+        sigC = sameLine ? sigM : (crashRsi ? rsiC.val() : px[i]);
+        above = med > 0 && sigM > 0 ? sigM / med - 1 : 0;
+        aboveC = medC > 0 && sigC > 0 ? sigC / medC - 1 : 0;
+        const dayN = i - p.startIdx;
+        const prevC = crashRsi ? 50 : (dayN >= 63 ? histC[(dayN - 63) % 64] : preC[dayN] || 0);
+        slopeC = prevC > 0 && medC > 0 ? (Math.pow(medC / prevC, 4) - 1) * 100 : 0;
+        histC[dayN % 64] = medC;
+        belowC = (medC > 0 && sigC > 0 && sigC < medC) ? belowC + 1 : 0;
+        if (medC > 0 && sigC > 0) {
+          if (aboveC < minAC) minAC = aboveC;
+          if (aboveC > maxAC) maxAC = aboveC;
+        }
+        if (px[i] > 0) {
+          if (px[i] > peakPx) {
+            peakPx = px[i];
+            peakDate = data.dates[i];
+          }
+          ddNow = peakPx > 0 ? px[i] / peakPx - 1 : 0;
+          if (-ddNow > maxDdSeen) maxDdSeen = -ddNow;
+        }
+        nfNow = nfciArr ? nfciArr[i] : NaN;
+        let fired = null;
+        const month = data.dates[i].slice(0, 7);
+        let contributed = 0,
+          action = "hold",
+          note = "",
+          fee = 0;
+        if (held === "cash") cash *= 1 + dayRate;
+        if (p.contributions && p.contributions[data.dates[i]]) {
+          const amt = p.contributions[data.dates[i]];
+          cash += amt;
+          contributed = amt;
+          invested += amt;
+          action = "contribution";
+          if (cash < 0) {
+            const heldPx = priceOf(held, i),
+              gross = Math.min(shares * heldPx, -cash / (1 - cost));
+            if (gross > 0) {
+              shares = Math.max(0, shares - gross / heldPx);
+              fee += gross * cost;
+              note = "withdrawal — sold " + held.toUpperCase();
+            }
+            cash = 0;
+          }
+        }
+
+        if (med > 0 && medC > 0 && sigM > 0 && sigC > 0 && px[i] > 0) {
+          const pOver = med * (1 + over),
+            pExit = medC * (1 + exitB);
+          if (state === "normal" || state === "over") {
+            if (sigM > pOver) state = "over";
+            else if (sigC < pExit &&
+              (slopeGate === 999 || slopeC < slopeGate) &&
+              (belowGate === 0 || belowC >= belowGate)) state = "crashCash";
+            else state = "normal";
+          } else if (sigC > pExit) state = "normal";
+          zone = state === "over" ? "overextended" : state === "normal" ? "normal" : "crash";
+          if (state !== statePrev) {
+            statePrev = state;
+            stateIdx = i;
+          }
+          const nfAbove = nfciTh !== 999 && isFinite(nfNow) && nfNow > nfciTh;
+          if (!vetoCycle) vetoOn = nfAbove;
+          else {
+            if (nfAbove && !prevAbove) {
+              vetoActive = true;
+              cycleExit = false;
+            }
+            if (!nfAbove) vetoActive = false;
+            if (vetoActive) {
+              if (state === "crashCash") cycleExit = true;
+              else if (cycleExit) vetoActive = false;
+            }
+            vetoOn = vetoActive;
+          }
+          prevAbove = nfAbove;
+          const vetoMoved = vetoOn !== wasVeto;
+          if (vetoOn) { vetoDays++; if (!wasVeto) vetoWindows++; }
+          wasVeto = vetoOn;
+          let want = state === "normal" ? p.asset :
+            state === "over" ? p.park :
+            crashAsset;
+          if (vetoOn) want = "cash";
+          // SQQQ consecutive-day safety cap: move to cash once held past sqqqMaxDays
+          sqRun = want === "sqqq" ? sqRun + 1 : 0;
+          sqCapped = want === "sqqq" && sqMax > 0 && sqRun > sqMax;
+          if (sqCapped) want = "cash";
+          want = tmHold(i, want);
+          want = bigDay(i, want);
+          if (p.splitDays && want !== held && held !== "cash" && want !== "cash") want = "cash";
+          if (want !== held) {
+            const oldPx = priceOf(held, i);
+            if (held !== "cash" && oldPx > 0) {
+              const gross = shares * oldPx,
+                f = gross * cost;
+              cash += gross - f;
+              fee += f;
+              shares = 0;
+            }
+            const newPx = priceOf(want, i);
+            if (want === "cash" || newPx > 0) {
+              if (want !== "cash") {
+                const f = cash * cost;
+                shares = (cash - f) / newPx;
+                fee += f;
+                cash = 0;
+              }
+              action = held === "cash" ? "buy" : want === "cash" ? "sell" : "switch";
+              note = tmWhy ? tmWhy :
+                vetoOn ? "NFCI " + nfNow.toFixed(2) + " > " + nfciTh + " — credit veto" :
+                sqCapped ? "SQQQ held " + sqMax + " days in a row, the most allowed — holding cash" :
+                (above >= 0 ? "+" : "−") + Math.abs(above * 100).toFixed(1) + "% vs line — " + zone;
+              fired = tmPanel(vetoMoved && (vetoOn || !nfAbove) ? CREDIT : null);
+              if (bigWhy) note = bigWhy;
+              else if (bigAfter(i)) note = bigAfter(i) + "; " + note;
+              fired = bigPanel(i, fired);
+              held = want;
+            }
+          } else if (held !== "cash" && cash > 0 && priceOf(held, i) > 0) {
+            const f = cash * cost;
+            shares += (cash - f) / priceOf(held, i);
+            fee += f;
+            cash = 0;
+            if (action === "contribution") note = "contribution deployed";
+          }
+        }
+        const wasCrash = inCrash;
+        inCrash = state === "crashCash";
+        if (inCrash) stintLen++;
+        if (wasCrash && !inCrash) {
+          stints.push(stintLen);
+          stintLen = 0;
+        }
+        feeTotal += fee;
+        if (i < entryIdx) continue;
+        if (i === entryIdx) {
+          const pxE = priceOf(held, i),
+            inFund = held !== "cash" && pxE > 0 ? shares * pxE : 0,
+            total = inFund + cash;
+          const scale = total > 0 ? (entryInitial + contributed) / total : 0;
+          fee = inFund * scale * cost;
+          shares = pxE > 0 ? (inFund * scale - fee) / pxE : 0;
+          cash *= scale;
+          invested = entryInitial + contributed;
+          feeTotal = fee;
+          stints = [];
+          stintLen = inCrash ? 1 : 0;
+          peakPx = px[i];
+          peakDate = data.dates[i];
+          ddNow = 0;
+          maxDdSeen = 0;
+          vetoDays = vetoOn ? 1 : 0;
+          vetoWindows = vetoOn ? 1 : 0;
+          note = (held === "cash" ? "In cash" : "Holding " + held.toUpperCase()) + " at the entry: " + (vetoOn ? "NFCI " + nfNow.toFixed(2) + " > " + nfciTh + " — credit veto" : sqCapped ? "SQQQ held " + sqMax + " days in a row, the most allowed" : (above >= 0 ? "+" : "−") + Math.abs(above * 100).toFixed(1) + "% vs line — " + zone + (stateIdx < entryIdx ? ", since " + data.dates[stateIdx] + ", before the entry" : ""));
+        }
+        const medPlot = mainRsi ? (sigM > 0 ? px[i] * 50 / sigM : 0) : med;
+        const hp = priceOf(held, i);
+        const stockVal = shares * hp;
+        const logDay = p.dailyDisplay ||
+          (p.weeklyDisplay ?
+            (i === p.endIdx || Math.floor((Date.parse(data.dates[i]) / 86400000 + 3) / 7) !== Math.floor((Date.parse(data.dates[i + 1]) / 86400000 + 3) / 7)) :
+            (i === p.endIdx || data.dates[i + 1].slice(0, 7) !== month));
+        if (i === entryIdx) action = "start";
+        if (tmKept) {
+          if (action === "hold") action = "keep";
+          note = note ? note + "; " + tmWhy : tmWhy;
+        }
+        if (i === p.endIdx && action === "hold") action = "end";
+        if (contributed !== 0 || logDay || action !== "hold") {
+          const tmPriorClose = tmEnabled && i > 0 ? data[tmSig][i - 1] : NaN,
+            tmExitPx = tmEnabled ? tmLevel(tmExit, i - 1) : NaN,
+            tmEntryPx = tmEnabled ? tmLevel(tmEntry, i - 1) : NaN;
+          log.push({
+            bigDay: bigWhy ? bigWas : null,
+            ...bigChartRow(i),
+            tmTrade: tmActive ? tmSince : null,
+            tmChange: tmEnabled && i > 0 && data[tmSig][i - 1] > 0 ? (data[tmSig][i] / data[tmSig][i - 1] - 1) * 100 : null,
+            tmClose: tmEnabled && data[tmSig][i] > 0 ? data[tmSig][i] : null,
+            tmHighPct: tmPriorClose > 0 && tmExitPx > 0 ? (tmExitPx / tmPriorClose - 1) * 100 : null,
+            tmLowPct: tmPriorClose > 0 && tmEntryPx > 0 ? (tmEntryPx / tmPriorClose - 1) * 100 : null,
+            tmHighPx: tmExitPx > 0 ? tmExitPx : null,
+            tmLowPx: tmEntryPx > 0 ? tmEntryPx : null,
+            ...(tmWhy ? { firedBy: tmPanel(null) } : {}),
+            ...(bigWhy || bigAfter(i) ? { firedBy: BIG_PANEL } : {}),
+            date: data.dates[i],
+            value: stockVal + cash,
+            action: action,
+            note: note,
+            held: held.toUpperCase(),
+            price: hp,
+            shares: shares,
+            holdingsValue: stockVal,
+            cash: cash,
+            contributed: contributed,
+            invested: invested,
+            fee: fee,
+            assetPrice: px[i] || 0,
+            medianPrice: medPlot,
+            abovePct: above * 100,
+            nfci: isFinite(nfNow) ? nfNow : null,
+            nfciVeto: nfciTh !== 999 && isFinite(nfNow) ? nfciTh : null,
+            ...(fired ? { firedBy: fired } : {}),
+            zone: vetoOn ? "CREDIT VETO" : zone,
+            sqqqRun: sqRun > 0 ? sqRun : null,
+            overLine: medPlot * (1 + over),
+            exitLine: medPlot * (1 + exitB)
+          });
+        }
+      }
+
+      const A = p.asset.toUpperCase(),
+        K = p.park === "cash" ? "cash" : p.park.toUpperCase();
+      const lbl = id => id === "cash" ? "cash" : id.toUpperCase();
+      const CN = mainRsi ? "RSI(" + W + ")" : (useMed ? "median" : "avg");
+      const pctStr = (above >= 0 ? "+" : "−") + Math.abs(above * 100).toFixed(2) + "%";
+      const zoneTone = vetoOn ? "bad" : zone === "normal" ? "good" : "bad";
+      const holdTxt = held === "cash" ? "cash" : held.toUpperCase();
+      const PRICE = A + " price";
+      const chartLines = [
+        { key: "assetPrice", label: A + " price", group: PRICE },
+        mainRsi ? { key: "medianPrice", label: "RSI(" + W + ") line", group: PRICE } : { key: "medianPrice", label: W + "-day " + CN, group: PRICE },
+        { key: "exitLine", label: "Crash exit (" + (p.exitPct || 0) + "%)", group: PRICE },
+        { key: "overLine", label: "Overextended (+" + (p.overPct || 0) + "%)", group: PRICE }
+      ];
+      if (nfciTh !== 999) chartLines.push({ key: "nfci", label: "NFCI", unit: "num", group: CREDIT }, { key: "nfciVeto", label: "Credit veto", unit: "num", group: CREDIT });
+      if (inCrash && stintLen > 0) stints.push(stintLen);
+      const nfciStr = isFinite(nfNow) ? (nfNow >= 0 ? "+" : "") + nfNow.toFixed(2) : "n/a";
+      const vetoDist = isFinite(nfNow) && nfciTh !== 999 ? (nfciTh - nfNow) : NaN;
+      return {
+        log: log,
+        lines: chartLines,
+        signals: {
+          cards: [{
+              label: mainRsi ? "RSI(" + W + ") vs 50" : A + " vs " + W + "-day " + CN,
+              value: (above >= 0 ? "▲ " : "▼ ") + pctStr,
+              tone: zone === "normal" ? "good" : "bad",
+              icon: above >= 0 ? "trendUp" : "trendDown",
+              sub: (mainRsi ? sigM.toFixed(1) + " vs 50" : (px[p.endIdx] || 0).toFixed(2) + " vs " + med.toFixed(2) + " " + CN),
+              tip: "The stretch reading the overextension rule uses. Above +" + (p.overPct || 0) + "% parks in " + K + (sqMax > 0 && p.park === "sqqq" ? " (capped at " + sqMax + " days)" : "") + "; below " + (p.exitPct || 0) + "% (with the confirmation gates) sells to " + lbl(crashAsset) + "."
+            },
+            {
+              label: "Current band",
+              value: vetoOn ? "CREDIT VETO" : zone,
+              tone: zoneTone,
+              icon: "sliders",
+              sub: "holding " + holdTxt + (sqCapped ? " (SQQQ " + sqMax + "d cap)" : sqRun > 0 && sqMax > 0 ? " (SQQQ day " + sqRun + "/" + sqMax + ")" : ""),
+              tip: "Which band the last close landed in — overextended (park), normal (hold), crash (out) — or CREDIT VETO while the NFCI override keeps everything in cash regardless of the bands."
+            },
+            {
+              label: "NFCI credit veto",
+              value: nfciStr,
+              tone: nfciTh === 999 ? "good" : (vetoOn ? "bad" : "good"),
+              icon: "shield",
+              sub: nfciTh === 999 ? "veto off" : vetoOn ? "ABOVE +" + nfciTh + " — in cash until it calms" + (vetoCycle ? " or a crash cycle completes" : "") : "veto at +" + nfciTh + " (" + vetoDist.toFixed(2) + " away) · fired " + vetoWindows + "x, " + vetoDays + "d this run",
+              tip: "Chicago Fed National Financial Conditions Index, weekly with a 7-day publication lag. Above +" + (nfciTh === 999 ? "0.4" : nfciTh) + " = credit crunch: everything goes to cash. One-way — it never adds leverage. The veto lifts when the index calms" + (vetoCycle ? ", or earlier if the price engine fires its own crash exit and then recovers while vetoed — the market has re-earned entry, so credit stress alone no longer keeps you out" : "") + ". Fired only in genuine credit crises since 1971 (1973-75, the Volcker squeeze, 1987, S&L 1990, the GFC) and has been silent since July 2009."
+            },
+            {
+              label: "Crash exit",
+              value: (p.exitPct || 0) + "%",
+              icon: "shield",
+              sub: "then hold " + lbl(crashAsset) +
+                (slopeGate !== 999 ? " · needs slope<" + slopeGate : "") +
+                (belowGate > 0 ? " · " + belowGate + "d below" : ""),
+              tip: "The confirmed-breakdown exit: the signal must fall this far below its center AND pass the confirmation gates before " + A + " is sold to " + lbl(crashAsset) + "; bought back when the signal recovers above the exit line."
+            },
+            {
+              label: A + " drawdown",
+              value: (ddNow * 100).toFixed(1) + "%",
+              tone: ddNow > -0.15 ? "good" : "bad",
+              icon: "trendDown",
+              sub: "from " + peakPx.toFixed(2) + " high (" + peakDate + "); worst " + (-maxDdSeen * 100).toFixed(0) + "%",
+              tip: "The traded fund's fall from its running high. The price bands act on stretch-vs-line, the veto on credit conditions — this shows what they are protecting against."
+            }
+          ],
+          decision: {
+            action: vetoOn ? "Stay in cash — credit veto" :
+              sqCapped ? "Stay in cash — SQQQ day limit" :
+              (state === "normal" ? "Buy " + A : state === "over" ? "Hold " + K : lbl(crashAsset) === "cash" ? "Stay in cash" : "Hold " + lbl(crashAsset)),
+            note: vetoOn ? "NFCI " + nfciStr + " above +" + nfciTh + " — waiting for credit conditions to calm" :
+              sqCapped ? "SQQQ held " + sqMax + " days in a row, the most allowed; signal is " + pctStr + " vs the " + CN :
+              "signal is " + pctStr + " vs the " + CN + " — " + zone + " band; NFCI " + nfciStr,
+            tone: zoneTone,
+            reasons: [{
+                name: "Band",
+                val: A + " " + pctStr + " vs " + CN,
+                tag: zone + " · " + holdTxt + (sqCapped ? " (cap)" : ""),
+                lean: zone === "normal" ? "buy" : holdTxt === "cash" ? "cash" : "out"
+              },
+              {
+                name: "Credit (NFCI)",
+                val: nfciStr + " vs +" + (nfciTh === 999 ? "off" : nfciTh),
+                tag: vetoOn ? "VETO — cash" : "calm",
+                lean: vetoOn ? "cash" : "buy"
+              }
+            ]
+          }
+        }
+      };
+    })(data, p);
+
+    // Turnaround Monday panel & dashboard card
+    if (tmEnabled) {
+      const last = res.log[res.log.length - 1] || {};
+      const tmF = "TQQQ",
+        tmS = "TQQQ";
+      const tmOpen = !!last.tmTrade,
+        tmIdle = last.held === "CASH";
+      const tmUp = "the previous trading day's " + (p.tmExitLevel === "close" ? "close" : "high"),
+        tmDown = "the previous trading day's " + (p.tmEntryLevel === "close" ? "close" : "low");
+      const lines = res.lines || [],
+        first = lines.length ? lines[0].label : "";
+      for (const l of lines)
+        if (!l.group) l.group = first;
+      const afterFirst = lines.findIndex(l => l.group !== lines[0].group);
+      const tmLines = [
+        { key: "tmChange", label: tmS + " close vs prior close", unit: "%", group: "Turnaround Monday", priceKey: "tmClose" }
+      ];
+      if (p.tmEntryLevel === "close" && p.tmExitLevel === "close") {
+        tmLines.push({ key: "tmLowPct", label: "Prior close (entry and exit)", unit: "%", group: "Turnaround Monday", priceKey: "tmLowPx" });
+      } else {
+        tmLines.push({ key: "tmHighPct", label: p.tmExitLevel === "close" ? "Prior close (exit)" : "Prior high (exit)", unit: "%", group: "Turnaround Monday", priceKey: "tmHighPx" }, { key: "tmLowPct", label: p.tmEntryLevel === "close" ? "Prior close (entry)" : "Prior low (entry)", unit: "%", group: "Turnaround Monday", priceKey: "tmLowPx" });
+      }
+      lines.splice(afterFirst < 0 ? lines.length : afterFirst, 0, ...tmLines);
+      res.lines = lines;
+      if (res.signals) {
+        res.signals.cards = (res.signals.cards || []).concat([{
+          label: "Turnaround Monday",
+          icon: "clock",
+          tone: tmOpen ? "good" : "",
+          value: tmOpen ? "In a trade" : tmIdle ? "Waiting" : "Idle",
+          sub: tmOpen ? tmF + " since " + last.tmTrade + ", sells at the first close above " + tmUp : tmIdle ? "buys " + tmF + " at a Monday close under " + tmDown : "the rules hold " + last.held,
+          tip: "Trades the idle cash: buys " + tmF + " when " + tmS + " closes a Monday under " + tmDown + ", sells at the first close above " + tmUp + "."
+        }]);
+        if (tmOpen && res.signals.decision) {
+          const d = res.signals.decision;
+          res.signals.decision = {
+            action: "Hold " + tmF,
+            note: "Turnaround Monday trade since " + last.tmTrade + "; the rules themselves are in cash",
+            tone: "good",
+            reasons: (d.reasons || []).concat([{ name: "Turnaround Monday", val: "open since " + last.tmTrade, tag: "in · " + tmF, lean: "buy" }])
+          };
+        }
+      }
+    }
+
+    // Big days panel & dashboard card
+    if (res.lines && ((+p.bigRise || 0) > 0 || (+p.bigDrop || 0) > 0)) {
+      const big = [{ key: "bigMove", label: "TQQQ close vs prior close", unit: "%", group: "Big days", priceKey: "bigClose" }];
+      if ((+p.bigRise || 0) > 0) big.push({ key: "bigRiseLine", label: "Sell for a day", unit: "%", group: "Big days", priceKey: "bigRisePx" });
+      if ((+p.bigDrop || 0) > 0) big.push({ key: "bigDropLine", label: "In cash, buy for a day", unit: "%", group: "Big days", priceKey: "bigDropPx" });
+      const at = res.lines.findIndex(l => l.group === "Credit stress (NFCI)");
+      res.lines = at < 0 ? res.lines.concat(big) : res.lines.slice(0, at).concat(big, res.lines.slice(at));
+    }
+    if (res.signals && ((+p.bigRise || 0) > 0 || (+p.bigDrop || 0) > 0)) {
+      const up = +p.bigRise || 0,
+        down = +p.bigDrop || 0,
+        e = p.endIdx,
+        row = res.log[res.log.length - 1] || {};
+      const move = e > 0 && data.tqqq[e - 1] > 0 && data.tqqq[e] > 0 ? (data.tqqq[e] / data.tqqq[e - 1] - 1) * 100 : null;
+      const acted = !!row.bigDay,
+        inFund = row.held !== "CASH";
+      res.signals.cards = (res.signals.cards || []).concat([{
+        label: "Big days",
+        icon: "activity",
+        tone: acted ? (inFund ? "good" : "bad") : "",
+        value: acted ? (inFund ? "In for a day" : "Out for a day") : "Waiting",
+        sub: "TQQQ " + (move === null ? "n/a" : (move >= 0 ? "+" : "−") + Math.abs(move).toFixed(1) + "%") + " today; " + [up > 0 ? "sells for a day at +" + up + "%" : "", down > 0 ? "in cash, buys for a day at −" + down + "%" : ""].filter(Boolean).join(", "),
+        tip: "After a one-day rise this large the fund held is sold until the next close. After a fall this large, while the rules hold cash, the fund is bought until the next close."
+      }]);
+      if (acted && res.signals.decision) {
+        const d = res.signals.decision;
+        res.signals.decision = Object.assign({}, d, {
+          action: inFund ? "Hold " + row.held + " until the next close" : "Cash until the next close",
+          note: row.note || d.note,
+          tone: inFund ? "good" : "bad",
+          reasons: (d.reasons || []).concat([{ name: "Big days", val: "TQQQ " + row.bigDay, tag: (inFund ? "in" : "out") + " · one day", lean: inFund ? "buy" : "cash" }])
+        });
+      }
+    }
+    return res;
+  }
+}`;
 CODE[49] = withBigDay(CODE[49], { name: "Buy-back + Turnaround Monday", rise: 15, drop: 15, fund: 'p.asset', fundText: 'the fund', long: 'want === p.asset', hooks: [
   ['        if (tmWhy && !why) why = tmWhy;\n', '        if (tmWhy && !why) why = tmWhy;\n        want = bigDay(i, want);\n        if (bigBought) _frac = 1;   // the whole account, as a Monday trade\n        if (bigWhy) { why = bigWhy; sliceNote = ""; }   // a slice bought into a fund already held (a Monday trade, a big-day buy) left its note waiting for the next trade\n        else if (bigAfter(i)) why = bigAfter(i) + (why ? "; " + why : "");\n', 'the holding decision'] ] });
 CODE[50] = withBigDay(CODE[50], { name: "TQQQ vs QQQ + Turnaround Monday", rise: 15, drop: 15, ...BIG_DAY_STRETCH, hooks: [

@@ -253,11 +253,17 @@ function buildDailyHoldingsFromCustom(res, data, startIdx, endIdx) {
     if (logRow) {
       activeTm = !!logRow.tmTrade;
       activeDip = !!logRow.dipTrade;
-      if (activeTm && typeof logRow.note === 'string') {
-        if (/\bSPY\b/.test(logRow.note)) tmSig = 'spy';
-        else if (/\bTQQQ\b/.test(logRow.note)) tmSig = 'tqqq';
-        if (logRow.note.includes("prior day's low")) tmMode = 'hl';
-        else if (logRow.note.includes('prior close')) tmMode = 'close';
+      if (activeTm) {
+        if (typeof logRow.note === 'string') {
+          if (/\bSPY\b/.test(logRow.note)) tmSig = 'spy';
+          else if (/\bTQQQ\b/.test(logRow.note)) tmSig = 'tqqq';
+        }
+        if (typeof logRow.tmHighPct === 'number') {
+          tmMode = Math.abs(logRow.tmHighPct) > 1e-9 ? 'hl' : 'close';
+        } else if (typeof logRow.note === 'string') {
+          if (/(?:prior|previous trading) day's low/.test(logRow.note)) tmMode = 'hl';
+          else if (/(?:prior|previous trading day's) close/.test(logRow.note)) tmMode = 'close';
+        }
       }
       if (activeDip && typeof logRow.note === 'string') {
         const dm = /held until the close of (\d{4}-\d{2}-\d{2})/.exec(logRow.note);
