@@ -33,7 +33,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.15.4/beautify.min.js" defer></script>
-<link rel="stylesheet" href="styles.css?v=547">
+<link rel="stylesheet" href="styles.css?v=548">
 </head>
 <body>
 
@@ -188,6 +188,30 @@
       </div>
     </div>
 
+    <div class="tax-controls control-group">
+      <input type="hidden" id="tax-enabled" value="0">
+      <button id="tax-toggle" type="button" aria-pressed="false" aria-controls="tax-assumptions"
+        onclick="document.getElementById('tax-enabled').value = readTaxSettings().enabled ? '0' : '1'; changeTaxSettings()">Türkiye tax estimate: off</button>
+      <div id="tax-assumptions" hidden>
+        <p>2026 GİB non-wage rules applied across all strategies. Leave Yİ-ÜFE and USD/TRY change at 0% for a constant-real-USD estimate, or set both together to model the 10% indexation cliff on short holds.</p>
+        <label for="tax-fx">Current USD/TRY (bracket conversion)</label>
+        <input id="tax-fx" type="number" min="0.01" max="1000000" step="0.01" value="40" onchange="changeTaxSettings()">
+        <label for="tax-ppi-growth">Annual Yİ-ÜFE inflation (%)</label>
+        <input id="tax-ppi-growth" type="number" min="0" max="500" step="0.1" value="0" onchange="changeTaxSettings()">
+        <label for="tax-fx-growth">Annual USD/TRY depreciation (%)</label>
+        <input id="tax-fx-growth" type="number" min="-90" max="500" step="0.1" value="0" onchange="changeTaxSettings()">
+        <p id="tax-ppi-fx-warn" class="tax-warn" hidden>Note: indexing USD cost basis by TRY Yİ-ÜFE with 0% USD/TRY depreciation under-estimates tax. Pair Yİ-ÜFE with an expected annual USD/TRY depreciation rate (or leave both at 0%).</p>
+        <details>
+          <summary>How the estimate works</summary>
+          <p>Turkish-resident individual, no other declared income. FIFO lots track TRY cost basis at purchase FX and apply GVK mük. 81 preceding-month Yİ-ÜFE indexing only when cumulative Yİ-ÜFE rises at least 10%, then convert realized gain back to sale-date USD.</p>
+          <p><b>Annual taxable income</b> = max($0, realized sale profits − realized sale losses) + foreign cash interest when that interest exceeds the USD equivalent of ₺22,000. Capital losses offset same-year capital gains only.</p>
+          <p><b>2026 non-wage tariff:</b> 15% / 20% / 27% / 35% / 40% converted using Current USD/TRY.</p>
+          <p id="tax-usd-thresholds"></p>
+          <p>Estimated tax is deducted at year-end (and at exit for a partial final year) from cash first, selling holdings proportionally if needed. Unsold appreciation is not taxed. Separate dividend tax and foreign tax credits are not modeled.</p>
+        </details>
+      </div>
+    </div>
+
     <!-- Build a strategy from pasted (e.g. LLM-written) code. -->
     <button id="new-custom-strategy" type="button" class="new-custom-btn">+ Custom strategy</button>
     <!-- Strategy Library: read-only catalog of the best-known LETF strategies
@@ -203,6 +227,10 @@
   <div class="right-col">
     <div class="panel" style="position:relative;">
       <div id="chart-legend" class="chart-legend"></div>
+      <div id="tax-chart-note" class="tax-note" hidden>
+        Türkiye tax estimate · 2026 GİB rules active across strategies (FIFO + Yİ-ÜFE/FX). Unsold gains are untaxed.
+        <div id="tax-summary" aria-live="polite"></div>
+      </div>
       <div class="chart-container">
         <canvas id="mainChart"></canvas>
         <div id="chart-loading" class="chart-loading">
@@ -1443,23 +1471,24 @@
      returning browsers fetch the new files instead of serving stale cached
      copies (a stale JS file against fresh HTML throws null-element errors).
      Keep this in sync with APP_VERSION in controls.js. -->
-<script src="js/data.js?v=547"></script>
-<script src="js/utils.js?v=547"></script>
-<script src="js/simulate.js?v=547"></script>
-<script src="js/metrics.js?v=547"></script>
-<script src="js/chart.js?v=547"></script>
-<script src="js/controls.js?v=547"></script>
-<script src="js/date-picker.js?v=547"></script>
-<script src="js/transactions.js?v=547"></script>
-<script src="js/analytics.js?v=547"></script>
-<script src="js/years-held-chart.js?v=547"></script>
-<script src="js/years-held.js?v=547"></script>
-<script src="js/preview-dropdown.js?v=547"></script>
-<script src="js/signal-chart.js?v=547"></script>
-<script src="js/saved-configs.js?v=547"></script>
-<script src="js/strategy-library-code.js?v=547"></script>
-<script src="js/strategy-library.js?v=547"></script>
-<script src="js/init.js?v=547"></script>
+<script src="js/data.js?v=548"></script>
+<script src="js/utils.js?v=548"></script>
+<script src="js/tax.js?v=548"></script>
+<script src="js/simulate.js?v=548"></script>
+<script src="js/metrics.js?v=548"></script>
+<script src="js/chart.js?v=548"></script>
+<script src="js/controls.js?v=548"></script>
+<script src="js/date-picker.js?v=548"></script>
+<script src="js/transactions.js?v=548"></script>
+<script src="js/analytics.js?v=548"></script>
+<script src="js/years-held-chart.js?v=548"></script>
+<script src="js/years-held.js?v=548"></script>
+<script src="js/preview-dropdown.js?v=548"></script>
+<script src="js/signal-chart.js?v=548"></script>
+<script src="js/saved-configs.js?v=548"></script>
+<script src="js/strategy-library-code.js?v=548"></script>
+<script src="js/strategy-library.js?v=548"></script>
+<script src="js/init.js?v=548"></script>
 
 </body>
 </html>

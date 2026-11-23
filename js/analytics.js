@@ -1764,7 +1764,8 @@ function analyticsConfigPoints(cfg, initial, monthly, rate, annualRaise, entryId
 // baseline). Cleared implicitly by key changes.
 let _analyticsCodeCache = new Map();
 function analyticsCodeCacheKey(cfg, initial, monthly, annualRaise, entryIdx, exitIdx) {
-  return [cfg.id, cfg.code || '', JSON.stringify(cfg.params || {}), initial, monthly, annualRaise, entryIdx, exitIdx].join('|');
+  const taxKey = typeof taxSettingsKey === 'function' ? taxSettingsKey() : '';
+  return [cfg.id, cfg.code || '', JSON.stringify(cfg.params || {}), initial, monthly, annualRaise, entryIdx, exitIdx, taxKey].join('|');
 }
 // A sandbox run's answer as (date, value) points; [] when the run failed.
 function analyticsCodePoints(msg) {
@@ -1983,7 +1984,7 @@ function getCellSim(startYear, period) {
 
   const smaP = _smaParamsForAnalytics();
   const _ug = _underlyingAndGrowth();
-  const key = JSON.stringify({ initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
+  const key = JSON.stringify({ tax: typeof taxSettingsKey === 'function' ? taxSettingsKey() : '', initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
   if (_cellSimsKey !== key) {
     _cellSims    = new Map();
     _cellSimsKey = key;
@@ -2019,7 +2020,7 @@ function getYearStartSim(startYear) {
 
   const smaP = _smaParamsForAnalytics();
   const _ug = _underlyingAndGrowth();
-  const key = JSON.stringify({ initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
+  const key = JSON.stringify({ tax: typeof taxSettingsKey === 'function' ? taxSettingsKey() : '', initial, monthly, rate, annualRaise, sma: smaP, ul: _ug.sigUlCol, qg: _ug.qGrowth, cd: _ug.crashDropPct, cw: _ug.crashLookbackMonths, sp: _ug.spikeTriggerPct, np: _ug.rebalancePeriod, ch: _ug.cashPct, dp: _ug.contribDeployPct, tc: _ug.targetFromPrevTarget, ncr: _ug.nineSigCashRate, scr: _ug.smaCashRate, nbp: _ug.buyThrottlePct, pa: _ug.parkAsset, srp: _ug.spikeResetPct, ntc: _ug.nineSigTradeCostPct });
   if (_perYearSimsKey !== key) {
     _perYearSims    = new Map();
     _perYearSimsKey = key;
@@ -2291,6 +2292,7 @@ function getSpiralSim(initial, monthly, rate, annualRaise, opts) {
   const smaP = _smaParamsForAnalytics();
   const _ug  = _underlyingAndGrowth();
   const key = JSON.stringify({
+    tax: typeof taxSettingsKey === 'function' ? taxSettingsKey() : '',
     initial, monthly, rate, annualRaise,
     sma: smaP,
     ul: _ug.sigUlCol,

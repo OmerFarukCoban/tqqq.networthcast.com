@@ -5738,7 +5738,7 @@ ${SMA_ENGINE_SOURCE}
       bgGtfoPct: +p.brakePct || 0, bgAsset: p.brakeAsset || "qqq", bgWindow: +p.brakeWindow || 0, tradeCostPct: +p.tradeCost || 0,
       rsiOhWindow: +p.rsiSellWindow || 10, rsiCoolWindow: +p.rsiBuyWindow || 10, rebalanceCheck: "daily",
       confirmBuySteps: +p.confirmBuy || 0, confirmSellSteps: +p.confirmSell || 0, settleDays: +p.settleDays || 0,
-      emitDD: true, sampleWeekly: !!p.weeklyDisplay,
+      emitDD: true, sampleWeekly: !!p.weeklyDisplay, tax: p.tax || { enabled: false },
     });
     return smaResult(r);
 
@@ -5784,9 +5784,9 @@ ${SMA_ENGINE_SOURCE}
         if (e.action === "DCA-ADD") return ["Easing in: another slice of " + String(e.held).toUpperCase(), SIG + " trend"];
         return ["", null];
       };
-      const ACTION = { START: "start", ENTER: "buy", EXIT: "sell", "BG-GTFO": "sell", "BG-CLEAR": "buy", "DCA-ADD": "ease-in", CONTRIB: "contribution", END: "end" };
+      const ACTION = { START: "start", ENTER: "buy", EXIT: "sell", "BG-GTFO": "sell", "BG-CLEAR": "buy", "DCA-ADD": "ease-in", CONTRIB: "contribution", TAX: "tax", END: "end" };
       // Which of a day's events names its row: a sale or buy over easing in, over a deposit.
-      const RANK = { "BG-GTFO": 5, EXIT: 5, ENTER: 4, "BG-CLEAR": 4, "DCA-ADD": 3, CONTRIB: 2, START: 1, END: 1 };
+      const RANK = { "BG-GTFO": 5, EXIT: 5, ENTER: 4, "BG-CLEAR": 4, "DCA-ADD": 3, TAX: 3, CONTRIB: 2, START: 1, END: 1 };
       const HELD = (h) => h === "cash" ? "CASH" : String(h).toUpperCase();
       const events = new Map();
       for (const e of r.smaLog || []) { if (!events.has(e.date)) events.set(e.date, []); events.get(e.date).push(e); }
@@ -5823,7 +5823,7 @@ ${SMA_ENGINE_SOURCE}
         if (rsiBuyLvl > 0) lines.push({ key: "rsiBuy", label: "RSI(" + (+p.rsiBuyWindow || 10) + ")", unit: "num", group: "RSI", priceKey: "signalClose" }, { key: "rsiBuyLevel", label: "Buy under " + rsiBuyLvl, unit: "num", group: "RSI", priceKey: "rsiBuyLevelPx" });
       }
       if (brakeLvl > 0) lines.push({ key: "brakeGauge", label: brakeAsset.toUpperCase() + " vs " + brakeW + "-day average", unit: "%", group: "Bubble brake", priceKey: "brakePrice" }, { key: "brakeLevel", label: "To cash at +" + brakeLvl + "%", unit: "%", group: "Bubble brake", priceKey: "brakeLevelPx" });
-      return { log, holdings: r.ddControls || [], lines, signals: smaSignals() };
+      return { log, holdings: r.ddControls || [], lines, signals: smaSignals(), taxApplied: !!(p.tax && p.tax.enabled), taxPayments: r.taxPayments || [] };
     }
 
     // ---- The dashboard: where each rule stands on the run's last day (as the built-in panel's) ----
@@ -5989,7 +5989,7 @@ ${NINESIG_ENGINE_SOURCE}
       parkAsset: p.parkAsset || "cash", buyThrottlePct: +p.buyPower || 90,
       spikeResetPct: p.spikeTarget == null || p.spikeTarget === "" ? "auto" : String(p.spikeTarget), tradeCostPct: +p.tradeCost || 0,
       sampleQuarterly: p.displayGrain ? (p.displayGrain === "quarterly" && period === "yearly") : (period === "yearly"),
-      sampleWeekly: p.displayGrain === "weekly" && period !== "weekly", skipBH: true,
+      sampleWeekly: p.displayGrain === "weekly" && period !== "weekly", skipBH: true, tax: p.tax || { enabled: false },
     };
     const rp = +p.rebalancePoint || 0;
     if (rp > 0) { const q = buildEnvelopeQData(period, Math.round(rp / 100 * ((PERIOD_DAYS[period] || 63) - 1)), entryDate, exitDate); if (q && q.length >= 2) opts.qData = q; }
@@ -6040,7 +6040,12 @@ ${NINESIG_ENGINE_SOURCE}
         log.push(row);
       }
       // The drawdown the page measured: the fund's shares and the cash after each rebalance, revalued daily.
-      for (const l of r.log || []) holdings.push({ date: l.date, h: { [fundKey]: l.price > 0 ? l.tqqqVal / l.price : 0 }, cash: l.cash });
+      const parkKey = p.parkAsset && p.parkAsset !== "cash" ? String(p.parkAsset) : null;
+      for (const l of r.log || []) {
+        const hh = { [fundKey]: l.price > 0 ? l.tqqqVal / l.price : 0 };
+        if (parkKey && l.parkShares > 0) hh[parkKey] = (hh[parkKey] || 0) + l.parkShares;
+        holdings.push({ date: l.date, h: hh, cash: parkKey ? 0 : l.cash });
+      }
       // The detail run behind the signal chart's zoom: every day, the holding at that day's close against the target.
       if (p.dailyDisplay && holdings.length) {
         const byDate = new Map(log.map(x => [x.date, x])), ctl = holdings;
@@ -6049,13 +6054,15 @@ ${NINESIG_ENGINE_SOURCE}
           const d = data.dates[i];
           while (k + 1 < ctl.length && ctl[k + 1].date <= d) k++;
           if (byDate.has(d)) { lastTarget = byDate.get(d).target; continue; }
-          const sh = ctl[k].h[fundKey], hv = sh * data[fundKey][i];
-          byDate.set(d, { date: d, value: hv + ctl[k].cash, action: "hold", holding: hv, target: lastTarget, cashValue: ctl[k].cash, fundPrice: data[fundKey][i] });
+          const sh = ctl[k].h[fundKey] || 0, hv = sh * data[fundKey][i];
+          const pv = parkKey && parkKey !== fundKey ? (ctl[k].h[parkKey] || 0) * (data[parkKey] ? data[parkKey][i] : 0) : 0;
+          const cv = ctl[k].cash + pv;
+          byDate.set(d, { date: d, value: hv + cv, action: "hold", holding: hv, target: lastTarget, cashValue: cv, fundPrice: data[fundKey][i] });
         }
         log.length = 0; log.push(...[...byDate.values()].sort((a, b) => a.date < b.date ? -1 : 1));
       }
       const lines = [{ key: "holding", label: FUND + " holding" }, { key: "target", label: "Target" }];
-      return { log, holdings, lines, explain: nineSigExplain() };
+      return { log, holdings, lines, explain: nineSigExplain(), taxApplied: !!(p.tax && p.tax.enabled), taxPayments: r.taxPayments || [] };
     }
 
     // ---- "9sig explained": the rules with the current settings (the built-in panel's block) ----

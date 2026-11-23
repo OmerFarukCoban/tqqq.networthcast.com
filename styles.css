@@ -5007,3 +5007,37 @@
   .legend-chip .legend-metric-row { flex-wrap: wrap; justify-content: flex-end; }
   .legend-chip .legend-metric-range { white-space: normal; }
 }
+
+/* Global Türkiye tax estimate toggle & yearly P/L / tax breakdown tables */
+.tax-controls #tax-toggle {
+  width: 100%; padding: 9px 12px; border: 1px solid var(--border, #ddd);
+  border-radius: 7px; background: transparent; color: var(--text, #333);
+  cursor: pointer; font: inherit; text-align: left;
+}
+.tax-controls #tax-toggle[aria-pressed="true"] {
+  border-color: #8676ff; background: rgba(134, 118, 255, .12);
+}
+.tax-controls p, .tax-controls details, .tax-note {
+  font-size: calc(12px * var(--ui-scale)); line-height: 1.5; color: var(--text-muted, #666);
+}
+.tax-controls input[type="number"] {
+  box-sizing: border-box; width: 100%; margin: 4px 0 10px; padding: 6px 8px;
+  border: 1px solid var(--border, #ddd); border-radius: 5px; font: inherit;
+  color: var(--text, #333); background: var(--bg, #fff);
+}
+.tax-controls summary { cursor: pointer; }
+.tax-warn {
+  color: #b45309 !important; background: rgba(245, 158, 11, .12);
+  border: 1px solid rgba(245, 158, 11, .35); border-radius: 5px; padding: 6px 8px; margin: 4px 0 8px;
+}
+.tax-note { margin: 0 0 10px; }
+.tax-detail-copy, .holding-pnl-copy { color: var(--text-muted); font-size: calc(12px * var(--ui-scale)); line-height: 1.5; }
+.tax-table-wrap, .holding-pnl-table-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
+.tax-year-table { min-width: 680px; width: 100%; white-space: nowrap; }
+.holding-pnl-year-table { min-width: 420px; width: 100%; white-space: nowrap; }
+.tax-year-table th, .tax-year-table td,
+.holding-pnl-year-table th, .holding-pnl-year-table td { text-align: right; }
+.tax-year-table th:first-child, .tax-year-table td:first-child,
+.holding-pnl-year-table th:first-child, .holding-pnl-year-table td:first-child { text-align: left; }
+.holding-pnl-total-row td { border-top: 2px solid var(--border, #ddd); background: rgba(128, 128, 128, .06); }
+.pnl-share { font-size: 0.85em; font-weight: 400; color: var(--text-muted); }

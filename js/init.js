@@ -163,6 +163,10 @@
   if (hasAnyParam && typeof migrateSharedLink === 'function') migrateSharedLink(params);
   const urlMap = { i: 'slider-initial', m: 'slider-monthly', a: 'slider-raise', r: 'slider-rate', e: 'slider-entry', x: 'slider-exit' };
   let hasUrlParams = false;
+  for (const [key, id] of Object.entries({ trtax: 'tax-enabled', trfx: 'tax-fx', trppi: 'tax-ppi-growth', trfxg: 'tax-fx-growth' })) {
+    const el = document.getElementById(id);
+    if (el && params.has(key)) { el.value = params.get(key); hasUrlParams = true; }
+  }
   for (const [key, sliderId] of Object.entries(urlMap)) {
     const val = params.get(key);
     if (val !== null) {
@@ -297,6 +301,7 @@
     } catch(e) {}
   }
   window._dualRange.updateUI();
+  if (typeof syncTaxControls === 'function') syncTaxControls();
   // Apply the restored 9sig growth-% to the static "9sig" labels in the
   // analytics modal before first render (e.g. URL ?ng=15 → "15sig").
   if (typeof refresh9sigDisplayLabels === 'function') refresh9sigDisplayLabels();

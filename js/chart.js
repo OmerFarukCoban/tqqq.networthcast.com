@@ -71,6 +71,7 @@ function customActionKind(action) {
   if (/^(end|final)/.test(s)) return 'end';
   if (/^(switch|swap|rotate)/.test(s)) return 'switch';
   if (/^(rebal|trim|adjust)/.test(s)) return 'rebalance';
+  if (/^tax\b/.test(s)) return 'tax';
   if (/^(sell|exit|park)/.test(s)) return 'sell';
   if (/^(buy|enter)/.test(s)) return 'buy';
   if (s.includes('contribution')) return 'contribution';
@@ -882,6 +883,7 @@ function smaLogRowInfo(smaLog, i, ulName) {
   };
   let label;
   switch (l.action) {
+    case 'TAX':      label = 'Tax ' + fmtFull(Math.round(l.tax || 0)); break;
     case 'CONTRIB':  label = '+ ' + fmtFull(Math.round(l.contribAmt || 0)); break;
     case 'DCA-ADD':  label = `Buy more ${held}`; break; // an ease top-up slice
     case 'ENTER':
@@ -893,7 +895,7 @@ function smaLogRowInfo(smaLog, i, ulName) {
   let gain = null;
   // Skip the (%) when the previous row is the SAME day — that's the other leg of
   // a switch (sell then buy), so the gain would span a zero-length interval.
-  if (prev && prev.total > 0 && l.date !== prev.date) {
+  if (l.action !== 'TAX' && prev && prev.total > 0 && l.date !== prev.date) {
     const contrib = (l.invested || 0) - (prev.invested || 0);
     gain = (l.total - prev.total - contrib) / prev.total * 100;
   }
@@ -1320,10 +1322,20 @@ function renderStrategyPanelBody(idx) {
     html += `<div class="strategy-panel-section-label" style="margin-top:14px">Signal chart</div>`
       + buildCustomLinesChartHtml(signal.cfg, signal.lines, signal.log, body.clientWidth, { home: signal.home, holdings: signal.holdings });
   }
-  // 9sig-specific content: log first, then the "explained" rules block
-  // (rules are reference material; the live log is what the user usually
-  // wants to scan after tweaking the controls).
+  const _taxOn = typeof readTaxSettings === 'function' && readTaxSettings().enabled;
+  // 9sig-specific content: yearly holding P/L, annual tax (when on), log, then rules.
   if (idx === 0) {
+    if (_logData && _logData.log && typeof computeNativeAnnualHoldingPnl === 'function' && typeof daily !== 'undefined' && daily) {
+      const _ulK = _logData.sigUlKey || 'tqqq', _pkK = _logData.sigParkKey || 'cash';
+      const _ctl = _logData.log.map(l => {
+        const hh = {};
+        if (l.price > 0 && l.tqqqVal > 0) hh[_ulK] = l.tqqqVal / l.price;
+        if (_pkK !== 'cash' && l.parkShares > 0) hh[_pkK] = (hh[_pkK] || 0) + l.parkShares;
+        return { date: l.date, h: hh, cash: _pkK === 'cash' ? l.cash : 0 };
+      });
+      html += annualHoldingPnlTableHtml(computeNativeAnnualHoldingPnl(_ctl, daily, _taxOn));
+    }
+    if (_taxOn && _logData && typeof taxAnnualTableHtml === 'function') html += taxAnnualTableHtml(_logData.taxPayments);
     html += buildLogTableHtml(_logData);
     html += `<div class="strategy-rules-wrap" style="margin-top:24px">${buildNineSigRulesHtml()}</div>`;
   }
@@ -1342,17 +1354,27 @@ function renderStrategyPanelBody(idx) {
                    : bhKey === 'soxl' ? _logData.soxlPoints
                    : bhKey === 'soxx' ? _logData.soxxPoints
                    :                    _logData.bhPoints;
+    if (bhSeries && bhSeries.length && typeof computeNativeAnnualHoldingPnl === 'function' && typeof daily !== 'undefined' && daily) {
+      const _bhCtl = bhSeries.map(pt => ({ date: pt.date, fund: bhKey, shares: pt.shares || 0, cash: pt.cash || 0 }));
+      html += annualHoldingPnlTableHtml(computeNativeAnnualHoldingPnl(_bhCtl, daily, _taxOn));
+    }
+    if (_taxOn && typeof taxAnnualTableHtml === 'function') html += taxAnnualTableHtml((_logData.bhTaxPayments || {})[bhKey]);
     html += buildBuyHoldLogTableHtml('Buy & Hold Log', _logData.log, bhSeries, bhKey.toUpperCase());
   }
   // Invested Compounded (idx 7): contributions parked in interest-bearing cash.
   if (idx === 7 && _logData && _logData.log) {
+    if (_taxOn && typeof taxAnnualTableHtml === 'function') html += taxAnnualTableHtml(_logData.baselineTaxPayments);
     html += buildSimpleLogTableHtml('Invested Compounded Log', _logData.log,
       (i) => _logData.log[i].investedCompounded,
       (i, m) => i === 0 ? 'Initial' : (m > 0 ? 'Monthly investment' : 'Interest'));
   }
-  // SMA-specific content: live signal dashboard + event-driven transaction log.
+  // SMA-specific content: live signal dashboard, yearly P/L, annual tax, and event log.
   if (idx === 8) {
     html += buildSignalMetricsHtml();
+    if (_logData && _logData.smaControls && typeof computeNativeAnnualHoldingPnl === 'function' && typeof daily !== 'undefined' && daily) {
+      html += annualHoldingPnlTableHtml(computeNativeAnnualHoldingPnl(_logData.smaControls, daily, _taxOn));
+    }
+    if (_taxOn && _logData && typeof taxAnnualTableHtml === 'function') html += taxAnnualTableHtml(_logData.smaTaxPayments);
     if (_logData && _logData.smaLog) html += buildSmaLogTableHtml(_logData.smaLog);
   }
   body.innerHTML = html;
@@ -2448,7 +2470,8 @@ function render() {
     baselineRate: rate,
   };
   const { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, gldPoints, soxlPoints, soxxPoints, totalContributed,
-          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample, gldSample, soxlSample, soxxSample } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
+          samplePoints, bhSample, qqqSample, spySample, qldSample, ssoSample, spxlSample, sqqqSample, gldSample, soxlSample, soxxSample,
+          taxPayments, baselineTaxPayments, bhTaxPayments } = simulate(initial, monthly, nineSigCashRate, simEntryIdx, exitIdx, annualRaise, sigOpts);
   // For each line, the points fed to the chart: the quarter-end snapshots when
   // the run is coarser than the axis (yearly), else the rebalance-grain points.
   // Driven by the SAME sampleQuarterly/sampleWeekly flags passed to simulate()
@@ -2510,7 +2533,7 @@ function render() {
     // weekly resolution on a <10y window, same idea as 9sig's sampleWeekly.
     sampleWeekly: displayGrain === 'weekly',
   };
-  const { smaPoints, smaLog, ddControls: smaDdControls } = simulateSMA(initial, monthly, smaCashRate, simEntryIdx, exitIdx, annualRaise, smaOpts);
+  const { smaPoints, smaLog, ddControls: smaDdControls, taxPayments: smaTaxPayments } = simulateSMA(initial, monthly, smaCashRate, simEntryIdx, exitIdx, annualRaise, smaOpts);
 
   if (log.length < 1) {
     if (chart) { chart.destroy(); chart = null; }
@@ -4219,7 +4242,10 @@ function render() {
   // Stash latest data for the side-panel log tables. Normally this is the
   // canonical base simulation; but when a saved strategy is open for editing the
   // panel describes THAT strategy, so swap in its (separately computed) sim.
-  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, gldPoints, soxlPoints, soxxPoints, smaLog, smaControls: smaDdControls };
+  const _sigUlName = (typeof COL_TO_DAILY_KEY !== 'undefined' && COL_TO_DAILY_KEY[sigUlCol]) || 'tqqq';
+  const _sigParkName = (_sig9Base && _sig9Base.parkAsset ? String(_sig9Base.parkAsset).toLowerCase() : 'cash');
+  _logData = { log, bhPoints, qqqPoints, spyPoints, qldPoints, ssoPoints, spxlPoints, sqqqPoints, gldPoints, soxlPoints, soxxPoints, smaLog, smaControls: smaDdControls,
+    taxPayments, baselineTaxPayments, bhTaxPayments, smaTaxPayments, sigUlKey: _sigUlName, sigParkKey: _sigParkName };
   if (window._editingConfigId && window._editingConfigSim) {
     const cs = window._editingConfigSim;
     _logData = {
@@ -4236,7 +4262,36 @@ function render() {
       soxxPoints: cs.soxxPoints || soxxPoints,
       smaLog:     cs.smaLog     || smaLog,
       smaControls: cs.ddControls || smaDdControls,
+      taxPayments: cs.taxPayments || taxPayments,
+      baselineTaxPayments: cs.baselineTaxPayments || baselineTaxPayments,
+      bhTaxPayments: cs.bhTaxPayments || bhTaxPayments,
+      smaTaxPayments: cs.smaTaxPayments || cs.taxPayments || smaTaxPayments,
+      sigUlKey: cs.sigUlKey || _sigUlName,
+      sigParkKey: cs.sigParkKey || _sigParkName,
     };
+  }
+  const _taxSummaryEl = document.getElementById('tax-summary');
+  if (_taxSummaryEl && typeof readTaxSettings === 'function') {
+    const _ts = readTaxSettings();
+    if (_ts.enabled) {
+      const sumTax = arr => (arr || []).reduce((s, p) => s + (p.taxUSD || 0), 0);
+      const bhK = ((document.getElementById('select-bh-underlying') || {}).value) || 'tqqq';
+      const fmtT = v => '$' + Math.round(v).toLocaleString('en-US');
+      const parts = [];
+      if (typeof getSavedConfigs === 'function') {
+        for (const cfg of getSavedConfigs()) {
+          if (cfg.hidden || cfg.type !== 'custom') continue;
+          const cr = (window._customResults || {})[cfg.id];
+          if (cr && cr.taxApplied === false) parts.push(`${cfg.name}: pre-tax`);
+          else if (cr && cr.taxPayments && cr.taxPayments.length) parts.push(`${cfg.name}: ${fmtT(sumTax(cr.taxPayments))}`);
+        }
+      }
+      parts.push(`B&H ${bhK.toUpperCase()}: ${fmtT(sumTax((bhTaxPayments || {})[bhK]))}`);
+      parts.push(`Cash: ${fmtT(sumTax(baselineTaxPayments))}`);
+      _taxSummaryEl.textContent = 'Estimated cumulative tax paid — ' + parts.join(' · ') + ' (open any strategy panel for its annual tax & yearly P/L tables)';
+    } else {
+      _taxSummaryEl.textContent = '';
+    }
   }
   // The marker plugin reads _logData.smaLog, which is only finalized here —
   // after the chart's update/draw above ran with the PREVIOUS render's data.

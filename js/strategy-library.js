@@ -489,9 +489,10 @@ function slRunCode(code, data, si, ei) {
   // sandboxed run — so this path (a plain `new Function`, not the Worker
   // sandbox) can't quietly fall out of sync with it again.
   const contributions = buildCustomContributions(SL_MONTHLY, 0, entryDate, exitDate, null);
+  const tax = typeof readTaxSettings === 'function' ? readTaxSettings() : { enabled: false };
   const p = {
     initial: SL_START_CAPITAL, monthly: SL_MONTHLY, annualRaise: 0,
-    startIdx: si, endIdx: ei, entryDate, exitDate, contributions,
+    startIdx: si, endIdx: ei, entryDate, exitDate, contributions, tax,
   };
   for (const sp of (mod.params || [])) {
     let v = sp.default;
@@ -499,6 +500,10 @@ function slRunCode(code, data, si, ei) {
     p[sp.id] = v;
   }
   const res = mod.run(data, p);
+  if (tax.enabled && typeof applyTurkeyTaxToCustomRun === 'function') {
+    const taxOut = applyTurkeyTaxToCustomRun(res, data, p, tax, mod.money === 'own');
+    if (taxOut && Array.isArray(taxOut.log)) return taxOut.log;
+  }
   return Array.isArray(res) ? res : (res && res.log);
 }
 
@@ -945,6 +950,7 @@ function buildStrategyLibrary() {
     : '';
   body.innerHTML = `
     <div class="sl-sticky-head">
+      ${(typeof readTaxSettings === 'function' && readTaxSettings().enabled) ? '<p class="tax-note">Türkiye tax estimate is active across all backtested library strategies.</p>' : ''}
       <div class="sl-intro">
         <span class="sl-legend"><i class="sl-leg-strat"></i>strategy <i class="sl-leg-spy"></i>SPY · log · ${span}</span>
         <div class="sl-pager"></div>

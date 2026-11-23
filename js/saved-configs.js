@@ -1281,6 +1281,15 @@ function customWorkerMain() {
       var res = mod.run(DATA, p);
       var rawLog = Array.isArray(res) ? res : (res && Array.isArray(res.log) ? res.log : null);
       if (!rawLog) throw new Error('Your function must return an array of { date, value } (or { log: [...] }).');
+      var taxOut = null;
+      var wantTax = !!(p.tax && p.tax.enabled);
+      if (typeof applyTurkeyTaxToCustomRun === 'function' && (wantTax || msg.answer !== 'values')) {
+        taxOut = applyTurkeyTaxToCustomRun(res, DATA, p, p.tax, mod.money === 'own');
+        if (taxOut && Array.isArray(taxOut.log)) rawLog = taxOut.log;
+        if (taxOut && Array.isArray(taxOut.holdings) && res && !Array.isArray(res)) {
+          res = Object.assign({}, res, { holdings: taxOut.holdings });
+        }
+      }
       // A caller that reads only each row's value asks for that alone
       // (answer: 'values' — the analytics windows' pooled runs). A full-history
       // answer is megabytes of rows, holdings and lines, and the main thread
@@ -1358,6 +1367,9 @@ function customWorkerMain() {
         }
       }
       out = { reqId: msg.reqId, schema: schema, name: mod.name || null, log: log, holdingsDD: holdingsDD, endHoldings: endHoldings, holdings: holdings,
+              taxApplied: taxOut ? taxOut.taxApplied : null,
+              taxPayments: taxOut && Array.isArray(taxOut.taxPayments) ? taxOut.taxPayments : [],
+              annualHoldingPnl: taxOut ? taxOut.annualHoldingPnl : null,
               columns: readColumns(res && res.columns) || readColumns(mod.columns),
               signals: readSignals(res && res.signals),
               lines: readLines(res && res.lines) || readLines(mod.lines),
@@ -1392,11 +1404,12 @@ const _customRunTimers = {}; // cfgId -> { sig, t }
 // A fresh sandbox worker running customWorkerMain: the live line's worker and
 // each of the Fit search's pool (fitPool).
 function newCustomWorker() {
-  // computeDailyMaxDrawdownMulti (js/metrics.js) goes in as its source, so a
-  // strategy's returned holdings are measured as the chart's own lines are.
-  // The widget page loads no metrics.js and shows no drawdown.
+  // computeDailyMaxDrawdownMulti (js/metrics.js) and Türkiye tax / yearly P/L
+  // helpers (js/tax.js) go in as source so every strategy gets honest daily
+  // drawdown, universal tax replay, and strategy-aware yearly holding P/L.
   const dd = typeof computeDailyMaxDrawdownMulti === 'function' ? computeDailyMaxDrawdownMulti.toString() + '\n' : '';
-  const src = dd + '(' + customWorkerMain.toString() + ')()';
+  const tx = typeof turkeyTaxWorkerSource === 'function' ? turkeyTaxWorkerSource() + '\n' : '';
+  const src = dd + tx + '(' + customWorkerMain.toString() + ')()';
   return new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
 }
 function ensureCustomWorker() {
@@ -1433,8 +1446,9 @@ function customSig(cfg, ctx) {
   // the chart switching to its deposits must not re-run it.
   const ownMoney = ((window._customResults || {})[cfg.id] || {}).money === 'own';
   const money = ownMoney ? [] : [ctx.initial, ctx.monthly, ctx.annualRaise];
+  const taxKey = typeof taxSettingsKey === 'function' ? taxSettingsKey() : '';
   return [cfg.code || '', JSON.stringify(cfg.params || {}), ...money,
-    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', ownMoney ? '' : schedKey, ctx.displayGrain || '', customDataStamp(ctx)].join('|');
+    ctx.simEntryIdx, ctx.exitIdx, ctx.entryDateOverride || '', ctx.exitDateOverride || '', ownMoney ? '' : schedKey, ctx.displayGrain || '', taxKey, customDataStamp(ctx)].join('|');
 }
 // --- strategies that bring their own money --------------------------------
 // A custom strategy whose code declares money: "own" decides its own deposits
@@ -1512,8 +1526,9 @@ function computeCustomGlobals(cfg, ctx) {
   // the monthly formula), and the chart's display grain.
   const exactWindow = !!(ctx.entryDateOverride || ctx.exitDateOverride);
   const depositsFromHistory = !!ctx.contribSchedule;
+  const tax = typeof readTaxSettings === 'function' ? readTaxSettings() : { enabled: false };
   return { initial: ctx.initial, monthly: ctx.monthly, annualRaise: ctx.annualRaise, startIdx, endIdx, entryDate, exitDate, contributions, weeklyDisplay,
-    exactWindow, depositsFromHistory, displayGrain: ctx.displayGrain || null };
+    exactWindow, depositsFromHistory, displayGrain: ctx.displayGrain || null, tax };
 }
 // Day-over-day change badge for a custom/library-derived config (see
 // js/chart.js's isLatestDaySelected/prevTradingDayDate on ctx, and
@@ -1664,6 +1679,7 @@ function onCustomWorkerMessage(e) {
   }
   window._customResults[pend.cfgId] = {
     sig: pend.sig, log: msg.log || [], schema: msg.schema || [], holdingsDD: msg.holdingsDD || null, endHoldings: msg.endHoldings || null, holdings: msg.holdings || null,
+    taxApplied: msg.taxApplied != null ? msg.taxApplied : null, taxPayments: msg.taxPayments || [], annualHoldingPnl: msg.annualHoldingPnl || null,
     columns: msg.columns || null, signals: msg.signals || null, lines: msg.lines || null, series: msg.series || null, explain: msg.explain || null,
     name: msg.name || null, error: msg.error || null, money: msg.money || null,
     totalContributed: (typeof msg.totalContributed === 'number') ? msg.totalContributed : null,
@@ -1935,7 +1951,7 @@ function computeConfigSeries(cfg, ctx) {
     };
     ddControls = (r.log || []).map(l => ({ date: l.date, shares: l.price > 0 ? l.tqqqVal / l.price : 0, cash: l.cash }));
     ddKey = UL_KEY[opts.underlyingCol] || 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: '9sig', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints, taxPayments: r.taxPayments, sigUlKey: ddKey, sigParkKey: (opts.parkAsset || 'cash').toLowerCase() };
     const _sigLast = (r.log && r.log.length) ? r.log[r.log.length - 1] : null;
     if (_sigLast && typeof daily !== 'undefined' && daily && daily.length) {
       const _sigShares = _sigLast.price > 0 ? _sigLast.tqqqVal / _sigLast.price : 0;
@@ -1985,7 +2001,7 @@ function computeConfigSeries(cfg, ctx) {
     points = (r.smaPoints || []).map(pt => ({ date: pt.date, value: pt.value }));
     // Full multi-asset holdings per step → honest daily-revalued max drawdown.
     ddMulti = r.ddControls || null;
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'sma', smaLog: r.smaLog, smaPoints: r.smaPoints, ddControls: r.ddControls };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'sma', smaLog: r.smaLog, smaPoints: r.smaPoints, ddControls: r.ddControls, smaTaxPayments: r.taxPayments };
     const _smaCtlLast = (ddMulti && ddMulti.length) ? ddMulti[ddMulti.length - 1] : null;
     if (_smaCtlLast) endState = { h: _smaCtlLast.h, cash: _smaCtlLast.cash };
   } else if (cfg.type === 'bh') {
@@ -2034,7 +2050,7 @@ function computeConfigSeries(cfg, ctx) {
     // (quarterly) points carry — the dense sample rows are value-only.
     ddControls = (rawArr || []).map(pt => ({ date: pt.date, shares: pt.shares, cash: 0 }));
     ddKey = key === 'qqq' ? 'qqq' : key === 'spy' ? 'spy' : key === 'qld' ? 'qld' : key === 'sso' ? 'sso' : key === 'spxl' ? 'spxl' : key === 'sqqq' ? 'sqqq' : key === 'gld' ? 'gld' : key === 'soxl' ? 'soxl' : key === 'soxx' ? 'soxx' : 'tqqq';
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'bh', log: r.log, bhPoints: r.bhPoints, qqqPoints: r.qqqPoints, spyPoints: r.spyPoints, qldPoints: r.qldPoints, ssoPoints: r.ssoPoints, spxlPoints: r.spxlPoints, sqqqPoints: r.sqqqPoints, gldPoints: r.gldPoints, soxlPoints: r.soxlPoints, soxxPoints: r.soxxPoints, bhTaxPayments: r.bhTaxPayments };
     const _bhLast = (rawArr && rawArr.length) ? rawArr[rawArr.length - 1] : null;
     if (_bhLast && _bhLast.shares > 0) endState = { h: { [ddKey]: _bhLast.shares }, cash: 0 };
   } else if (cfg.type === 'invested') {
@@ -2048,7 +2064,7 @@ function computeConfigSeries(cfg, ctx) {
     contributed = r.totalContributed;
     const seriesRows = (displayGrain === 'quarterly' || displayGrain === 'weekly') ? r.samplePoints : (r.log || []);
     points = seriesRows.map(l => ({ date: l.date, value: l.investedCompounded }));
-    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'invested', log: r.log };
+    if (window._editingConfigId === cfg.id) window._editingConfigSim = { type: 'invested', log: r.log, baselineTaxPayments: r.baselineTaxPayments };
     // No day-change badge for Invested Compounded — see ydayFromHoldings'
     // comment above.
   }
@@ -2096,7 +2112,7 @@ function appendConfigDatasets(chart, ctx) {
     const s = computeConfigSeries(cfg, ctx);
     window._configMetrics[cfg.id] = { cagr: s.cagr, maxDD: s.maxDD, start: s.start, end: s.end, ddPeak: s.ddPeak, ddTrough: s.ddTrough };
     chart.data.datasets.push({
-      label: cfg.name,
+      label: typeof taxStrategyLabel === 'function' ? taxStrategyLabel(cfg) : cfg.name,
       data: s.data,
       borderColor: cfg.color,
       backgroundColor: 'transparent',
@@ -3038,7 +3054,7 @@ function buildConfigPillHtml(cfg) {
           </span>
         </span>
         <span class="sc-dot" style="background:${cfg.color}"></span>
-        <span class="sc-name">${esc(cfg.name)}</span>
+        <span class="sc-name">${esc(typeof taxStrategyLabel === 'function' ? taxStrategyLabel(cfg) : cfg.name)}</span>
         ${cfg.type === 'custom' ? `<span class="sc-badge" title="Custom strategy (runs in a sandbox)">ƒ</span>` : ''}
         <div class="sc-actions">
           <button type="button" class="sc-edit" title="Edit in sidebar" aria-label="Edit">
@@ -3831,11 +3847,12 @@ const CUSTOM_LOG_COLS = {
   invested:      { label: 'Invested', tip: "Total money you had put in by this date — the starting amount plus every contribution so far.&#10;&#10;Total minus Invested is your profit." },
   contributed:   { label: 'New $', tip: "New cash added on this row. Blank when nothing went in." },
   fee:           { label: 'Fee', tip: "Trading cost paid on this row's trade, if the strategy models one." },
+  tax:           { label: 'Tax', tip: "Estimated annual Türkiye income tax paid at year-end (USD)." },
 };
 // Left-to-right column order for the known keys; anything else follows in
 // first-seen order.
 const CUSTOM_LOG_ORDER = ['date', 'action', 'note', 'held', 'price', 'shares',
-  'holdingsValue', 'stockVal', 'cash', 'value', 'invested', 'contributed', 'fee'];
+  'holdingsValue', 'stockVal', 'cash', 'value', 'invested', 'contributed', 'fee', 'tax'];
 
 // "Hide monthly contributions" / "Hide ease-in slices" for a custom strategy's
 // log — same pair the SMA log has. Flips a class on the table wrap (CSS drops
@@ -3874,7 +3891,7 @@ function fmtCustomLogCell(k, v, unit) {
     if (/price|sma|ema|median|avg|mean/.test(lk)) return v > 0 ? ((typeof fmtLogPrice === 'function') ? fmtLogPrice(v) : '$' + v.toFixed(2)) : '—';
     if (lk.includes('share') || lk.includes('unit') || lk.includes('qty')) return (typeof fmtLogShares === 'function') ? fmtLogShares(v) : String(+v.toFixed(2));
     if (lk.includes('pct') || lk.includes('percent')) return fmtLogSignedPercent(v);
-    if ((lk.includes('contrib') || lk.includes('deposit') || lk === 'fee') && v === 0) return '';
+    if ((lk.includes('contrib') || lk.includes('deposit') || lk === 'fee' || lk === 'tax') && v === 0) return '';
     return (typeof fmtFull === 'function') ? fmtFull(Math.round(v)) : String(Math.round(v));
   }
   return _escHtml(v);
@@ -3930,7 +3947,7 @@ function buildCustomLogTableHtml(log, columns, lines) {
 
   const kindOf = (r) => (typeof customActionKind === 'function') ? customActionKind(r && r.action) : 'hold';
   const ACT_CLASS = { buy: 'action-buy', sell: 'action-sell', switch: 'action-switch', rebalance: 'action-rebal',
-                      ease: 'action-buy', contribution: 'action-hold', start: 'action-hold', end: 'action-hold', hold: 'action-hold' };
+                      ease: 'action-buy', tax: 'action-sell', contribution: 'action-hold', start: 'action-hold', end: 'action-hold', hold: 'action-hold' };
   // A trade of the strategy's own ("Strategy trades only" keeps it): the kinds the chart marks, the
   // slices of an eased buy, and an opening row that holds a fund. A contribution, a snapshot and the
   // closing row are none of these.
@@ -4141,8 +4158,19 @@ function renderCustomPanelBody(cfgId) {
   // Live signal dashboard (whatever the strategy reported in `signals`), then
   // its own log — with the column labels/tooltips it declared in `columns`.
   const _cLog = (window._customLogs || {})[cfgId] || [];
+  const _cRes = (window._customResults || {})[cfgId] || {};
   html += buildCustomSignalMetricsHtml((window._customSignals || {})[cfgId] || null,
                                        _cLog.length ? _cLog[_cLog.length - 1].date : null);
+  if (typeof annualHoldingPnlTableHtml === 'function' && _cRes.annualHoldingPnl) {
+    html += annualHoldingPnlTableHtml(_cRes.annualHoldingPnl);
+  }
+  if (typeof readTaxSettings === 'function' && readTaxSettings().enabled && typeof taxAnnualTableHtml === 'function') {
+    if (_cRes.taxApplied === false) {
+      html += `<p class="tax-note" style="margin-top:12px">This custom strategy does not emit fund holdings, so its results remain <b>pre-tax</b>.</p>`;
+    } else if (_cRes.taxPayments && _cRes.taxPayments.length) {
+      html += taxAnnualTableHtml(_cRes.taxPayments);
+    }
+  }
   html += buildCustomLogTableHtml(_cLog, (window._customColumns || {})[cfgId] || null, auxLines);
   // Its explanation with the current settings (`explain`), after the log as the 9sig panel had it.
   const explain = (window._customExplain || {})[cfgId];
