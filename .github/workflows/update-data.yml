@@ -3,14 +3,13 @@ name: Update market data
 on:
   schedule:
     # Ten fires, nine runs. GitHub cron is fixed UTC with no daylight-saving, so
-    # 13:31-22:31 UTC covers 09:31-18:31 ET in summer and 08:31-17:31 ET in
-    # winter. The gate step below keeps only 09:00-17:45 ET (extra buffer for
-    # normal GitHub Actions cron jitter), trimming the out-of-hours fire at
-    # whichever end the current offset pushes it to:
-    #   EDT (UTC-4): drops 22:31 UTC (18:31 ET) → runs 09:31 … 17:31 ET
-    #   EST (UTC-5): drops 13:31 UTC (08:31 ET) → runs 09:31 … 17:31 ET
+    # 13:30-22:30 UTC covers 09:30-18:30 ET in summer and 08:30-17:30 ET in
+    # winter. The gate step below keeps only 09:00-17:30 ET, which trims the
+    # one out-of-hours fire at whichever end the current offset pushes it to:
+    #   EDT (UTC-4): drops 22:30 UTC (18:30 ET) → runs 09:30 … 17:30 ET
+    #   EST (UTC-5): drops 13:30 UTC (08:30 ET) → runs 09:30 … 17:30 ET
     # Either way: open, seven hourly, and one after the close.
-    - cron: '31 13-22 * * 1-5'
+    - cron: '30 13-22 * * 1-5'
   workflow_dispatch: {}
 
 permissions:
@@ -33,10 +32,10 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual run — skipping the clock gate."
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif [ "$now" -ge 900 ] && [ "$now" -le 1745 ]; then
+          elif [ "$now" -ge 900 ] && [ "$now" -le 1730 ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "$(TZ=America/New_York date '+%H:%M %Z') is outside 09:00-17:45 ET — skipping."
+            echo "$(TZ=America/New_York date '+%H:%M %Z') is outside 09:00-17:30 ET — skipping."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
