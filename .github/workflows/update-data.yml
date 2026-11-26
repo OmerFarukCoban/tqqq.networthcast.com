@@ -1,15 +1,10 @@
 name: Update market data
 
 on:
-  schedule:
-    # Ten fires, nine runs. GitHub cron is fixed UTC with no daylight-saving, so
-    # 13:30-22:30 UTC covers 09:30-18:30 ET in summer and 08:30-17:30 ET in
-    # winter. The gate step below keeps only 09:00-17:30 ET, which trims the
-    # one out-of-hours fire at whichever end the current offset pushes it to:
-    #   EDT (UTC-4): drops 22:30 UTC (18:30 ET) → runs 09:30 … 17:30 ET
-    #   EST (UTC-5): drops 13:30 UTC (08:30 ET) → runs 09:30 … 17:30 ET
-    # Either way: open, seven hourly, and one after the close.
-    - cron: '30 13-22 * * 1-5'
+  # Native GitHub `schedule` is disabled here because GitHub throttles/delays
+  # scheduled cron queues on new repos. Hourly market-hours refreshes (09:30–17:30
+  # America/New_York, Mon–Fri) are triggered externally via `workflow_dispatch`
+  # (cron-job.org), which starts within seconds and never gets dropped.
   workflow_dispatch: {}
 
 permissions:
